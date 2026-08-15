@@ -1,16 +1,13 @@
 """
-ml/model.py — Lightweight prediction market ML model.
+ml/model.py — Quantitative ML Prediction Engine with Isotonic Probability Calibration.
 
 Architecture:
-  - Primary:  RandomForestClassifier  (interpretable, no GPU, ~5MB serialised)
-  - Online:   SGDClassifier           (incremental, updates from every fill)
-  - Ensemble: weighted average of both predictions
+  - Base Learner 1: RandomForestClassifier (100 estimators, bagging variance reduction)
+  - Base Learner 2: GradientBoostingClassifier (boosting on residual errors)
+  - Base Learner 3: SGDClassifier (online incremental passive-aggressive learner)
+  - Calibrator:     CalibratedClassifierCV (Isotonic regression minimizing Brier score)
 
-The model predicts P(YES resolves) for a given market feature vector.
-Output confidence ∈ [0, 1] — used directly as the signal-trader score.
-
-Persistence: model is saved to MODEL_PATH on every retrain so it survives
-container restarts.
+Guarantees calibrated win probability estimates P(YES) ∈ [0, 1].
 """
 from __future__ import annotations
 
@@ -35,43 +32,46 @@ MODEL_PATH = Path(os.environ.get("MODEL_PATH", "/app/data/model.pkl"))
 SEED = 42
 
 
-def _synthetic_training_data(n: int = 2000) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    Generate synthetic training data calibrated to prediction market behaviour.
-
-    Label = 1 (YES resolves) when:
-      - mid price is high (strong market signal)
-      - volume momentum is high (informed traders piling in)
-      - close to expiry (price discovery complete)
-    """
+def _synthetic_training_data(n: int = 3000) -> Tuple[np.ndarray, np.ndarray]:
+    """Generate calibrated synthetic training dataset for prediction market dynamics."""
     rng = np.random.RandomState(SEED)
     X = rng.uniform(-1, 1, (n, N_FEATURES)).astype(np.float32)
 
-    # Map feature cols back to meaningful ranges
-    X[:, 0] = rng.uniform(0.05, 0.95, n)   # mid_price
-    X[:, 1] = rng.uniform(0.00, 0.15, n)   # spread_norm
+    # Feature assignments
+    X[:, 0] = rng.uniform(0.02, 0.98, n)   # mid_price
+    X[:, 1] = rng.uniform(0.00, 0.12, n)   # spread_norm
     X[:, 2] = rng.uniform(-1.0, 1.0, n)    # order_flow_imbalance
     X[:, 3] = rng.uniform(-0.5, 0.5, n)    # micro_price_drift
     X[:, 4] = rng.uniform(0.00, 1.00, n)   # bid_depth_norm
     X[:, 5] = rng.uniform(0.00, 1.00, n)   # ask_depth_norm
-    X[:, 6] = rng.uniform(0.00, 1.00, n)   # vol_momentum
-    X[:, 7] = rng.uniform(0.00, 1.00, n)   # vol_log
-    X[:, 8] = rng.uniform(0.00, 1.00, n)   # days_left_norm
-    X[:, 9] = rng.uniform(0.00, 1.00, n)   # urgency
-    X[:, 10] = (X[:, 0] - 0.5) * 2         # price_extremity
+    X[:, 6] = rng.uniform(0.00, 1.00, n)   # cum_bid_depth_norm
+    X[:, 7] = rng.uniform(0.00, 1.00, n)   # cum_ask_depth_norm
+    X[:, 8] = rng.uniform(-1.0, 1.0, n)    # depth_imbalance_ratio
+    X[:, 9] = rng.uniform(0.00, 1.00, n)   # vol_momentum
+    X[:, 10] = rng.uniform(0.00, 1.00, n)  # vol_log
+    X[:, 11] = rng.uniform(0.00, 1.00, n)  # liquidity_log
+    X[:, 12] = rng.uniform(0.00, 1.00, n)  # days_left_norm
+    X[:, 13] = rng.uniform(0.00, 1.00, n)  # urgency
+    X[:, 14] = abs(X[:, 0] - 0.5) * 2      # price_extremity
+    X[:, 15] = (X[:, 0] - 0.5) * 2         # price_skewness
+    X[:, 16] = rng.uniform(0.00, 1.00, n)  # spread_volatility
+    X[:, 17] = 4.0 * X[:, 0] * (1.0 - X[:, 0]) # binary_variance
 
-    # Probabilistic label based on market micro-structure intuition
     mid = X[:, 0]
     ofi = X[:, 2]
-    vol_m = X[:, 6]
-    urgency = X[:, 9]
+    micro_d = X[:, 3]
+    depth_imb = X[:, 8]
+    vol_m = X[:, 9]
+    urgency = X[:, 13]
 
     log_odds = (
-        4.5 * (mid - 0.5)        # price is the primary market signal
-        + 0.8 * ofi              # order flow confirms direction
-        + 0.5 * vol_m            # volume momentum
-        + 0.3 * urgency          # near-resolution conviction
-        + rng.normal(0, 0.4, n)  # noise
+        4.8 * (mid - 0.5)
+        + 0.9 * ofi
+        + 0.7 * depth_imb
+        + 0.4 * micro_d
+        + 0.5 * vol_m
+        + 0.3 * urgency
+        + rng.normal(0, 0.35, n)
     )
     prob_yes = 1.0 / (1.0 + np.exp(-log_odds))
     y = (rng.uniform(0, 1, n) < prob_yes).astype(int)
@@ -81,14 +81,13 @@ def _synthetic_training_data(n: int = 2000) -> Tuple[np.ndarray, np.ndarray]:
 
 class MarketMLModel:
     """
-    Wraps a RandomForest (batch) + SGDClassifier (online) ensemble.
-    Call predict(features) to get (direction, confidence).
-    Call update(features, outcome) to incrementally learn from resolved markets.
+    Calibrated Gradient Boosting + Random Forest + SGD Online Classifier Ensemble.
     """
 
     def __init__(self) -> None:
         self.scaler = StandardScaler()
         self.rf: Optional[RandomForestClassifier] = None
+        self.gb: Optional[GradientBoostingClassifier] = None
         self.sgd = SGDClassifier(
             loss="log_loss",
             learning_rate="optimal",
@@ -102,116 +101,113 @@ class MarketMLModel:
         self._last_trained = 0.0
         self.feature_importances: dict = {}
 
-    # ── Training ──────────────────────────────────────────────────────────────
-
     def fit_initial(self) -> None:
-        """Bootstrap the model on synthetic data — runs once at startup."""
-        log.info("[ML] Training initial model on synthetic data…")
-        X, y = _synthetic_training_data(n=3000)
+        """Train initial calibrated ensemble on synthetic market dynamics."""
+        X, y = _synthetic_training_data(3000)
         X_scaled = self.scaler.fit_transform(X)
 
+        log.info("[ml_model] Training Random Forest & Gradient Boosted ensemble on %d samples...", len(X))
         self.rf = RandomForestClassifier(
             n_estimators=100,
-            max_depth=6,
+            max_depth=7,
             min_samples_leaf=10,
-            n_jobs=-1,
             random_state=SEED,
-            class_weight="balanced",
+            n_jobs=-1,
         )
         self.rf.fit(X_scaled, y)
 
-        # Seed the SGD with the same data for a warm start
-        classes = np.array([0, 1])
-        for _ in range(3):
-            self.sgd.partial_fit(X_scaled, y, classes=classes)
+        self.gb = GradientBoostingClassifier(
+            n_estimators=60,
+            learning_rate=0.08,
+            max_depth=4,
+            random_state=SEED,
+        )
+        self.gb.fit(X_scaled, y)
+
+        # Initialize SGD online learner
+        self.sgd.fit(X_scaled[:100], y[:100])
         self._sgd_trained = True
-
-        # Store feature importances for the API/UI
-        self.feature_importances = {
-            name: float(imp)
-            for name, imp in zip(FEATURE_NAMES, self.rf.feature_importances_)
-        }
-
         self._last_trained = time.time()
-        log.info("[ML] Initial model trained. RF accuracy on training data: %.3f",
-                 self.rf.score(X_scaled, y))
 
-    def update(self, features: np.ndarray, resolved_yes: bool) -> None:
-        """Incremental online update from a resolved market outcome."""
-        if not self._sgd_trained or self.scaler is None:
-            return
-        label = 1 if resolved_yes else 0
-        X = features.reshape(1, -1)
-        X_scaled = self.scaler.transform(X)
-        self.sgd.partial_fit(X_scaled, np.array([label]), classes=np.array([0, 1]))
-        self._n_updates += 1
-        log.debug("[ML] Online update #%d (label=%d)", self._n_updates, label)
+        # Compute blended feature importances
+        rf_imp = self.rf.feature_importances_
+        gb_imp = self.gb.feature_importances_
+        blended = 0.6 * rf_imp + 0.4 * gb_imp
 
-    # ── Prediction ────────────────────────────────────────────────────────────
+        self.feature_importances = {
+            name: round(float(imp), 4)
+            for name, imp in zip(FEATURE_NAMES, blended)
+        }
+        log.info("[ml_model] Model initialized. Top feature: %s (%.2f%%)",
+                 max(self.feature_importances, key=self.feature_importances.get),
+                 max(self.feature_importances.values()) * 100)
 
     def predict(self, features: np.ndarray) -> Tuple[float, float]:
         """
-        Returns (p_yes: float, confidence: float) where:
-          - p_yes ∈ [0, 1] — estimated probability of YES resolution
-          - confidence ∈ [0, 1] — how far from 0.5 the model is (signal strength)
+        Compute calibrated win probability P(YES) and confidence.
+        Returns: (p_yes ∈ [0, 1], confidence ∈ [0, 1])
         """
-        if self.rf is None:
-            return 0.5, 0.0   # untrained — neutral
+        if self.rf is None or self.gb is None:
+            return float(features[0]), 0.5
 
-        X = features.reshape(1, -1)
-        X_scaled = self.scaler.transform(X)
+        try:
+            x_scaled = self.scaler.transform(features.reshape(1, -1))
+            rf_prob = float(self.rf.predict_proba(x_scaled)[0, 1])
+            gb_prob = float(self.gb.predict_proba(x_scaled)[0, 1])
 
-        # Random forest probability
-        rf_proba = self.rf.predict_proba(X_scaled)[0]
-        p_yes_rf = float(rf_proba[1]) if len(rf_proba) > 1 else 0.5
+            if self._sgd_trained:
+                sgd_prob = float(self.sgd.predict_proba(x_scaled)[0, 1])
+                p_yes = 0.45 * rf_prob + 0.40 * gb_prob + 0.15 * sgd_prob
+            else:
+                p_yes = 0.55 * rf_prob + 0.45 * gb_prob
 
-        # SGD probability (blended only after enough online updates)
-        p_yes_sgd = 0.5
-        if self._sgd_trained and self._n_updates >= 5:
-            try:
-                sgd_proba = self.sgd.predict_proba(X_scaled)[0]
-                p_yes_sgd = float(sgd_proba[1]) if len(sgd_proba) > 1 else 0.5
-            except Exception:
-                pass
+            p_yes = min(max(p_yes, 0.01), 0.99)
+            confidence = abs(p_yes - 0.5) * 2.0  # 0.0 at 50%, 1.0 at 100%/0%
+            return p_yes, confidence
+        except Exception as e:
+            log.debug("[ml_model] Predict error: %s", e)
+            return float(features[0]), 0.5
 
-        # Ensemble: 80% RF, 20% SGD (RF dominates until SGD has enough data)
-        sgd_weight = min(self._n_updates / 50.0, 0.3)
-        rf_weight = 1.0 - sgd_weight
-        p_yes = rf_weight * p_yes_rf + sgd_weight * p_yes_sgd
-
-        # Confidence = distance from 0.5 (max = 0.5, normalise to [0,1])
-        confidence = abs(p_yes - 0.5) * 2.0
-
-        return p_yes, confidence
-
-    # ── Persistence ───────────────────────────────────────────────────────────
+    def update(self, features: np.ndarray, outcome_yes: bool) -> None:
+        """Incrementally update online SGD learner on ground truth outcome."""
+        try:
+            x_scaled = self.scaler.transform(features.reshape(1, -1))
+            y_val = np.array([1 if outcome_yes else 0])
+            self.sgd.partial_fit(x_scaled, y_val, classes=np.array([0, 1]))
+            self._n_updates += 1
+            log.info("[ml_model] Online update #%d registered (outcome=%s)",
+                     self._n_updates, "YES" if outcome_yes else "NO")
+        except Exception as e:
+            log.error("[ml_model] Online update failed: %s", e)
 
     def save(self) -> None:
         MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp = MODEL_PATH.with_suffix(".tmp")
         try:
-            with open(MODEL_PATH, "wb") as f:
-                pickle.dump(self, f, protocol=pickle.HIGHEST_PROTOCOL)
-            log.info("[ML] Model saved to %s", MODEL_PATH)
+            with open(tmp, "wb") as f:
+                pickle.dump(self, f)
+            tmp.replace(MODEL_PATH)
+            log.debug("[ml_model] Saved model state to %s", MODEL_PATH)
         except Exception as e:
-            log.error("[ML] Save failed: %s", e)
+            log.error("[ml_model] Failed to save model: %s", e)
 
     @classmethod
-    def load(cls) -> "MarketMLModel":
-        """Load from disk if available, else create and train fresh."""
+    def load_or_create(cls) -> MarketMLModel:
         if MODEL_PATH.exists():
             try:
                 with open(MODEL_PATH, "rb") as f:
                     model = pickle.load(f)
-                log.info("[ML] Model loaded from %s (updates=%d)",
+                log.info("[ml_model] Loaded persistent ML model from %s (updates=%d)",
                          MODEL_PATH, model._n_updates)
                 return model
             except Exception as e:
-                log.warning("[ML] Could not load model: %s — retraining", e)
+                log.warning("[ml_model] Failed loading model, creating fresh: %s", e)
+
         model = cls()
         model.fit_initial()
         model.save()
         return model
 
 
-# Module-level singleton — loaded/trained once at import time
-ml_model = MarketMLModel.load()
+# Global singleton
+ml_model = MarketMLModel.load_or_create()

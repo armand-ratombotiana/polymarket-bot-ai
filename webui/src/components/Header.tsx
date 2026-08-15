@@ -1,11 +1,13 @@
-// components/Header.tsx
+// components/Header.tsx — Polymarket Pro Workstation Navigation Bar
 'use client'
 
-import { useState } from 'react'
 import { ConnectionStatus } from '@/hooks/useBot'
-import { getApiUrl } from '@/lib/api'
+
+export type ActiveTab = 'terminal' | 'strategies' | 'copilot' | 'screener'
 
 interface HeaderProps {
+  activeTab: ActiveTab
+  onTabChange: (tab: ActiveTab) => void
   mode: 'paper' | 'live'
   killSwitch: boolean
   dailyPnl: number
@@ -23,7 +25,7 @@ function fmtUptime(s: number) {
   const h = Math.floor(s / 3600)
   const m = Math.floor((s % 3600) / 60)
   const sec = s % 60
-  return `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(sec).padStart(2,'0')}`
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`
 }
 
 function fmtPnl(v: number) {
@@ -31,43 +33,53 @@ function fmtPnl(v: number) {
   return `${sign}$${Math.abs(v).toFixed(2)}`
 }
 
-const ALL_STRATEGIES = [
-  { id: 'market_maker', label: 'Market Maker' },
-  { id: 'arb_scanner', label: 'Arb Scanner' },
-  { id: 'signal_trader', label: 'ML Signal' },
-]
-
 export default function Header({
-  mode, killSwitch, dailyPnl, paperBalance, strategies, status,
-  onKillSwitch, onDeactivate, onCancelAll, onOpenConfig, uptime,
+  activeTab, onTabChange, mode, killSwitch, dailyPnl, paperBalance,
+  strategies, status, onKillSwitch, onDeactivate, onCancelAll, onOpenConfig, uptime,
 }: HeaderProps) {
-  const [toggling, setToggling] = useState<string | null>(null)
-
-  const toggleStrategy = async (stratId: string) => {
-    const isRunning = strategies.includes(stratId)
-    setToggling(stratId)
-    try {
-      const apiUrl = getApiUrl()
-      await fetch(`${apiUrl}/api/strategies/toggle`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ strategy_name: stratId, enabled: !isRunning }),
-      })
-    } catch {}
-    setToggling(null)
-  }
+  const navTabs: Array<{ id: ActiveTab; label: string; icon: string; badge?: string }> = [
+    { id: 'terminal', label: 'Trading Desk', icon: '📊' },
+    { id: 'strategies', label: '50+ Strategies', icon: '⚡', badge: `${strategies.length} active` },
+    { id: 'copilot', label: 'AI Copilot', icon: '🤖' },
+    { id: 'screener', label: 'Screener', icon: '🔍' },
+  ]
 
   return (
-    <header className="h-14 bg-[#111318] border-b border-[#252836] flex items-center px-4 gap-3.5 shrink-0">
+    <header className="h-14 bg-[#111318] border-b border-[#252836] flex items-center px-4 gap-4 shrink-0 select-none">
       {/* Logo */}
-      <div className="flex items-center gap-2 mr-1">
+      <div className="flex items-center gap-2 mr-2">
         <svg width="22" height="22" viewBox="0 0 22 22" fill="none">
-          <circle cx="11" cy="11" r="10" stroke="#3b82f6" strokeWidth="1.5"/>
-          <path d="M7 11h8M11 7v8" stroke="#3b82f6" strokeWidth="1.5" strokeLinecap="round"/>
+          <circle cx="11" cy="11" r="10" stroke="#3b82f6" strokeWidth="1.5" />
+          <path d="M7 11h8M11 7v8" stroke="#3b82f6" strokeWidth="1.5" strokeLinecap="round" />
         </svg>
-        <span className="text-[14px] font-semibold tracking-tight text-[#e8eaf0]">
-          Polymarket<span className="text-blue-400">Bot 2.2</span>
+        <span className="text-[14px] font-bold tracking-tight text-[#e8eaf0]">
+          Polymarket<span className="text-blue-400">Pro 3.0</span>
         </span>
+      </div>
+
+      {/* Navigation Tabs */}
+      <div className="flex items-center gap-1 bg-[#161822] p-1 rounded-lg border border-[#252836]">
+        {navTabs.map((t) => (
+          <button
+            key={t.id}
+            onClick={() => onTabChange(t.id)}
+            className={`px-3 py-1 rounded text-xs font-semibold flex items-center gap-1.5 transition-all ${
+              activeTab === t.id
+                ? 'bg-blue-500 text-black shadow-sm'
+                : 'text-[#8b91a8] hover:text-[#e8eaf0] hover:bg-[#252836]'
+            }`}
+          >
+            <span>{t.icon}</span>
+            <span>{t.label}</span>
+            {t.badge && (
+              <span className={`text-[9px] px-1 py-0.2 rounded font-mono ${
+                activeTab === t.id ? 'bg-black/20 text-black' : 'bg-blue-500/20 text-blue-400'
+              }`}>
+                {t.badge}
+              </span>
+            )}
+          </button>
+        ))}
       </div>
 
       {/* Mode badge */}
@@ -76,7 +88,7 @@ export default function Header({
       </span>
 
       {/* Connection status */}
-      <div className="flex items-center gap-1.5 text-[11px] text-[#8b91a8]">
+      <div className="hidden sm:flex items-center gap-1.5 text-[11px] text-[#8b91a8]">
         <span
           className="status-dot"
           style={{
@@ -86,34 +98,11 @@ export default function Header({
         {status}
       </div>
 
-      {/* Interactive Strategy Toggles */}
-      <div className="hidden lg:flex items-center gap-1.5 ml-2">
-        {ALL_STRATEGIES.map((s) => {
-          const active = strategies.includes(s.id)
-          return (
-            <button
-              key={s.id}
-              onClick={() => toggleStrategy(s.id)}
-              disabled={toggling === s.id}
-              className={`text-[10px] uppercase font-semibold px-2.5 py-1 rounded transition-all flex items-center gap-1 border ${
-                active
-                  ? 'bg-blue-500/20 text-blue-400 border-blue-500/40 hover:bg-blue-500/30'
-                  : 'bg-[#1e2130]/50 text-[#606780] border-[#252836] hover:text-[#8b91a8]'
-              }`}
-              title={`Click to ${active ? 'pause' : 'start'} ${s.label}`}
-            >
-              <span className={`w-1.5 h-1.5 rounded-full ${active ? 'bg-blue-400 animate-pulse' : 'bg-[#4a5068]'}`} />
-              {s.label}
-            </button>
-          )
-        })}
-      </div>
-
       <div className="flex-1" />
 
       {/* Paper balance */}
       {paperBalance !== null && (
-        <div className="text-[12px]">
+        <div className="text-[12px] hidden md:block">
           <span className="text-[#4a5068]">Balance </span>
           <span className="mono font-medium text-cyan-400">
             ${paperBalance.toLocaleString('en', { minimumFractionDigits: 2 })}
@@ -130,7 +119,7 @@ export default function Header({
       </div>
 
       {/* Uptime */}
-      <div className="hidden md:block text-[11px] text-[#4a5068] mono">
+      <div className="hidden lg:block text-[11px] text-[#4a5068] mono">
         {fmtUptime(uptime)}
       </div>
 

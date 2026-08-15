@@ -1,20 +1,31 @@
 """
-ml/features.py — Quantitative Feature Engineering for Prediction Markets.
+ml/features.py — 24-Feature Quantitative Microstructure Pipeline for Prediction Markets.
 
-Extracts fixed-length feature vectors from market metadata and live OrderBook:
+Extracts fixed-length, numerical feature vectors from market state and OrderBook:
   1. Mid Price
   2. Relative Spread
   3. Order Flow Imbalance (OFI): (BidDepth - AskDepth) / (BidDepth + AskDepth)
-  4. Micro-Price Drift: (MicroPrice - Mid)
-  5. Best Bid Depth (Normalized)
-  6. Best Ask Depth (Normalized)
-  7. 24h Volume Momentum
-  8. Log10 Volume
-  9. Days Left to Expiry
- 10. Resolution Urgency (1 / (days + 1))
- 11. Price Extremity (|Mid - 0.5| * 2)
- 12. Time of Day Sin
- 13. Time of Day Cos
+  4. Micro-Price Drift: (MicroPrice - Mid) * 20
+  5. Top-of-Book Bid Depth (Normalized)
+  6. Top-of-Book Ask Depth (Normalized)
+  7. Cumulative 5-level Bid Depth (Normalized)
+  8. Cumulative 5-level Ask Depth (Normalized)
+  9. Depth Imbalance Ratio (5-level)
+ 10. 24h Volume Momentum
+ 11. Log10 24h Volume
+ 12. Total Market Liquidity (Log10)
+ 13. Days to Expiry (Normalized)
+ 14. Resolution Urgency (1 / (Days + 1))
+ 15. Price Extremity (|Mid - 0.5| * 2)
+ 16. Price Skewness (Mid - 0.5)
+ 17. Bid-Ask Spread Volatility Estimate
+ 18. Implied Outcome Volatility (Mid * (1 - Mid))
+ 19. Time of Day Sin (UTC)
+ 20. Time of Day Cos (UTC)
+ 21. Day of Week Sin
+ 22. Day of Week Cos
+ 23. Market Competitiveness Score
+ 24. Spread Compression Velocity
 """
 from __future__ import annotations
 
@@ -33,13 +44,24 @@ FEATURE_NAMES = [
     "micro_price_drift",
     "bid_depth_norm",
     "ask_depth_norm",
+    "cum_bid_depth_norm",
+    "cum_ask_depth_norm",
+    "depth_imbalance_ratio",
     "vol_momentum",
     "vol_log",
+    "liquidity_log",
     "days_left_norm",
     "urgency",
     "price_extremity",
+    "price_skewness",
+    "spread_volatility",
+    "binary_variance",
     "hour_sin",
     "hour_cos",
+    "day_sin",
+    "day_cos",
+    "competitiveness",
+    "spread_compression",
 ]
 
 N_FEATURES = len(FEATURE_NAMES)
@@ -47,53 +69,75 @@ N_FEATURES = len(FEATURE_NAMES)
 
 def extract_features(market: dict, book: OrderBook) -> Optional[np.ndarray]:
     """
-    Return float32 feature vector of length N_FEATURES, or None if insufficient book depth.
+    Extract 24-dimensional normalized float32 feature array.
+    Returns None if mid price is invalid or book is empty.
     """
     mid = book.mid
-    if mid is None or mid <= 0 or mid >= 1:
+    if mid is None or mid <= 0.001 or mid >= 0.999:
         return None
 
-    spread = book.spread or 0.0
+    spread = book.spread or 0.01
     best_bid_p = book.best_bid or mid
     best_ask_p = book.best_ask or mid
     best_bid_sz = book.bids[0].size if book.bids else 0.0
     best_ask_sz = book.asks[0].size if book.asks else 0.0
 
-    # 1. Order Flow Imbalance (OFI) ∈ [-1, 1]
-    total_depth = best_bid_sz + best_ask_sz
-    ofi = (best_bid_sz - best_ask_sz) / max(total_depth, 1.0)
+    # 1. Top-of-book Order Flow Imbalance (OFI)
+    top_depth = best_bid_sz + best_ask_sz
+    ofi = (best_bid_sz - best_ask_sz) / max(top_depth, 1.0)
 
-    # 2. Micro-Price & Drift
-    if total_depth > 0:
-        micro_price = (best_bid_p * best_ask_sz + best_ask_p * best_bid_sz) / total_depth
+    # 2. Micro-Price
+    if top_depth > 0:
+        micro_price = (best_bid_p * best_ask_sz + best_ask_p * best_bid_sz) / top_depth
     else:
         micro_price = mid
     micro_drift = np.clip((micro_price - mid) * 20.0, -1.0, 1.0)
 
-    # 3. Volume Metrics
-    vol_24h = float(market.get("volume24hr") or 0.0)
-    vol_total = float(market.get("volume") or 0.0)
-    weekly_avg = vol_total / 7.0 if vol_total > 0 else 1.0
-    vol_momentum = min(vol_24h / max(weekly_avg, 1.0), 3.0) / 3.0
-    vol_log = min(math.log10(vol_24h + 1) / 7.0, 1.0)
+    # 3. 5-Level Cumulative Depth
+    cum_bid = sum(b.size for b in book.bids[:5])
+    cum_ask = sum(a.size for a in book.asks[:5])
+    total_5lvl = cum_bid + cum_ask
+    depth_imbalance_5lvl = (cum_bid - cum_ask) / max(total_5lvl, 1.0)
 
-    # 4. Time to Expiry
-    days_left = _days_to_expiry(market)
-    days_left_norm = min(days_left / 365.0, 1.0)
-    urgency = 1.0 / (days_left + 1.0)
-
-    # 5. Price Extremity
-    price_extremity = abs(mid - 0.5) * 2.0
-
-    # 6. Depth Normalization
+    cum_bid_norm = min(cum_bid / 25_000.0, 1.0)
+    cum_ask_norm = min(cum_ask / 25_000.0, 1.0)
     bid_depth_norm = min(best_bid_sz / 5_000.0, 1.0)
     ask_depth_norm = min(best_ask_sz / 5_000.0, 1.0)
 
-    # 7. Time of Day Cycle
+    # 4. Volume & Liquidity Metrics
+    vol_24h = float(market.get("volume24hr") or 0.0)
+    vol_total = float(market.get("volume") or 0.0)
+    liquidity = float(market.get("liquidity") or market.get("liquidityNum") or 0.0)
+    weekly_avg = vol_total / 7.0 if vol_total > 0 else 1.0
+
+    vol_momentum = min(vol_24h / max(weekly_avg, 1.0), 3.0) / 3.0
+    vol_log = min(math.log10(vol_24h + 1.0) / 7.0, 1.0)
+    liq_log = min(math.log10(liquidity + 1.0) / 7.0, 1.0)
+
+    # 5. Expiry & Urgency
+    days_left = _days_to_expiry(market)
+    days_left_norm = min(days_left / 365.0, 1.0)
+    urgency = min(1.0 / (days_left + 1.0), 1.0)
+
+    # 6. Price Extremity & Binary Variance
+    price_extremity = abs(mid - 0.5) * 2.0
+    price_skewness = (mid - 0.5) * 2.0
+    binary_variance = 4.0 * mid * (1.0 - mid)  # Maximum 1.0 at mid=0.5
+    spread_volatility = min(spread * 10.0, 1.0)
+
+    # 7. Cyclical Time Features (UTC)
     now = datetime.datetime.now(datetime.timezone.utc)
     hour_frac = (now.hour + now.minute / 60.0) / 24.0
     hour_sin = math.sin(2 * math.pi * hour_frac)
     hour_cos = math.cos(2 * math.pi * hour_frac)
+
+    day_frac = now.weekday() / 7.0
+    day_sin = math.sin(2 * math.pi * day_frac)
+    day_cos = math.cos(2 * math.pi * day_frac)
+
+    # 8. Competitiveness & Spread Compression
+    competitiveness = float(market.get("competitive") or 0.9)
+    spread_compression = max(0.0, 1.0 - (spread / 0.05))
 
     vec = np.array([
         float(mid),
@@ -102,13 +146,24 @@ def extract_features(market: dict, book: OrderBook) -> Optional[np.ndarray]:
         float(micro_drift),
         float(bid_depth_norm),
         float(ask_depth_norm),
+        float(cum_bid_norm),
+        float(cum_ask_norm),
+        float(depth_imbalance_5lvl),
         float(vol_momentum),
         float(vol_log),
+        float(liq_log),
         float(days_left_norm),
-        float(min(urgency, 1.0)),
+        float(urgency),
         float(price_extremity),
+        float(price_skewness),
+        float(spread_volatility),
+        float(binary_variance),
         float(hour_sin),
         float(hour_cos),
+        float(day_sin),
+        float(day_cos),
+        float(competitiveness),
+        float(spread_compression),
     ], dtype=np.float32)
 
     return np.nan_to_num(vec, nan=0.0, posinf=1.0, neginf=-1.0)
