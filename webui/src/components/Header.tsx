@@ -15,6 +15,7 @@ interface HeaderProps {
   onKillSwitch: () => void
   onDeactivate: () => void
   onCancelAll: () => void
+  onOpenConfig?: () => void
   uptime: number
 }
 
@@ -38,7 +39,7 @@ const ALL_STRATEGIES = [
 
 export default function Header({
   mode, killSwitch, dailyPnl, paperBalance, strategies, status,
-  onKillSwitch, onDeactivate, onCancelAll, uptime,
+  onKillSwitch, onDeactivate, onCancelAll, onOpenConfig, uptime,
 }: HeaderProps) {
   const [toggling, setToggling] = useState<string | null>(null)
 
@@ -57,15 +58,15 @@ export default function Header({
   }
 
   return (
-    <header className="h-14 bg-[#111318] border-b border-[#252836] flex items-center px-4 gap-4 shrink-0">
+    <header className="h-14 bg-[#111318] border-b border-[#252836] flex items-center px-4 gap-3.5 shrink-0">
       {/* Logo */}
-      <div className="flex items-center gap-2 mr-2">
+      <div className="flex items-center gap-2 mr-1">
         <svg width="22" height="22" viewBox="0 0 22 22" fill="none">
           <circle cx="11" cy="11" r="10" stroke="#3b82f6" strokeWidth="1.5"/>
           <path d="M7 11h8M11 7v8" stroke="#3b82f6" strokeWidth="1.5" strokeLinecap="round"/>
         </svg>
         <span className="text-[14px] font-semibold tracking-tight text-[#e8eaf0]">
-          Polymarket<span className="text-blue-400">Bot 2.1</span>
+          Polymarket<span className="text-blue-400">Bot 2.2</span>
         </span>
       </div>
 
@@ -87,7 +88,7 @@ export default function Header({
 
       {/* Interactive Strategy Toggles */}
       <div className="hidden lg:flex items-center gap-1.5 ml-2">
-        {ALL_STRATEGIES.map(s => {
+        {ALL_STRATEGIES.map((s) => {
           const active = strategies.includes(s.id)
           return (
             <button
@@ -135,24 +136,33 @@ export default function Header({
 
       {/* Actions */}
       <div className="flex items-center gap-2">
+        {onOpenConfig && (
+          <button
+            onClick={onOpenConfig}
+            className="btn btn-ghost text-blue-400 hover:text-blue-300 border-blue-900/50 hover:border-blue-700 text-xs px-2.5 py-1.5"
+            title="Configure Strategy & Risk Parameters"
+          >
+            ⚙️ Config
+          </button>
+        )}
         <button
           onClick={onCancelAll}
-          className="btn btn-ghost text-amber-400 hover:text-amber-300 border-amber-900/50 hover:border-amber-700"
+          className="btn btn-ghost text-amber-400 hover:text-amber-300 border-amber-900/50 hover:border-amber-700 text-xs px-2.5 py-1.5"
         >
           ✕ Cancel Orders
         </button>
         {killSwitch ? (
-          <button onClick={onDeactivate} className="btn btn-success">
+          <button onClick={onDeactivate} className="btn btn-success text-xs px-3 py-1.5">
             ▶ Resume
           </button>
         ) : (
-          <button onClick={onKillSwitch} className="btn btn-danger">
+          <button onClick={onKillSwitch} className="btn btn-danger text-xs px-3 py-1.5">
             🛑 Kill Switch
           </button>
         )}
       </div>
 
-      {/* Kill switch pulse header line */}
+      {/* Kill switch indicator line */}
       {killSwitch && (
         <div className="absolute top-0 left-0 right-0 h-0.5 bg-red-500 animate-pulse" />
       )}

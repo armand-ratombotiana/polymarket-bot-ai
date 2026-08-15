@@ -1,14 +1,22 @@
 """
-core/data_store.py — In-memory state store for order books, positions, orders, and P&L.
-Thread-safe via asyncio locks.
+core/data_store.py — In-memory state store with atomic disk persistence.
+Thread-safe via asyncio locks. Tracks books, orders, positions, trades, events, and equity curve.
 """
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
+import os
 import time
-from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from dataclasses import asdict, dataclass, field
 from enum import Enum
+from pathlib import Path
+from typing import Dict, List, Optional
+
+log = logging.getLogger(__name__)
+
+STATE_FILE = Path(os.environ.get("STORE_STATE_PATH", "/app/data/store_state.json"))
 
 
 class Side(str, Enum):
@@ -109,7 +117,7 @@ class Trade:
 
 
 class DataStore:
-    """Central in-memory state store shared across all modules."""
+    """Central state store shared across all modules with disk persistence."""
 
     def __init__(self) -> None:
         self._lock = asyncio.Lock()
@@ -128,7 +136,13 @@ class DataStore:
         # Trades & P&L
         self.trades: List[Trade] = []
         self.daily_pnl: float = 0.0
+        self.peak_equity: float = 10000.0
         self.session_start: float = time.time()
+
+        # Equity curve time-series (timestamp, equity, pnl)
+        self.equity_history: List[Dict[str, float]] = [
+            {"timestamp": time.time(), "equity": 10000.0, "pnl": 0.0}
+        ]
 
         # Risk
         self.kill_switch_active: bool = False
@@ -190,7 +204,7 @@ class DataStore:
             p = self.positions.get(token_id)
             return p.current_exposure if p else 0.0
 
-    # ── Positions ────────────────────────────────────────────────────────
+    # ── Positions & Trades ───────────────────────────────────────────────
 
     async def record_fill(self, trade: Trade) -> None:
         async with self._lock:
@@ -216,6 +230,17 @@ class DataStore:
                 pos.total_invested = max(0.0, pos.total_invested - revenue)
                 pos.realised_pnl += trade.pnl
 
+            # Record point in equity history
+            current_eq = 10000.0 + self.daily_pnl
+            self.peak_equity = max(self.peak_equity, current_eq)
+            self.equity_history.append({
+                "timestamp": time.time(),
+                "equity": round(current_eq, 2),
+                "pnl": round(self.daily_pnl, 2),
+            })
+            if len(self.equity_history) > 300:
+                self.equity_history = self.equity_history[-300:]
+
     # ── Event Log ────────────────────────────────────────────────────────
 
     async def log_event(self, msg: str) -> None:
@@ -230,6 +255,91 @@ class DataStore:
         async with self._lock:
             return list(self.event_log[-n:])
 
+    # ── Disk Persistence ─────────────────────────────────────────────────
+
+    def save_to_disk(self) -> None:
+        """Atomic write of portfolio state and equity history to disk."""
+        STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp_file = STATE_FILE.with_suffix(".tmp")
+        try:
+            data = {
+                "daily_pnl": self.daily_pnl,
+                "peak_equity": self.peak_equity,
+                "equity_history": self.equity_history,
+                "positions": {
+                    tid: {
+                        "token_id": p.token_id,
+                        "market_slug": p.market_slug,
+                        "yes_shares": p.yes_shares,
+                        "avg_entry_price": p.avg_entry_price,
+                        "total_invested": p.total_invested,
+                        "realised_pnl": p.realised_pnl,
+                    }
+                    for tid, p in self.positions.items()
+                },
+                "trades": [
+                    {
+                        "trade_id": t.trade_id,
+                        "token_id": t.token_id,
+                        "side": t.side.value,
+                        "price": t.price,
+                        "size": t.size,
+                        "pnl": t.pnl,
+                        "strategy": t.strategy,
+                        "paper": t.paper,
+                        "timestamp": t.timestamp,
+                    }
+                    for t in self.trades[-100:]
+                ],
+            }
+            with open(tmp_file, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+            tmp_file.replace(STATE_FILE)
+            log.debug("Saved DataStore state to %s", STATE_FILE)
+        except Exception as e:
+            log.error("Failed to save DataStore state: %s", e)
+
+    def load_from_disk(self) -> None:
+        """Load persistent state on boot if present."""
+        if not STATE_FILE.exists():
+            return
+        try:
+            with open(STATE_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            self.daily_pnl = float(data.get("daily_pnl", 0.0))
+            self.peak_equity = float(data.get("peak_equity", 10000.0))
+            self.equity_history = data.get("equity_history", self.equity_history)
+
+            raw_pos = data.get("positions", {})
+            for tid, pdict in raw_pos.items():
+                self.positions[tid] = Position(
+                    token_id=tid,
+                    market_slug=pdict.get("market_slug", ""),
+                    yes_shares=float(pdict.get("yes_shares", 0.0)),
+                    avg_entry_price=float(pdict.get("avg_entry_price", 0.0)),
+                    total_invested=float(pdict.get("total_invested", 0.0)),
+                    realised_pnl=float(pdict.get("realised_pnl", 0.0)),
+                )
+
+            raw_trades = data.get("trades", [])
+            for tdict in raw_trades:
+                self.trades.append(Trade(
+                    trade_id=tdict["trade_id"],
+                    token_id=tdict["token_id"],
+                    side=Side.BUY if tdict["side"].upper() == "BUY" else Side.SELL,
+                    price=float(tdict["price"]),
+                    size=float(tdict["size"]),
+                    pnl=float(tdict.get("pnl", 0.0)),
+                    strategy=tdict.get("strategy", ""),
+                    paper=tdict.get("paper", True),
+                    timestamp=float(tdict.get("timestamp", time.time())),
+                ))
+            log.info("Loaded DataStore state from disk: daily_pnl=$%.2f, %d positions, %d trades",
+                     self.daily_pnl, len(self.positions), len(self.trades))
+        except Exception as e:
+            log.warning("Could not load DataStore state from %s: %s", STATE_FILE, e)
+
 
 # Global singleton
 store = DataStore()
+store.load_from_disk()

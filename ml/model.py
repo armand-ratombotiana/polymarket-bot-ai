@@ -50,21 +50,28 @@ def _synthetic_training_data(n: int = 2000) -> Tuple[np.ndarray, np.ndarray]:
     # Map feature cols back to meaningful ranges
     X[:, 0] = rng.uniform(0.05, 0.95, n)   # mid_price
     X[:, 1] = rng.uniform(0.00, 0.15, n)   # spread_norm
-    X[:, 4] = rng.uniform(0.00, 1.00, n)   # vol_momentum
-    X[:, 6] = rng.uniform(0.00, 1.00, n)   # days_left_norm
-    X[:, 7] = rng.uniform(0.00, 1.00, n)   # urgency
-    X[:, 8] = (X[:, 0] - 0.5) * 2          # price_extremity
+    X[:, 2] = rng.uniform(-1.0, 1.0, n)    # order_flow_imbalance
+    X[:, 3] = rng.uniform(-0.5, 0.5, n)    # micro_price_drift
+    X[:, 4] = rng.uniform(0.00, 1.00, n)   # bid_depth_norm
+    X[:, 5] = rng.uniform(0.00, 1.00, n)   # ask_depth_norm
+    X[:, 6] = rng.uniform(0.00, 1.00, n)   # vol_momentum
+    X[:, 7] = rng.uniform(0.00, 1.00, n)   # vol_log
+    X[:, 8] = rng.uniform(0.00, 1.00, n)   # days_left_norm
+    X[:, 9] = rng.uniform(0.00, 1.00, n)   # urgency
+    X[:, 10] = (X[:, 0] - 0.5) * 2         # price_extremity
 
     # Probabilistic label based on market micro-structure intuition
     mid = X[:, 0]
-    vol_m = X[:, 4]
-    urgency = X[:, 7]
+    ofi = X[:, 2]
+    vol_m = X[:, 6]
+    urgency = X[:, 9]
 
     log_odds = (
-        4.0 * (mid - 0.5)        # price is the strongest signal
-        + 0.5 * vol_m             # volume confirms direction
-        + 0.3 * urgency           # urgency: near-resolution = higher conviction
-        + rng.normal(0, 0.5, n)  # noise
+        4.5 * (mid - 0.5)        # price is the primary market signal
+        + 0.8 * ofi              # order flow confirms direction
+        + 0.5 * vol_m            # volume momentum
+        + 0.3 * urgency          # near-resolution conviction
+        + rng.normal(0, 0.4, n)  # noise
     )
     prob_yes = 1.0 / (1.0 + np.exp(-log_odds))
     y = (rng.uniform(0, 1, n) < prob_yes).astype(int)

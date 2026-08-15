@@ -1,4 +1,4 @@
-// app/page.tsx — Main Dashboard (with Strategy Controls, ML & Analytics)
+// app/page.tsx — Main Dashboard (with Strategy Controls, ML, Depth Chart, and Equity Curve)
 'use client'
 
 import { useEffect, useState } from 'react'
@@ -11,11 +11,18 @@ import TradesPanel from '@/components/TradesPanel'
 import EventLog from '@/components/EventLog'
 import MLPanel from '@/components/MLPanel'
 import AnalyticsPanel from '@/components/AnalyticsPanel'
+import EquityCurve from '@/components/EquityCurve'
+import DepthChartModal from '@/components/DepthChartModal'
+import StrategyConfigModal from '@/components/StrategyConfigModal'
 
 export default function Dashboard() {
   const { snapshot, status, activateKillSwitch, deactivateKillSwitch, cancelAllOrders, cancelOrder } = useBot()
   const [uptime, setUptime] = useState(0)
   const [startTime] = useState(Date.now())
+
+  // Modal States
+  const [selectedMarket, setSelectedMarket] = useState<{ tokenId: string; slug: string } | null>(null)
+  const [configOpen, setConfigOpen] = useState(false)
 
   useEffect(() => {
     const t = setInterval(() => setUptime(Math.floor((Date.now() - startTime) / 1000)), 1000)
@@ -25,7 +32,7 @@ export default function Dashboard() {
   const isKilled = snapshot.kill_switch
 
   return (
-    <div className="flex flex-col h-screen overflow-hidden relative">
+    <div className="flex flex-col h-screen overflow-hidden relative bg-[#0b0c10]">
       {isKilled && (
         <div className="bg-red-600/90 text-white text-center text-xs font-semibold py-1.5 tracking-wide animate-pulse z-50">
           🛑 KILL SWITCH ACTIVE — All trading halted. Click Resume to re-enable.
@@ -42,10 +49,11 @@ export default function Dashboard() {
         onKillSwitch={activateKillSwitch}
         onDeactivate={deactivateKillSwitch}
         onCancelAll={cancelAllOrders}
+        onOpenConfig={() => setConfigOpen(true)}
         uptime={uptime}
       />
 
-      {/* 3-column, 2-row grid */}
+      {/* 3-column, 2-row grid layout */}
       <div
         className="flex-1 overflow-hidden p-3 grid gap-3"
         style={{
@@ -58,7 +66,10 @@ export default function Dashboard() {
         }}
       >
         <div style={{ gridArea: 'markets' }} className="min-h-0">
-          <MarketsPanel books={snapshot.order_books} />
+          <MarketsPanel
+            books={snapshot.order_books}
+            onSelectMarket={(tokenId, slug) => setSelectedMarket({ tokenId, slug })}
+          />
         </div>
 
         <div style={{ gridArea: 'positions' }} className="min-h-0 flex flex-col gap-3">
@@ -78,12 +89,28 @@ export default function Dashboard() {
           <EventLog events={snapshot.events} />
         </div>
 
-        {/* Right sidebar: Analytics + ML panels */}
+        {/* Right sidebar: Equity Curve + Analytics + ML Panel */}
         <div style={{ gridArea: 'sidebar' }} className="min-h-0 overflow-auto scrollbar-thin flex flex-col gap-3">
+          <EquityCurve />
           <AnalyticsPanel />
           <MLPanel />
         </div>
       </div>
+
+      {/* Depth Chart & Quick Trade Modal */}
+      {selectedMarket && (
+        <DepthChartModal
+          tokenId={selectedMarket.tokenId}
+          slug={selectedMarket.slug}
+          onClose={() => setSelectedMarket(null)}
+        />
+      )}
+
+      {/* Strategy Configuration Modal */}
+      <StrategyConfigModal
+        isOpen={configOpen}
+        onClose={() => setConfigOpen(false)}
+      />
 
       {/* Disconnected overlay (only if completely no data received) */}
       {(status === 'disconnected' || status === 'error') && snapshot.order_books.length === 0 && (

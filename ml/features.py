@@ -1,8 +1,20 @@
 """
-ml/features.py — Feature engineering for the prediction market ML model.
+ml/features.py — Quantitative Feature Engineering for Prediction Markets.
 
-Extracts a fixed-length feature vector from a Gamma market dict + live OrderBook.
-All features are normalised to [0, 1] or [-1, 1] to work well with linear models.
+Extracts fixed-length feature vectors from market metadata and live OrderBook:
+  1. Mid Price
+  2. Relative Spread
+  3. Order Flow Imbalance (OFI): (BidDepth - AskDepth) / (BidDepth + AskDepth)
+  4. Micro-Price Drift: (MicroPrice - Mid)
+  5. Best Bid Depth (Normalized)
+  6. Best Ask Depth (Normalized)
+  7. 24h Volume Momentum
+  8. Log10 Volume
+  9. Days Left to Expiry
+ 10. Resolution Urgency (1 / (days + 1))
+ 11. Price Extremity (|Mid - 0.5| * 2)
+ 12. Time of Day Sin
+ 13. Time of Day Cos
 """
 from __future__ import annotations
 
@@ -14,22 +26,20 @@ import numpy as np
 
 from core.data_store import OrderBook
 
-
-# Feature names — keep in sync with extract_features() output order
 FEATURE_NAMES = [
-    "mid_price",            # current mid price  [0,1]
-    "spread_norm",          # spread / mid (relative spread)  [0,1]
-    "bid_depth_norm",       # best bid size normalised  [0,1]
-    "ask_depth_norm",       # best ask size normalised  [0,1]
-    "vol_momentum",         # 24h vol / weekly avg  [0,2] clipped
-    "vol_log",              # log10(volume24h + 1) / 7  [0,1]
-    "days_left_norm",       # days until expiry  [0,1]
-    "urgency",              # 1 / (days_left + 1)  approaching resolution
-    "price_extremity",      # distance from 0.5, signed  [-1,1]
-    "price_high",           # mid > 0.80  binary
-    "price_low",            # mid < 0.20  binary
-    "hour_sin",             # time-of-day sine  [-1,1]
-    "hour_cos",             # time-of-day cosine  [-1,1]
+    "mid_price",
+    "spread_norm",
+    "order_flow_imbalance",
+    "micro_price_drift",
+    "bid_depth_norm",
+    "ask_depth_norm",
+    "vol_momentum",
+    "vol_log",
+    "days_left_norm",
+    "urgency",
+    "price_extremity",
+    "hour_sin",
+    "hour_cos",
 ]
 
 N_FEATURES = len(FEATURE_NAMES)
@@ -37,40 +47,50 @@ N_FEATURES = len(FEATURE_NAMES)
 
 def extract_features(market: dict, book: OrderBook) -> Optional[np.ndarray]:
     """
-    Return a float32 feature vector of length N_FEATURES, or None if data is
-    insufficient to compute features reliably.
+    Return float32 feature vector of length N_FEATURES, or None if insufficient book depth.
     """
     mid = book.mid
     if mid is None or mid <= 0 or mid >= 1:
         return None
 
     spread = book.spread or 0.0
+    best_bid_p = book.best_bid or mid
+    best_ask_p = book.best_ask or mid
     best_bid_sz = book.bids[0].size if book.bids else 0.0
     best_ask_sz = book.asks[0].size if book.asks else 0.0
 
-    # Volume features
-    vol_24h = float(market.get("volume24hr") or 0)
-    vol_total = float(market.get("volume") or 0)
+    # 1. Order Flow Imbalance (OFI) ∈ [-1, 1]
+    total_depth = best_bid_sz + best_ask_sz
+    ofi = (best_bid_sz - best_ask_sz) / max(total_depth, 1.0)
+
+    # 2. Micro-Price & Drift
+    if total_depth > 0:
+        micro_price = (best_bid_p * best_ask_sz + best_ask_p * best_bid_sz) / total_depth
+    else:
+        micro_price = mid
+    micro_drift = np.clip((micro_price - mid) * 20.0, -1.0, 1.0)
+
+    # 3. Volume Metrics
+    vol_24h = float(market.get("volume24hr") or 0.0)
+    vol_total = float(market.get("volume") or 0.0)
     weekly_avg = vol_total / 7.0 if vol_total > 0 else 1.0
-    vol_momentum = min(vol_24h / max(weekly_avg, 1.0), 3.0) / 3.0  # normalise to [0,1]
+    vol_momentum = min(vol_24h / max(weekly_avg, 1.0), 3.0) / 3.0
     vol_log = min(math.log10(vol_24h + 1) / 7.0, 1.0)
 
-    # Time-to-expiry features
+    # 4. Time to Expiry
     days_left = _days_to_expiry(market)
     days_left_norm = min(days_left / 365.0, 1.0)
     urgency = 1.0 / (days_left + 1.0)
 
-    # Price features
-    price_extremity = (mid - 0.5) * 2.0          # in [-1, 1]
-    price_high = 1.0 if mid > 0.80 else 0.0
-    price_low  = 1.0 if mid < 0.20 else 0.0
+    # 5. Price Extremity
+    price_extremity = abs(mid - 0.5) * 2.0
 
-    # Depth normalisation (cap at 10_000 shares)
-    bid_depth = min(best_bid_sz / 10_000.0, 1.0)
-    ask_depth = min(best_ask_sz / 10_000.0, 1.0)
+    # 6. Depth Normalization
+    bid_depth_norm = min(best_bid_sz / 5_000.0, 1.0)
+    ask_depth_norm = min(best_ask_sz / 5_000.0, 1.0)
 
-    # Time-of-day (UTC)
-    now = datetime.datetime.utcnow()
+    # 7. Time of Day Cycle
+    now = datetime.datetime.now(datetime.timezone.utc)
     hour_frac = (now.hour + now.minute / 60.0) / 24.0
     hour_sin = math.sin(2 * math.pi * hour_frac)
     hour_cos = math.cos(2 * math.pi * hour_frac)
@@ -78,26 +98,23 @@ def extract_features(market: dict, book: OrderBook) -> Optional[np.ndarray]:
     vec = np.array([
         float(mid),
         min(spread / max(mid, 0.01), 1.0),
-        bid_depth,
-        ask_depth,
-        vol_momentum,
-        vol_log,
-        days_left_norm,
-        min(urgency, 1.0),
-        price_extremity,
-        price_high,
-        price_low,
-        hour_sin,
-        hour_cos,
+        float(ofi),
+        float(micro_drift),
+        float(bid_depth_norm),
+        float(ask_depth_norm),
+        float(vol_momentum),
+        float(vol_log),
+        float(days_left_norm),
+        float(min(urgency, 1.0)),
+        float(price_extremity),
+        float(hour_sin),
+        float(hour_cos),
     ], dtype=np.float32)
 
-    # Safety: replace any NaN/Inf with 0
-    vec = np.nan_to_num(vec, nan=0.0, posinf=1.0, neginf=-1.0)
-    return vec
+    return np.nan_to_num(vec, nan=0.0, posinf=1.0, neginf=-1.0)
 
 
 def _days_to_expiry(market: dict) -> float:
-    """Return days until market resolution, default 30 if unknown."""
     for key in ("endDate", "end_date_iso", "endDateIso"):
         raw = market.get(key)
         if raw:
@@ -105,9 +122,10 @@ def _days_to_expiry(market: dict) -> float:
                 if isinstance(raw, str):
                     raw = raw.replace("Z", "+00:00")
                     end = datetime.datetime.fromisoformat(raw)
-                    end = end.replace(tzinfo=datetime.timezone.utc)
+                    if end.tzinfo is None:
+                        end = end.replace(tzinfo=datetime.timezone.utc)
                     now = datetime.datetime.now(datetime.timezone.utc)
                     return max((end - now).total_seconds() / 86400.0, 0.0)
             except Exception:
                 continue
-    return 30.0  # safe default
+    return 30.0
