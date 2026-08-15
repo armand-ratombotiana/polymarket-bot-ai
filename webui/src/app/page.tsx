@@ -3,6 +3,7 @@
 
 import { useEffect, useState } from 'react'
 import { useBot } from '@/hooks/useBot'
+import { useAudio } from '@/hooks/useAudio'
 import Header, { ActiveTab } from '@/components/Header'
 import MarketsPanel from '@/components/MarketsPanel'
 import PositionsPanel from '@/components/PositionsPanel'
@@ -20,22 +21,60 @@ import SystemHealthView from '@/components/SystemHealthView'
 import AICopilotPanel from '@/components/AICopilotPanel'
 import MarketScreener from '@/components/MarketScreener'
 import DepthChartModal from '@/components/DepthChartModal'
+import MarketChartModal from '@/components/MarketChartModal'
 import StrategyConfigModal from '@/components/StrategyConfigModal'
+import ShortcutsModal from '@/components/ShortcutsModal'
+
+const TABS: ActiveTab[] = ['terminal', 'strategies', 'aiml', 'analysis', 'backtest', 'copilot', 'screener', 'health']
 
 export default function Dashboard() {
   const { snapshot, status, activateKillSwitch, deactivateKillSwitch, cancelAllOrders, cancelOrder } = useBot()
+  const audio = useAudio()
   const [uptime, setUptime] = useState(0)
   const [startTime] = useState(Date.now())
   const [activeTab, setActiveTab] = useState<ActiveTab>('terminal')
 
   // Modal States
   const [selectedMarket, setSelectedMarket] = useState<{ tokenId: string; slug: string } | null>(null)
+  const [chartMarket, setChartMarket] = useState<{ tokenId: string; slug: string } | null>(null)
   const [configOpen, setConfigOpen] = useState(false)
+  const [shortcutsOpen, setShortcutsOpen] = useState(false)
 
   useEffect(() => {
     const t = setInterval(() => setUptime(Math.floor((Date.now() - startTime) / 1000)), 1000)
     return () => clearInterval(t)
   }, [startTime])
+
+  // Global Keyboard Shortcuts
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return
+
+      if (e.key >= '1' && e.key <= '8') {
+        const idx = parseInt(e.key) - 1
+        if (TABS[idx]) setActiveTab(TABS[idx])
+      } else if (e.key === '?') {
+        setShortcutsOpen((prev) => !prev)
+      } else if (e.key === 'c' || e.key === 'C') {
+        setConfigOpen((prev) => !prev)
+      } else if (e.key === 'k' || e.key === 'K') {
+        if (snapshot.kill_switch) {
+          deactivateKillSwitch()
+        } else {
+          activateKillSwitch()
+          audio.playKillSwitch()
+        }
+      } else if (e.key === 'Escape') {
+        setSelectedMarket(null)
+        setChartMarket(null)
+        setConfigOpen(false)
+        setShortcutsOpen(false)
+      }
+    }
+
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [snapshot.kill_switch])
 
   const isKilled = snapshot.kill_switch
 
@@ -56,10 +95,16 @@ export default function Dashboard() {
         paperBalance={snapshot.paper_balance}
         strategies={snapshot.strategies}
         status={status}
-        onKillSwitch={activateKillSwitch}
+        onKillSwitch={() => {
+          activateKillSwitch()
+          audio.playKillSwitch()
+        }}
         onDeactivate={deactivateKillSwitch}
         onCancelAll={cancelAllOrders}
         onOpenConfig={() => setConfigOpen(true)}
+        onOpenShortcuts={() => setShortcutsOpen(true)}
+        muted={audio.muted}
+        onToggleMute={audio.toggleMute}
         uptime={uptime}
       />
 
@@ -80,7 +125,7 @@ export default function Dashboard() {
             <div style={{ gridArea: 'markets' }} className="min-h-0">
               <MarketsPanel
                 books={snapshot.order_books}
-                onSelectMarket={(tokenId, slug) => setSelectedMarket({ tokenId, slug })}
+                onSelectMarket={(tokenId, slug) => setChartMarket({ tokenId, slug })}
               />
             </div>
 
@@ -149,7 +194,7 @@ export default function Dashboard() {
         {activeTab === 'screener' && (
           <div className="h-full">
             <MarketScreener
-              onSelectMarket={(tokenId, slug) => setSelectedMarket({ tokenId, slug })}
+              onSelectMarket={(tokenId, slug) => setChartMarket({ tokenId, slug })}
             />
           </div>
         )}
@@ -161,12 +206,23 @@ export default function Dashboard() {
         )}
       </div>
 
+      {/* Candlestick & Price History Modal */}
+      {chartMarket && (
+        <MarketChartModal
+          tokenId={chartMarket.tokenId}
+          slug={chartMarket.slug}
+          onClose={() => setChartMarket(null)}
+          onOrderPlaced={() => audio.playOrderPlaced()}
+        />
+      )}
+
       {/* Depth Chart & Quick Trade Modal */}
       {selectedMarket && (
         <DepthChartModal
           tokenId={selectedMarket.tokenId}
           slug={selectedMarket.slug}
           onClose={() => setSelectedMarket(null)}
+          onOrderPlaced={() => audio.playOrderPlaced()}
         />
       )}
 
@@ -174,6 +230,12 @@ export default function Dashboard() {
       <StrategyConfigModal
         isOpen={configOpen}
         onClose={() => setConfigOpen(false)}
+      />
+
+      {/* Keyboard Shortcuts Modal */}
+      <ShortcutsModal
+        isOpen={shortcutsOpen}
+        onClose={() => setShortcutsOpen(false)}
       />
 
       {/* Disconnected overlay */}

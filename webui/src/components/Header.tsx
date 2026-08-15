@@ -18,6 +18,9 @@ interface HeaderProps {
   onDeactivate: () => void
   onCancelAll: () => void
   onOpenConfig?: () => void
+  onOpenShortcuts?: () => void
+  muted?: boolean
+  onToggleMute?: () => void
   uptime: number
 }
 
@@ -35,7 +38,8 @@ function fmtPnl(v: number) {
 
 export default function Header({
   activeTab, onTabChange, mode, killSwitch, dailyPnl, paperBalance,
-  strategies, status, onKillSwitch, onDeactivate, onCancelAll, onOpenConfig, uptime,
+  strategies, status, onKillSwitch, onDeactivate, onCancelAll, onOpenConfig, onOpenShortcuts,
+  muted, onToggleMute, uptime,
 }: HeaderProps) {
   const navTabs: Array<{ id: ActiveTab; label: string; icon: string; badge?: string }> = [
     { id: 'terminal', label: 'Trading Desk', icon: '📊' },
@@ -129,8 +133,26 @@ export default function Header({
         {fmtUptime(uptime)}
       </div>
 
-      {/* Actions */}
-      <div className="flex items-center gap-2 shrink-0">
+      {/* Audio & Shortcuts Actions */}
+      <div className="flex items-center gap-1.5 shrink-0">
+        {onToggleMute && (
+          <button
+            onClick={onToggleMute}
+            className="btn btn-ghost text-[#8b91a8] hover:text-white text-xs px-2 py-1"
+            title={muted ? 'Unmute Audio Alerts' : 'Mute Audio Alerts'}
+          >
+            {muted ? '🔇' : '🔊'}
+          </button>
+        )}
+        {onOpenShortcuts && (
+          <button
+            onClick={onOpenShortcuts}
+            className="btn btn-ghost text-[#8b91a8] hover:text-white text-xs px-2 py-1"
+            title="Keyboard Shortcuts Cheatsheet (?)"
+          >
+            ⌨️
+          </button>
+        )}
         {onOpenConfig && (
           <button
             onClick={onOpenConfig}
