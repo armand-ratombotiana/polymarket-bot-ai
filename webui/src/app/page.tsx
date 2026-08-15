@@ -1,4 +1,4 @@
-// app/page.tsx — Polymarket Pro Multi-view Workstation
+// app/page.tsx — Polymarket Pro Enterprise Workstation
 'use client'
 
 import { useEffect, useState } from 'react'
@@ -14,6 +14,8 @@ import AnalyticsPanel from '@/components/AnalyticsPanel'
 import EquityCurve from '@/components/EquityCurve'
 import StrategyMatrix from '@/components/StrategyMatrix'
 import AIMLCommandCenter from '@/components/AIMLCommandCenter'
+import DeepAnalysisView from '@/components/DeepAnalysisView'
+import SystemHealthView from '@/components/SystemHealthView'
 import AICopilotPanel from '@/components/AICopilotPanel'
 import MarketScreener from '@/components/MarketScreener'
 import DepthChartModal from '@/components/DepthChartModal'
@@ -119,6 +121,12 @@ export default function Dashboard() {
           </div>
         )}
 
+        {activeTab === 'analysis' && (
+          <div className="h-full">
+            <DeepAnalysisView />
+          </div>
+        )}
+
         {activeTab === 'copilot' && (
           <div className="h-full grid grid-cols-1 md:grid-cols-3 gap-3">
             <div className="md:col-span-2 h-full min-h-0">
@@ -136,6 +144,12 @@ export default function Dashboard() {
             <MarketScreener
               onSelectMarket={(tokenId, slug) => setSelectedMarket({ tokenId, slug })}
             />
+          </div>
+        )}
+
+        {activeTab === 'health' && (
+          <div className="h-full">
+            <SystemHealthView />
           </div>
         )}
       </div>

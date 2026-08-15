@@ -3,7 +3,7 @@
 
 import { ConnectionStatus } from '@/hooks/useBot'
 
-export type ActiveTab = 'terminal' | 'strategies' | 'aiml' | 'copilot' | 'screener'
+export type ActiveTab = 'terminal' | 'strategies' | 'aiml' | 'analysis' | 'copilot' | 'screener' | 'health'
 
 interface HeaderProps {
   activeTab: ActiveTab
@@ -41,30 +41,32 @@ export default function Header({
     { id: 'terminal', label: 'Trading Desk', icon: '📊' },
     { id: 'strategies', label: '50+ Strategies', icon: '⚡', badge: `${strategies.length} active` },
     { id: 'aiml', label: 'AI / ML Engine', icon: '🧠', badge: 'Calibrated' },
+    { id: 'analysis', label: 'Deep Analysis', icon: '🔬', badge: 'Whales & News' },
     { id: 'copilot', label: 'AI Copilot', icon: '🤖' },
     { id: 'screener', label: 'Screener', icon: '🔍' },
+    { id: 'health', label: 'System Health', icon: '🩺' },
   ]
 
   return (
-    <header className="h-14 bg-[#111318] border-b border-[#252836] flex items-center px-4 gap-4 shrink-0 select-none">
+    <header className="h-14 bg-[#111318] border-b border-[#252836] flex items-center px-4 gap-3 shrink-0 select-none overflow-x-auto scrollbar-none">
       {/* Logo */}
-      <div className="flex items-center gap-2 mr-1">
+      <div className="flex items-center gap-2 mr-1 shrink-0">
         <svg width="22" height="22" viewBox="0 0 22 22" fill="none">
           <circle cx="11" cy="11" r="10" stroke="#3b82f6" strokeWidth="1.5" />
           <path d="M7 11h8M11 7v8" stroke="#3b82f6" strokeWidth="1.5" strokeLinecap="round" />
         </svg>
         <span className="text-[14px] font-bold tracking-tight text-[#e8eaf0]">
-          Polymarket<span className="text-blue-400">Pro 3.0</span>
+          Polymarket<span className="text-blue-400">Pro 4.0</span>
         </span>
       </div>
 
       {/* Navigation Tabs */}
-      <div className="flex items-center gap-1 bg-[#161822] p-1 rounded-lg border border-[#252836]">
+      <div className="flex items-center gap-1 bg-[#161822] p-1 rounded-lg border border-[#252836] shrink-0">
         {navTabs.map((t) => (
           <button
             key={t.id}
             onClick={() => onTabChange(t.id)}
-            className={`px-3 py-1 rounded text-xs font-semibold flex items-center gap-1.5 transition-all ${
+            className={`px-2.5 py-1 rounded text-xs font-semibold flex items-center gap-1.5 transition-all whitespace-nowrap ${
               activeTab === t.id
                 ? 'bg-blue-500 text-black shadow-sm font-bold'
                 : 'text-[#8b91a8] hover:text-[#e8eaf0] hover:bg-[#252836]'
@@ -86,12 +88,12 @@ export default function Header({
       </div>
 
       {/* Mode badge */}
-      <span className={`badge ${mode === 'paper' ? 'badge-amber' : 'badge-red'}`}>
+      <span className={`badge shrink-0 ${mode === 'paper' ? 'badge-amber' : 'badge-red'}`}>
         {mode === 'paper' ? '📄 Paper' : '⚡ Live'}
       </span>
 
       {/* Connection status */}
-      <div className="hidden sm:flex items-center gap-1.5 text-[11px] text-[#8b91a8]">
+      <div className="hidden xl:flex items-center gap-1.5 text-[11px] text-[#8b91a8] shrink-0">
         <span
           className="status-dot"
           style={{
@@ -105,7 +107,7 @@ export default function Header({
 
       {/* Paper balance */}
       {paperBalance !== null && (
-        <div className="text-[12px] hidden md:block">
+        <div className="text-[12px] hidden lg:block shrink-0">
           <span className="text-[#4a5068]">Balance </span>
           <span className="mono font-medium text-cyan-400">
             ${paperBalance.toLocaleString('en', { minimumFractionDigits: 2 })}
@@ -114,7 +116,7 @@ export default function Header({
       )}
 
       {/* Daily P&L */}
-      <div className="text-[12px]">
+      <div className="text-[12px] shrink-0">
         <span className="text-[#4a5068]">Daily P&amp;L </span>
         <span className={`mono font-semibold ${dailyPnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
           {fmtPnl(dailyPnl)}
@@ -122,12 +124,12 @@ export default function Header({
       </div>
 
       {/* Uptime */}
-      <div className="hidden lg:block text-[11px] text-[#4a5068] mono">
+      <div className="hidden 2xl:block text-[11px] text-[#4a5068] mono shrink-0">
         {fmtUptime(uptime)}
       </div>
 
       {/* Actions */}
-      <div className="flex items-center gap-2">
+      <div className="flex items-center gap-2 shrink-0">
         {onOpenConfig && (
           <button
             onClick={onOpenConfig}
