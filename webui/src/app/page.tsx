@@ -16,6 +16,8 @@ import EquityCurve from '@/components/EquityCurve'
 import StrategyMatrix from '@/components/StrategyMatrix'
 import AIMLCommandCenter from '@/components/AIMLCommandCenter'
 import DeepAnalysisView from '@/components/DeepAnalysisView'
+import ArbitrageMatrixView from '@/components/ArbitrageMatrixView'
+import DatabaseExplorerView from '@/components/DatabaseExplorerView'
 import BacktestLabView from '@/components/BacktestLabView'
 import SystemHealthView from '@/components/SystemHealthView'
 import AICopilotPanel from '@/components/AICopilotPanel'
@@ -25,7 +27,7 @@ import MarketChartModal from '@/components/MarketChartModal'
 import StrategyConfigModal from '@/components/StrategyConfigModal'
 import ShortcutsModal from '@/components/ShortcutsModal'
 
-const TABS: ActiveTab[] = ['terminal', 'strategies', 'aiml', 'analysis', 'backtest', 'copilot', 'screener', 'health']
+const TABS: ActiveTab[] = ['terminal', 'arbitrage', 'strategies', 'aiml', 'analysis', 'database', 'backtest', 'copilot', 'screener', 'health']
 
 export default function Dashboard() {
   const { snapshot, status, activateKillSwitch, deactivateKillSwitch, cancelAllOrders, cancelOrder } = useBot()
@@ -155,6 +157,12 @@ export default function Dashboard() {
           </div>
         )}
 
+        {activeTab === 'arbitrage' && (
+          <div className="h-full">
+            <ArbitrageMatrixView />
+          </div>
+        )}
+
         {activeTab === 'strategies' && (
           <div className="h-full">
             <StrategyMatrix />
@@ -170,6 +178,12 @@ export default function Dashboard() {
         {activeTab === 'analysis' && (
           <div className="h-full">
             <DeepAnalysisView />
+          </div>
+        )}
+
+        {activeTab === 'database' && (
+          <div className="h-full">
+            <DatabaseExplorerView />
           </div>
         )}
 

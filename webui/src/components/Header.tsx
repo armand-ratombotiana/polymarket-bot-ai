@@ -3,7 +3,7 @@
 
 import { ConnectionStatus } from '@/hooks/useBot'
 
-export type ActiveTab = 'terminal' | 'strategies' | 'aiml' | 'analysis' | 'backtest' | 'copilot' | 'screener' | 'health'
+export type ActiveTab = 'terminal' | 'strategies' | 'aiml' | 'arbitrage' | 'analysis' | 'backtest' | 'database' | 'copilot' | 'screener' | 'health'
 
 interface HeaderProps {
   activeTab: ActiveTab
@@ -43,11 +43,13 @@ export default function Header({
 }: HeaderProps) {
   const navTabs: Array<{ id: ActiveTab; label: string; icon: string; badge?: string }> = [
     { id: 'terminal', label: 'Trading Desk', icon: '📊' },
-    { id: 'strategies', label: '50+ Strategies', icon: '⚡', badge: `${strategies.length} active` },
+    { id: 'arbitrage', label: 'Arb Matrix', icon: '⚡', badge: '1-Click' },
+    { id: 'strategies', label: '50+ Strategies', icon: '🤖', badge: `${strategies.length} active` },
     { id: 'aiml', label: 'AI / ML Engine', icon: '🧠', badge: 'Calibrated' },
     { id: 'analysis', label: 'Deep Analysis', icon: '🔬', badge: 'Whales & News' },
+    { id: 'database', label: 'Timescale DB', icon: '🗄️', badge: 'WAL' },
     { id: 'backtest', label: 'Backtest Lab', icon: '🧪', badge: 'Monte Carlo' },
-    { id: 'copilot', label: 'AI Copilot', icon: '🤖' },
+    { id: 'copilot', label: 'AI Copilot', icon: '💡' },
     { id: 'screener', label: 'Screener', icon: '🔍' },
     { id: 'health', label: 'System Health', icon: '🩺' },
   ]

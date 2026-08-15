@@ -849,13 +849,41 @@ async def run_backtest_simulation(req: BacktestRequest):
     return {"status": "completed", "result": result.to_dict()}
 
 
-# ── Immutable Audit Trail & Durable Logs ──────────────────────────────────────
-
 @app.get("/api/audit/logs", tags=["audit"])
 async def get_audit_logs(limit: int = 100, category: Optional[str] = None):
     """Query immutable SQLite audit trail logs."""
     logs = await audit_logger.get_recent_events(limit=limit, category=category)
     return {"logs": logs, "count": len(logs)}
+
+
+# ── Arbitrage Scanner & Database Explorer ─────────────────────────────────────
+
+@app.get("/api/arbitrage/opportunities", tags=["arbitrage"])
+async def get_arbitrage_opportunities():
+    """Return real-time dual-outcome and multi-pool arbitrage opportunities."""
+    from core.arbitrage_scanner import arbitrage_scanner
+    opps = arbitrage_scanner.scan_opportunities()
+    return {"opportunities": [o.to_dict() for o in opps], "count": len(opps)}
+
+
+@app.get("/api/database/records", tags=["database"])
+async def get_database_records(table: str = "market_snapshots", limit: int = 25):
+    """Query latest time-series records from TimescaleDB / PostgreSQL database."""
+    import sqlite3
+    from core.timescale_db import SQLITE_FALLBACK_PATH
+    valid_tables = {"market_snapshots", "orderbook_ticks", "fundamental_news", "ml_feature_store"}
+    if table not in valid_tables:
+        raise HTTPException(status_code=400, detail=f"Invalid table {table}")
+
+    try:
+        with sqlite3.connect(SQLITE_FALLBACK_PATH) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute(f"SELECT * FROM {table} ORDER BY id DESC LIMIT ?", (limit,))
+            rows = [dict(r) for r in cursor.fetchall()]
+        return {"table": table, "records": rows, "count": len(rows)}
+    except Exception as e:
+        return {"table": table, "records": [], "count": 0, "error": str(e)}
 
 
 # ── System Health & Pipeline Ingestion Monitor ────────────────────────────────
