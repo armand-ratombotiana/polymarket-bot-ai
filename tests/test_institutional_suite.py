@@ -10,6 +10,7 @@ Covers:
 import asyncio
 import os
 import sys
+import time
 import unittest
 import numpy as np
 
@@ -154,6 +155,44 @@ class TestInstitutionalSuite(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(res.total_trades, 0)
         self.assertGreater(res.profit_factor, 0.0)
         self.assertIsInstance(res.equity_curve, list)
+
+    def test_07_deep_analysis_engine(self):
+        """Test complete 9-factor deep market analysis and recommendation calculations."""
+        from core.analysis_engine import deep_analysis_engine
+        book = OrderBook(
+            token_id="tok-deep-test",
+            bids=[PriceLevel(price=0.52, size=500.0), PriceLevel(price=0.51, size=300.0)],
+            asks=[PriceLevel(price=0.54, size=400.0), PriceLevel(price=0.55, size=200.0)],
+            updated_at=time.time(),
+        )
+        store.order_books["tok-deep-test"] = book
+        store.market_slugs["tok-deep-test"] = "will-fed-cut-rates-in-september"
+
+        analysis = deep_analysis_engine.analyze_market("tok-deep-test")
+        self.assertEqual(analysis["status"], "VALIDATED")
+        self.assertAlmostEqual(analysis["market_implied_prob"], 0.53, places=2)
+        self.assertIn("suggested_action", analysis)
+        self.assertIn(analysis["suggested_action"], ["TRADE_LONG_YES", "TRADE_SHORT_NO", "MONITOR", "REJECT_RISK"])
+        self.assertIsInstance(analysis["uncertainty_interval"], list)
+        self.assertEqual(len(analysis["uncertainty_interval"]), 2)
+        self.assertGreater(analysis["total_liquidity_usdc"], 100.0)
+
+    def test_08_smart_order_router_twap(self):
+        """Test TWAP order slicing for large blocks and slippage estimation."""
+        from execution.smart_router import smart_router
+        book = OrderBook(
+            token_id="tok-twap-test",
+            bids=[PriceLevel(price=0.50, size=500.0)],
+            asks=[PriceLevel(price=0.52, size=300.0), PriceLevel(price=0.54, size=500.0)],
+        )
+        eff_price, slippage = smart_router.calculate_slippage(book, Side.BUY, 200.0)
+        self.assertGreaterEqual(eff_price, 0.52)
+        self.assertGreaterEqual(slippage, 0.0)
+
+        slices = smart_router.generate_twap_schedule(total_size_usdc=500.0, price=0.52, duration_seconds=120, num_slices=4)
+        self.assertEqual(len(slices), 4)
+        total_sliced = sum(s.size_usdc for s in slices)
+        self.assertAlmostEqual(total_sliced, 500.0, delta=50.0)
 
 
 if __name__ == "__main__":

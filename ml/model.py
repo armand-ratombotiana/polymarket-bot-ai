@@ -213,6 +213,18 @@ class MarketMLModel:
         log.info("[ml_model] Model initialized. Brier=%.4f, AUC=%.4f, ECE=%.4f",
                  self.brier_score, self.roc_auc, self.ece)
 
+    @property
+    def is_fitted(self) -> bool:
+        return self.rf is not None
+
+    def predict_proba(self, features: np.ndarray) -> float:
+        p, _ = self.predict(features)
+        return p
+
+    def predict_confidence(self, features: np.ndarray) -> float:
+        _, conf = self.predict(features)
+        return conf
+
     def predict(self, features: np.ndarray) -> Tuple[float, float]:
         if self.rf is None or self.gb is None:
             return float(features[0]), 0.5

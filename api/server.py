@@ -784,24 +784,23 @@ async def ml_learn(token_id: str, resolved_yes: bool):
 
 @app.get("/api/analysis/deep", tags=["analysis"])
 async def get_deep_analysis():
-    """Return top opportunity rankings, whale flow, market regimes, and cross-category correlation."""
-    opps = await deep_analysis_engine.get_top_opportunities(10)
-    whales = [w.to_dict() for w in deep_analysis_engine.whale_alerts[:15]]
-    corr = deep_analysis_engine.get_category_correlation_matrix()
-    news = [n.to_dict() for n in fundamental_engine.news_feed[:10]]
+    """Return top multi-factor opportunity rankings and fundamental sentiment."""
+    from core.analysis_engine import deep_analysis_engine
+    top_opps = deep_analysis_engine.get_top_ranked_opportunities(limit=15)
+    news = [n.to_dict() for n in fundamental_engine.news_feed[:15]]
     return {
-        "opportunities": opps,
-        "whale_alerts": whales,
-        "correlations": corr,
+        "top_opportunities": top_opps,
         "recent_news": news,
         "timestamp": time.time(),
     }
 
 
-@app.get("/api/analysis/whales", tags=["analysis"])
-async def get_whale_activity():
-    """Return large block order and smart-money flow alerts."""
-    return {"whales": [w.to_dict() for w in deep_analysis_engine.whale_alerts], "count": len(deep_analysis_engine.whale_alerts)}
+@app.get("/api/analysis/market/{token_id}", tags=["analysis"])
+async def analyze_specific_market(token_id: str):
+    """Return complete 9-factor probabilistic, microstructure, and recommendation analysis for a single contract."""
+    from core.analysis_engine import deep_analysis_engine
+    analysis = deep_analysis_engine.analyze_market(token_id)
+    return analysis
 
 
 @app.get("/api/analysis/news", tags=["analysis"])
