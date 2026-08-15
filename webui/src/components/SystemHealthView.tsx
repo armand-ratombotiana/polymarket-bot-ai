@@ -77,11 +77,11 @@ export default function SystemHealthView() {
             </span>
           </div>
           <p className="text-xs text-[#8b91a8]">
-            Adaptive Poller Latency, Supervisor Watchdog Status, Specialized SQLite WAL Time-Series DB &amp; $200 Max Portfolio Risk Sizing
+            Adaptive Poller Latency, Supervisor Watchdog Status, TimescaleDB Time-Series DB &amp; $10,000 Max Portfolio Risk Sizing
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <span className="badge badge-amber text-xs font-semibold">$200 Max Capital Scaled</span>
+          <span className="badge badge-amber text-xs font-semibold">$10,000 Max Capital Scaled</span>
           <span className="badge badge-green text-xs font-semibold">All Systems 24/7 Nominal</span>
         </div>
       </div>

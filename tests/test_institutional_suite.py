@@ -30,48 +30,48 @@ class TestInstitutionalSuite(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         store.kill_switch_active = False
         store.daily_pnl = 0.0
-        store.peak_equity = 200.0
+        store.peak_equity = 10000.0
         store.open_orders.clear()
         store.positions.clear()
         self.risk = InstitutionalRiskEngine()
 
     async def test_01_bankroll_and_cash_reserve(self):
-        """Test that orders exceeding deployable capital ($120) or single position ($10) are blocked."""
-        # 1. Oversized single position ($15 > $10)
+        """Test that orders exceeding deployable capital ($8,000) or single position ($500) are blocked."""
+        # 1. Oversized single position ($600 > $500 max)
         oversized_order = Order(
             order_id="test-1",
             token_id="tok-1",
             side=Side.BUY,
             price=0.50,
-            size=30.0,  # $15.00 cost > $10.00 max
+            size=1200.0,  # $600.00 cost > $500.00 max
             strategy="test",
         )
         allowed, reason = await self.risk.check_order(oversized_order)
         self.assertFalse(allowed)
         self.assertIn("Single position cap exceeded", reason)
 
-        # 2. Valid position ($4.00 cost <= $10.00 max)
+        # 2. Valid position ($200.00 cost <= $500.00 max)
         valid_order = Order(
             order_id="test-2",
             token_id="tok-2",
             side=Side.BUY,
             price=0.50,
-            size=8.0,  # $4.00 cost
+            size=400.0,  # $200.00 cost
             strategy="test",
         )
         allowed, reason = await self.risk.check_order(valid_order)
         self.assertTrue(allowed, f"Expected allowed, got reason: {reason}")
 
     async def test_02_daily_loss_circuit_breaker(self):
-        """Test that breaching the $4.00 daily loss stop halts trading."""
-        store.daily_pnl = -4.50  # Breached $4.00 stop
+        """Test that breaching the $250.00 daily loss stop halts trading."""
+        store.daily_pnl = -260.00  # Breached $250.00 stop
 
         order = Order(
             order_id="test-3",
             token_id="tok-3",
             side=Side.BUY,
             price=0.50,
-            size=4.0,
+            size=100.0,
             strategy="test",
         )
         allowed, reason = await self.risk.check_order(order)

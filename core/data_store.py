@@ -133,15 +133,15 @@ class DataStore:
         # Positions
         self.positions: Dict[str, Position] = {}  # token_id -> Position
 
-        # Trades & P&L ($200 USD Real Account Bankroll)
+        # Trades & P&L ($10,000 USD Institutional Bankroll)
         self.trades: List[Trade] = []
         self.daily_pnl: float = 0.0
-        self.peak_equity: float = 200.0
+        self.peak_equity: float = 10000.0
         self.session_start: float = time.time()
 
         # Equity curve time-series (timestamp, equity, pnl)
         self.equity_history: List[Dict[str, float]] = [
-            {"timestamp": time.time(), "equity": 200.0, "pnl": 0.0}
+            {"timestamp": time.time(), "equity": 10000.0, "pnl": 0.0}
         ]
 
         # Risk

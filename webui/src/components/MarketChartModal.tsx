@@ -27,9 +27,9 @@ export default function MarketChartModal({ tokenId, slug, onClose, onOrderPlaced
   const [loading, setLoading] = useState(true)
   const [showEma, setShowEma] = useState(true)
 
-  // Fast Trade state
+  // Fast Trade state ($10,000 USD portfolio sizing)
   const [price, setPrice] = useState('0.50')
-  const [sizeUsdc, setSizeUsdc] = useState('5')
+  const [sizeUsdc, setSizeUsdc] = useState('100')
   const [placing, setPlacing] = useState(false)
 
   const title = formatMarketTitle(slug)
@@ -210,12 +210,12 @@ export default function MarketChartModal({ tokenId, slug, onClose, onOrderPlaced
               />
             </div>
             <div>
-              <label className="text-[10px] text-[#8b91a8] block mb-0.5">Amount ($ USDC - Max $10)</label>
+              <label className="text-[10px] text-[#8b91a8] block mb-0.5">Amount ($ USDC - Max $500)</label>
               <input
                 type="number"
-                step="2"
-                min="1"
-                max="10"
+                step="50"
+                min="10"
+                max="500"
                 value={sizeUsdc}
                 onChange={(e) => setSizeUsdc(e.target.value)}
                 className="w-24 bg-[#111318] border border-[#252836] rounded px-2.5 py-1 text-xs mono text-[#e8eaf0] focus:outline-none focus:border-blue-500"

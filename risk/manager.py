@@ -28,20 +28,20 @@ from core.data_store import Order, Side, store
 
 log = logging.getLogger(__name__)
 
-# Institutional $200 USD Portfolio Constraints
-BANKROLL_CEILING = Decimal("200.00")
-MIN_CASH_RESERVE = Decimal("80.00")
-MAX_DEPLOYABLE_CAPITAL = Decimal("120.00")
-NORMAL_MAX_POSITION = Decimal("5.00")
-ABSOLUTE_MAX_POSITION = Decimal("10.00")
-MAX_CORRELATED_EXPOSURE = Decimal("20.00")
-MAX_STRATEGY_EXPOSURE = Decimal("30.00")
-MAX_TOTAL_OPEN_RISK = Decimal("60.00")
-MAX_PENDING_ORDER_CAPITAL = Decimal("20.00")
-MAX_OPEN_POSITIONS = 8
-DAILY_LOSS_STOP = Decimal("4.00")
-WEEKLY_LOSS_STOP = Decimal("10.00")
-MAX_DRAWDOWN_LIMIT = Decimal("16.00")
+# Institutional $10,000 USD Portfolio Constraints
+BANKROLL_CEILING = Decimal("10000.00")
+MIN_CASH_RESERVE = Decimal("2000.00")
+MAX_DEPLOYABLE_CAPITAL = Decimal("8000.00")
+NORMAL_MAX_POSITION = Decimal("250.00")
+ABSOLUTE_MAX_POSITION = Decimal("500.00")
+MAX_CORRELATED_EXPOSURE = Decimal("1000.00")
+MAX_STRATEGY_EXPOSURE = Decimal("2000.00")
+MAX_TOTAL_OPEN_RISK = Decimal("4000.00")
+MAX_PENDING_ORDER_CAPITAL = Decimal("1500.00")
+MAX_OPEN_POSITIONS = 25
+DAILY_LOSS_STOP = Decimal("250.00")
+WEEKLY_LOSS_STOP = Decimal("600.00")
+MAX_DRAWDOWN_LIMIT = Decimal("1000.00")
 
 
 def to_dec(val: float) -> Decimal:

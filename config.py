@@ -33,29 +33,29 @@ class Settings(BaseSettings):
     # ── Mode ───────────────────────────────────────────────────────────
     paper_trade: bool = True
 
-    # ── Risk ($200 USD Max Portfolio Allocation) ───────────────────────
-    max_open_orders: int = 10
-    max_position_per_market_usdc: float = 40.0
-    max_total_exposure_usdc: float = 180.0
-    daily_loss_limit_usdc: float = 20.0
+    # ── Risk ($10,000 USD Max Portfolio Allocation) ─────────────────────
+    max_open_orders: int = 50
+    max_position_per_market_usdc: float = 500.0
+    max_total_exposure_usdc: float = 4000.0
+    daily_loss_limit_usdc: float = 250.0
 
     # ── Market Making ──────────────────────────────────────────────────
     mm_enabled: bool = True
     mm_market_token_ids: str = ""   # comma-separated token IDs
     mm_spread_bps: int = 200
-    mm_quote_size_usdc: float = 5.0
-    mm_max_inventory_usdc: float = 40.0
+    mm_quote_size_usdc: float = 100.0
+    mm_max_inventory_usdc: float = 1000.0
 
     # ── Arbitrage ──────────────────────────────────────────────────────
     arb_enabled: bool = True
     arb_min_profit_bps: int = 50
-    arb_scan_interval_seconds: int = 30
-    arb_order_size_usdc: float = 10.0
+    arb_scan_interval_seconds: int = 15
+    arb_order_size_usdc: float = 100.0
 
     # ── Signal ─────────────────────────────────────────────────────────
     signal_enabled: bool = False
     signal_min_confidence: float = 0.65
-    signal_order_size_usdc: float = 5.0
+    signal_order_size_usdc: float = 100.0
 
     # ── Dashboard ──────────────────────────────────────────────────────
     dashboard_refresh_ms: int = 500

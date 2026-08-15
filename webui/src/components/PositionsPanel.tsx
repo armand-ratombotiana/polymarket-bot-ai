@@ -26,7 +26,7 @@ export default function PositionsPanel({ positions, dailyPnl }: Props) {
           <span className="card-title text-xs font-bold text-[#e8eaf0]">
             💼 Open Positions ({positions.length})
           </span>
-          <span className="badge badge-amber text-[10px]">$200 Bankroll</span>
+          <span className="badge badge-amber text-[10px]">$10,000 Bankroll</span>
         </div>
 
         <div className="flex items-center gap-3 text-xs">

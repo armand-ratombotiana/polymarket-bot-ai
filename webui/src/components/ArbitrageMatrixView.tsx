@@ -53,7 +53,7 @@ export default function ArbitrageMatrixView() {
           token_id: opp.token_id_yes,
           price: opp.yes_ask,
           side: 'BUY',
-          size_usdc: Math.min(opp.max_executable_size_usdc, 5.0),
+          size_usdc: Math.min(opp.max_executable_size_usdc, 100.0),
         }),
       })
       await fetchOpps()

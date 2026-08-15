@@ -27,7 +27,7 @@ class PaperSimulator:
     def __init__(self) -> None:
         self._running = False
         self._task: Optional[asyncio.Task] = None
-        self._virtual_balance_usdc: float = 200.0  # starting paper capital ($200 USD account)
+        self._virtual_balance_usdc: float = 10000.0  # starting paper capital ($10,000 USD account)
 
     @property
     def virtual_balance(self) -> float:
