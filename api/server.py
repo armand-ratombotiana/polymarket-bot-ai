@@ -668,7 +668,7 @@ async def deactivate_kill_switch():
     return {"status": "deactivated", "kill_switch": False}
 
 
-# ── ML Model ──────────────────────────────────────────────────────────────────
+# ── ML Model & Quantitative Diagnostics ───────────────────────────────────────
 
 @app.get("/api/ml", tags=["ml"])
 async def get_ml_status():
@@ -678,6 +678,36 @@ async def get_ml_status():
         "last_trained": ml_model._last_trained,
         "feature_importances": ml_model.feature_importances,
         "model_ready": ml_model.rf is not None,
+    }
+
+
+@app.get("/api/ml/metrics", tags=["ml"])
+async def get_ml_metrics():
+    """Return full quantitative diagnostics: Brier score, ROC-AUC, Log-Loss, and Calibration curve."""
+    return {
+        "model_type": "Gradient Boosting + Random Forest + SGD Online Ensemble",
+        "brier_score": ml_model.brier_score,
+        "roc_auc": ml_model.roc_auc,
+        "log_loss": ml_model.log_loss_score,
+        "n_online_updates": ml_model._n_updates,
+        "last_trained": ml_model._last_trained,
+        "feature_importances": ml_model.feature_importances,
+        "reliability_curve": ml_model.reliability_curve,
+        "model_ready": ml_model.rf is not None,
+    }
+
+
+@app.post("/api/ml/retrain", tags=["ml"])
+async def retrain_ml_model():
+    """Trigger manual re-training and re-calibration of the ML ensemble."""
+    await asyncio.to_thread(ml_model.fit_initial)
+    await asyncio.to_thread(ml_model.save)
+    await store.log_event(f"🧠 ML model retrained & re-calibrated (Brier={ml_model.brier_score:.4f}, AUC={ml_model.roc_auc:.4f})")
+    return {
+        "status": "retrained",
+        "brier_score": ml_model.brier_score,
+        "roc_auc": ml_model.roc_auc,
+        "log_loss": ml_model.log_loss_score,
     }
 
 

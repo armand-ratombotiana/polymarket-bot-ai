@@ -3,7 +3,7 @@
 
 import { ConnectionStatus } from '@/hooks/useBot'
 
-export type ActiveTab = 'terminal' | 'strategies' | 'copilot' | 'screener'
+export type ActiveTab = 'terminal' | 'strategies' | 'aiml' | 'copilot' | 'screener'
 
 interface HeaderProps {
   activeTab: ActiveTab
@@ -40,6 +40,7 @@ export default function Header({
   const navTabs: Array<{ id: ActiveTab; label: string; icon: string; badge?: string }> = [
     { id: 'terminal', label: 'Trading Desk', icon: '📊' },
     { id: 'strategies', label: '50+ Strategies', icon: '⚡', badge: `${strategies.length} active` },
+    { id: 'aiml', label: 'AI / ML Engine', icon: '🧠', badge: 'Calibrated' },
     { id: 'copilot', label: 'AI Copilot', icon: '🤖' },
     { id: 'screener', label: 'Screener', icon: '🔍' },
   ]
@@ -47,7 +48,7 @@ export default function Header({
   return (
     <header className="h-14 bg-[#111318] border-b border-[#252836] flex items-center px-4 gap-4 shrink-0 select-none">
       {/* Logo */}
-      <div className="flex items-center gap-2 mr-2">
+      <div className="flex items-center gap-2 mr-1">
         <svg width="22" height="22" viewBox="0 0 22 22" fill="none">
           <circle cx="11" cy="11" r="10" stroke="#3b82f6" strokeWidth="1.5" />
           <path d="M7 11h8M11 7v8" stroke="#3b82f6" strokeWidth="1.5" strokeLinecap="round" />
@@ -65,16 +66,18 @@ export default function Header({
             onClick={() => onTabChange(t.id)}
             className={`px-3 py-1 rounded text-xs font-semibold flex items-center gap-1.5 transition-all ${
               activeTab === t.id
-                ? 'bg-blue-500 text-black shadow-sm'
+                ? 'bg-blue-500 text-black shadow-sm font-bold'
                 : 'text-[#8b91a8] hover:text-[#e8eaf0] hover:bg-[#252836]'
             }`}
           >
             <span>{t.icon}</span>
             <span>{t.label}</span>
             {t.badge && (
-              <span className={`text-[9px] px-1 py-0.2 rounded font-mono ${
-                activeTab === t.id ? 'bg-black/20 text-black' : 'bg-blue-500/20 text-blue-400'
-              }`}>
+              <span
+                className={`text-[9px] px-1 py-0.2 rounded font-mono ${
+                  activeTab === t.id ? 'bg-black/20 text-black' : 'bg-blue-500/20 text-blue-400'
+                }`}
+              >
                 {t.badge}
               </span>
             )}
@@ -151,7 +154,7 @@ export default function Header({
         )}
       </div>
 
-      {/* Kill switch indicator line */}
+      {/* Kill switch pulse header line */}
       {killSwitch && (
         <div className="absolute top-0 left-0 right-0 h-0.5 bg-red-500 animate-pulse" />
       )}

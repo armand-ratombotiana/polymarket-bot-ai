@@ -13,6 +13,7 @@ import MLPanel from '@/components/MLPanel'
 import AnalyticsPanel from '@/components/AnalyticsPanel'
 import EquityCurve from '@/components/EquityCurve'
 import StrategyMatrix from '@/components/StrategyMatrix'
+import AIMLCommandCenter from '@/components/AIMLCommandCenter'
 import AICopilotPanel from '@/components/AICopilotPanel'
 import MarketScreener from '@/components/MarketScreener'
 import DepthChartModal from '@/components/DepthChartModal'
@@ -109,6 +110,12 @@ export default function Dashboard() {
         {activeTab === 'strategies' && (
           <div className="h-full">
             <StrategyMatrix />
+          </div>
+        )}
+
+        {activeTab === 'aiml' && (
+          <div className="h-full">
+            <AIMLCommandCenter />
           </div>
         )}
 

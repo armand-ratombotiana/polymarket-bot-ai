@@ -39,6 +39,7 @@ export interface Position {
 
 export interface Trade {
   trade_id: string
+  token_id?: string
   slug: string
   side: 'BUY' | 'SELL'
   price: number
