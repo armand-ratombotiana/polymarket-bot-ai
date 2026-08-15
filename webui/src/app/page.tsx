@@ -15,6 +15,7 @@ import EquityCurve from '@/components/EquityCurve'
 import StrategyMatrix from '@/components/StrategyMatrix'
 import AIMLCommandCenter from '@/components/AIMLCommandCenter'
 import DeepAnalysisView from '@/components/DeepAnalysisView'
+import BacktestLabView from '@/components/BacktestLabView'
 import SystemHealthView from '@/components/SystemHealthView'
 import AICopilotPanel from '@/components/AICopilotPanel'
 import MarketScreener from '@/components/MarketScreener'
@@ -124,6 +125,12 @@ export default function Dashboard() {
         {activeTab === 'analysis' && (
           <div className="h-full">
             <DeepAnalysisView />
+          </div>
+        )}
+
+        {activeTab === 'backtest' && (
+          <div className="h-full">
+            <BacktestLabView />
           </div>
         )}
 

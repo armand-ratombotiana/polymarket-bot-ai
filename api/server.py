@@ -768,6 +768,31 @@ async def get_model_drift():
     return drift_detector.get_status_report()
 
 
+# ── Quantitative Backtesting Lab ──────────────────────────────────────────────
+
+class BacktestRequest(BaseModel):
+    strategy_id: str
+    initial_capital: float = Field(default=10000.0, ge=100.0, le=1000000.0)
+    days: int = Field(default=30, ge=1, le=365)
+    fee_bps: float = Field(default=0.0, ge=0.0, le=100.0)
+    slippage_bps: float = Field(default=5.0, ge=0.0, le=50.0)
+
+
+@app.post("/api/backtest/run", tags=["backtesting"])
+async def run_backtest_simulation(req: BacktestRequest):
+    """Run quantitative simulation across historical ticks for any registered strategy."""
+    from backtesting.engine import backtest_engine
+    result = await asyncio.to_thread(
+        backtest_engine.run_backtest,
+        strategy_id=req.strategy_id,
+        initial_capital=req.initial_capital,
+        days=req.days,
+        fee_bps=req.fee_bps,
+        slippage_bps=req.slippage_bps,
+    )
+    return {"status": "completed", "result": result.to_dict()}
+
+
 # ── Immutable Audit Trail & Durable Logs ──────────────────────────────────────
 
 @app.get("/api/audit/logs", tags=["audit"])

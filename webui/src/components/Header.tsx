@@ -3,7 +3,7 @@
 
 import { ConnectionStatus } from '@/hooks/useBot'
 
-export type ActiveTab = 'terminal' | 'strategies' | 'aiml' | 'analysis' | 'copilot' | 'screener' | 'health'
+export type ActiveTab = 'terminal' | 'strategies' | 'aiml' | 'analysis' | 'backtest' | 'copilot' | 'screener' | 'health'
 
 interface HeaderProps {
   activeTab: ActiveTab
@@ -42,6 +42,7 @@ export default function Header({
     { id: 'strategies', label: '50+ Strategies', icon: '⚡', badge: `${strategies.length} active` },
     { id: 'aiml', label: 'AI / ML Engine', icon: '🧠', badge: 'Calibrated' },
     { id: 'analysis', label: 'Deep Analysis', icon: '🔬', badge: 'Whales & News' },
+    { id: 'backtest', label: 'Backtest Lab', icon: '🧪', badge: 'Monte Carlo' },
     { id: 'copilot', label: 'AI Copilot', icon: '🤖' },
     { id: 'screener', label: 'Screener', icon: '🔍' },
     { id: 'health', label: 'System Health', icon: '🩺' },
