@@ -133,15 +133,15 @@ class DataStore:
         # Positions
         self.positions: Dict[str, Position] = {}  # token_id -> Position
 
-        # Trades & P&L
+        # Trades & P&L ($200 USD Real Account Bankroll)
         self.trades: List[Trade] = []
         self.daily_pnl: float = 0.0
-        self.peak_equity: float = 10000.0
+        self.peak_equity: float = 200.0
         self.session_start: float = time.time()
 
         # Equity curve time-series (timestamp, equity, pnl)
         self.equity_history: List[Dict[str, float]] = [
-            {"timestamp": time.time(), "equity": 10000.0, "pnl": 0.0}
+            {"timestamp": time.time(), "equity": 200.0, "pnl": 0.0}
         ]
 
         # Risk
@@ -307,7 +307,8 @@ class DataStore:
             with open(STATE_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
             self.daily_pnl = float(data.get("daily_pnl", 0.0))
-            self.peak_equity = float(data.get("peak_equity", 10000.0))
+            raw_peak = float(data.get("peak_equity", 200.0))
+            self.peak_equity = raw_peak if raw_peak <= 300.0 else (200.0 + self.daily_pnl)
             self.equity_history = data.get("equity_history", self.equity_history)
 
             raw_pos = data.get("positions", {})

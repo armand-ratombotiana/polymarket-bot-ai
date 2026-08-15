@@ -118,8 +118,18 @@ class MarketMLModel:
         self.reliability_curve: List[Dict[str, float]] = []
 
     def fit_initial(self) -> None:
-        """Train initial calibrated ensemble on synthetic market dynamics."""
-        X, y = _synthetic_training_data(3000)
+        """Train initial calibrated ensemble on specialized DB history combined with synthetic market dynamics."""
+        from core.market_db import market_db
+        X_db, y_db = market_db.fetch_training_samples(min_samples=200)
+
+        X_synth, y_synth = _synthetic_training_data(3000)
+        if X_db is not None and len(X_db) > 0:
+            X = np.vstack([X_db, X_synth])
+            y = np.concatenate([y_db, y_synth])
+            log.info("[ml_model] Blended %d real DB samples with %d synthetic samples for training", len(X_db), len(X_synth))
+        else:
+            X, y = X_synth, y_synth
+
         X_scaled = self.scaler.fit_transform(X)
 
         self.rf = RandomForestClassifier(

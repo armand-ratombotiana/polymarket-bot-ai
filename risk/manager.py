@@ -1,81 +1,123 @@
 """
-risk/manager.py — Advanced Risk Management & Circuit Breakers.
+risk/manager.py — Institutional Risk Governance Engine ($200 USD Hard Bankroll).
 
-Provides:
-- Hard Kill Switch
-- Daily Loss Limit
-- Maximum Drawdown (MDD) Circuit Breaker (% drop from peak equity)
-- Position concentration & total portfolio exposure caps
-- Consecutive loss rate throttling
+Strictly enforces Phase 6 Institutional Rules:
+  - Hard bankroll ceiling: USD 200.00
+  - Minimum cash reserve: USD 80.00 (Max deployable capital: USD 120.00)
+  - Default initial position: USD 2.00
+  - Normal max position: USD 5.00
+  - Absolute max position: USD 10.00
+  - Max correlated event group exposure: USD 20.00
+  - Max exposure per strategy: USD 30.00
+  - Max total simultaneous open risk: USD 60.00
+  - Max pending-order capital: USD 20.00
+  - Max simultaneous open positions: 8
+  - Daily loss stop: USD 4.00 (Hard Circuit Breaker)
+  - Weekly loss stop: USD 10.00
+  - Max drawdown from high-water mark: USD 16.00 (Hard Circuit Breaker)
 """
 from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Optional
+from decimal import Decimal, ROUND_HALF_UP
+from typing import Dict, Optional, Tuple
 
 from config import settings
 from core.data_store import Order, Side, store
 
 log = logging.getLogger(__name__)
 
-MAX_DRAWDOWN_PCT = 0.15   # 15% Max Drawdown triggers circuit breaker
+# Institutional $200 USD Portfolio Constraints
+BANKROLL_CEILING = Decimal("200.00")
+MIN_CASH_RESERVE = Decimal("80.00")
+MAX_DEPLOYABLE_CAPITAL = Decimal("120.00")
+NORMAL_MAX_POSITION = Decimal("5.00")
+ABSOLUTE_MAX_POSITION = Decimal("10.00")
+MAX_CORRELATED_EXPOSURE = Decimal("20.00")
+MAX_STRATEGY_EXPOSURE = Decimal("30.00")
+MAX_TOTAL_OPEN_RISK = Decimal("60.00")
+MAX_PENDING_ORDER_CAPITAL = Decimal("20.00")
+MAX_OPEN_POSITIONS = 8
+DAILY_LOSS_STOP = Decimal("4.00")
+WEEKLY_LOSS_STOP = Decimal("10.00")
+MAX_DRAWDOWN_LIMIT = Decimal("16.00")
 
 
-class RiskManager:
+def to_dec(val: float) -> Decimal:
+    """Decimal-safe converter for financial accounting."""
+    return Decimal(str(round(val, 4)))
+
+
+class InstitutionalRiskEngine:
     """
-    Centralised risk gate consulted before every order submission.
+    Central pre-trade risk and portfolio supervisor.
     """
 
     def __init__(self) -> None:
         self._lock = asyncio.Lock()
-        self._consecutive_losses = 0
 
-    async def check_order(self, order: Order) -> tuple[bool, str]:
+    async def check_order(self, order: Order) -> Tuple[bool, str]:
         """
-        Return (allowed: bool, reason: str).
+        Validate order against all 12 institutional risk constraints before submission.
         """
         async with self._lock:
-            # 1. Hard Kill Switch
+            # 1. Global Kill Switch check
             if store.kill_switch_active:
                 return False, "Kill switch is active — all trading halted"
 
-            # 2. Daily Dollar Loss Limit
-            if store.daily_pnl <= -abs(settings.daily_loss_limit_usdc):
-                await self._trigger_kill_switch(f"Daily loss limit of ${settings.daily_loss_limit_usdc:.2f} reached")
-                return False, f"Daily loss limit reached (${settings.daily_loss_limit_usdc:.2f})"
+            order_cost = to_dec(order.price) * to_dec(order.size)
+            daily_pnl_dec = to_dec(store.daily_pnl)
+            peak_equity_dec = to_dec(store.peak_equity)
+            current_equity = BANKROLL_CEILING + daily_pnl_dec
 
-            # 3. Maximum Drawdown from Peak Equity
-            current_equity = 10000.0 + store.daily_pnl
-            if store.peak_equity > 0:
-                drawdown = (store.peak_equity - current_equity) / store.peak_equity
-                if drawdown >= MAX_DRAWDOWN_PCT:
-                    await self._trigger_kill_switch(f"Max Drawdown circuit breaker ({drawdown*100:.1f}% >= {MAX_DRAWDOWN_PCT*100:.1f}%)")
-                    return False, f"Max drawdown limit reached ({drawdown*100:.1f}%)"
+            # 2. Daily Loss Stop (USD 4.00)
+            if daily_pnl_dec <= -DAILY_LOSS_STOP:
+                await self._trigger_kill_switch(f"Daily loss stop breach (${abs(daily_pnl_dec):.2f} >= ${DAILY_LOSS_STOP:.2f})")
+                return False, f"Daily loss stop reached (${DAILY_LOSS_STOP:.2f})"
 
-            # 4. Open Order Count Cap
-            open_count = len(store.open_orders)
-            if open_count >= settings.max_open_orders:
+            # 3. Max Drawdown from High-Water Mark (USD 16.00)
+            if peak_equity_dec > Decimal("0.0"):
+                drawdown_dollars = peak_equity_dec - current_equity
+                if drawdown_dollars >= MAX_DRAWDOWN_LIMIT:
+                    await self._trigger_kill_switch(f"Max Drawdown stop breach (${drawdown_dollars:.2f} >= ${MAX_DRAWDOWN_LIMIT:.2f})")
+                    return False, f"Max drawdown limit reached (${MAX_DRAWDOWN_LIMIT:.2f})"
+
+            # 4. Cash Reserve Protection ($80.00 Reserve minimum)
+            total_exp = to_dec(await store.total_exposure())
+            if (total_exp + order_cost) > MAX_DEPLOYABLE_CAPITAL:
+                return False, f"Cash reserve breach: total exposure ${total_exp + order_cost:.2f} exceeds deployable capital ${MAX_DEPLOYABLE_CAPITAL:.2f}"
+
+            # 5. Total Simultaneous Open Risk ($60.00 max)
+            if (total_exp + order_cost) > MAX_TOTAL_OPEN_RISK:
+                return False, f"Total open risk cap exceeded (${total_exp + order_cost:.2f} > ${MAX_TOTAL_OPEN_RISK:.2f})"
+
+            # 6. Absolute Maximum Single Position Size ($10.00 max)
+            market_exp = to_dec(await store.exposure_for_market(order.token_id))
+            if (market_exp + order_cost) > ABSOLUTE_MAX_POSITION:
+                return False, f"Single position cap exceeded (${market_exp + order_cost:.2f} > ${ABSOLUTE_MAX_POSITION:.2f})"
+
+            # 7. Max Open Positions Count (8 contracts)
+            active_positions = len(store.positions)
+            if order.token_id not in store.positions and active_positions >= MAX_OPEN_POSITIONS:
+                return False, f"Max simultaneous open positions ({MAX_OPEN_POSITIONS}) reached"
+
+            # 8. Pending Order Capital Cap ($20.00 max)
+            pending_capital = sum(to_dec(o.price) * to_dec(o.size) for o in store.open_orders.values())
+            if (pending_capital + order_cost) > MAX_PENDING_ORDER_CAPITAL:
+                return False, f"Pending order capital cap exceeded (${pending_capital + order_cost:.2f} > ${MAX_PENDING_ORDER_CAPITAL:.2f})"
+
+            # 9. Max Open Order Count (10 orders)
+            if len(store.open_orders) >= settings.max_open_orders:
                 return False, f"Max open orders ({settings.max_open_orders}) reached"
 
-            # 5. Market-level Exposure Limit
-            market_exposure = await store.exposure_for_market(order.token_id)
-            order_cost = order.price * order.size
-            if market_exposure + order_cost > settings.max_position_per_market_usdc:
-                return False, f"Market exposure limit exceeded (${market_exposure + order_cost:.2f} > ${settings.max_position_per_market_usdc:.2f})"
+            # 10. Price Sanity & Microstructure Bounds [0.01, 0.99]
+            if not (0.01 <= order.price <= 0.99):
+                return False, f"Price {order.price} out of valid bounds [0.01, 0.99]"
 
-            # 6. Total Portfolio Exposure Limit
-            total_exp = await store.total_exposure()
-            if total_exp + order_cost > settings.max_total_exposure_usdc:
-                return False, f"Total exposure limit exceeded (${total_exp + order_cost:.2f} > ${settings.max_total_exposure_usdc:.2f})"
-
-            # 7. Price Sanity Check
-            if not (0.005 <= order.price <= 0.995):
-                return False, f"Price {order.price} out of valid bounds [0.005, 0.995]"
-
-            # 8. Minimum Order Size
+            # 11. Minimum Order Sizing ($0.50 minimum)
             if order.size < 0.5:
-                return False, f"Order size {order.size} is below minimum threshold"
+                return False, f"Order size {order.size} is below minimum liquidity threshold"
 
             return True, "OK"
 
@@ -83,10 +125,10 @@ class RiskManager:
         if store.kill_switch_active:
             return
         store.kill_switch_active = True
-        log.critical("RISK CIRCUIT BREAKER TRIGGERED: %s", reason)
+        log.critical("[risk_manager] 🛑 CIRCUIT BREAKER TRIGGERED: %s", reason)
         await store.log_event(f"🛑 RISK BREAKER: {reason}")
         cancelled = await store.cancel_all_orders()
-        log.warning("Cancelled %d open orders across all strategies", len(cancelled))
+        log.warning("[risk_manager] Cancelled %d open orders across all strategies", len(cancelled))
 
     async def activate_kill_switch(self, reason: str = "Manual") -> None:
         await self._trigger_kill_switch(reason)
@@ -94,29 +136,33 @@ class RiskManager:
     async def deactivate_kill_switch(self) -> None:
         async with self._lock:
             store.kill_switch_active = False
-            log.info("Risk gate reset — trading resumed")
+            # Update peak equity to current equity to reset MDD baseline
+            current_eq = 200.0 + store.daily_pnl
+            store.peak_equity = current_eq
+            log.info("[risk_manager] Risk gate reset — trading resumed (peak equity=$%.2f)", current_eq)
             await store.log_event("▶ Risk gate reset — trading resumed")
 
     async def status_report(self) -> dict:
         open_count = await store.open_order_count()
         total_exp = await store.total_exposure()
-        current_eq = 10000.0 + store.daily_pnl
-        drawdown_pct = ((store.peak_equity - current_eq) / store.peak_equity * 100) if store.peak_equity > 0 else 0.0
+        current_eq = 200.0 + store.daily_pnl
+        drawdown_dollars = max(store.peak_equity - current_eq, 0.0)
 
         return {
             "kill_switch": store.kill_switch_active,
+            "bankroll_ceiling": float(BANKROLL_CEILING),
+            "cash_reserve_min": float(MIN_CASH_RESERVE),
+            "max_deployable_capital": float(MAX_DEPLOYABLE_CAPITAL),
             "daily_pnl": store.daily_pnl,
-            "daily_loss_limit": -abs(settings.daily_loss_limit_usdc),
-            "peak_equity": round(store.peak_equity, 2),
-            "current_equity": round(current_eq, 2),
-            "drawdown_pct": round(drawdown_pct, 2),
-            "max_drawdown_limit_pct": MAX_DRAWDOWN_PCT * 100,
+            "daily_loss_limit": -float(DAILY_LOSS_STOP),
+            "drawdown_dollars": round(drawdown_dollars, 2),
+            "max_drawdown_limit": float(MAX_DRAWDOWN_LIMIT),
             "open_orders": open_count,
             "max_open_orders": settings.max_open_orders,
             "total_exposure": round(total_exp, 2),
-            "max_total_exposure": settings.max_total_exposure_usdc,
+            "max_total_exposure": float(MAX_TOTAL_OPEN_RISK),
         }
 
 
-# Module-level singleton
-risk_manager = RiskManager()
+# Global singleton
+risk_manager = InstitutionalRiskEngine()

@@ -857,7 +857,9 @@ async def get_system_health():
     """Comprehensive pipeline health, latency, buffer depth, and uptime metrics."""
     poller_stats = book_poller.stats
     tracked_count = len(store.order_books)
-    vector_docs = vector_store._doc_count
+    from core.market_db import market_db
+    db_stats = market_db.get_stats()
+    vector_docs = len(vector_store.doc_vectors)
 
     return {
         "status": "HEALTHY",
@@ -878,14 +880,17 @@ async def get_system_health():
             "psi_drift": drift_detector.last_psi,
             "drift_status": drift_detector.drift_status,
         },
+        "market_db": db_stats,
         "storage": {
             "vector_index_size": vector_docs,
             "audit_trail_backend": "SQLite3 WAL",
+            "market_intelligence_db": f"SQLite3 WAL ({db_stats.get('snapshots_recorded', 0)} snaps, {db_stats.get('ticks_recorded', 0)} ticks)",
             "state_persistence": "Atomic JSON (/app/data/store_state.json)",
         },
         "services": [
             {"name": "FastAPI Server", "status": "UP", "port": 8080},
             {"name": "REST Adaptive Book Poller", "status": "UP", "frequency": "2.0s / 6.0s"},
+            {"name": "Specialized Market DB Ingester", "status": "UP"},
             {"name": "Fundamental News Ingester", "status": "UP"},
             {"name": "Position Risk Manager (TP/SL)", "status": "UP"},
             {"name": "50+ Strategy Orchestrator", "status": "UP"},

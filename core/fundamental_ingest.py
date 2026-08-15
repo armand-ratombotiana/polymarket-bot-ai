@@ -99,10 +99,17 @@ class FundamentalIngestionEngine:
         if len(self.news_feed) > 100:
             self.news_feed = self.news_feed[-100:]
 
-        # Update market token sentiment
-        for tid in related_tokens:
-            curr = self._token_sentiment.get(tid, 0.0)
-            self._token_sentiment[tid] = 0.7 * curr + 0.3 * sentiment
+        # Ingest into specialized market_db asynchronously
+        from core.market_db import market_db
+        asyncio.create_task(
+            market_db.record_news(
+                headline=headline,
+                source=source,
+                category=category,
+                sentiment=sentiment,
+                matched_tokens=related_tokens,
+            )
+        )
 
         return item
 
