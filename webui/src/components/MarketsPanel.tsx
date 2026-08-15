@@ -3,6 +3,7 @@
 
 import { useState } from 'react'
 import { OrderBook } from '@/hooks/useBot'
+import { formatMarketTitle, getCategoryBadge } from '@/lib/formatters'
 
 interface Props {
   books: OrderBook[]
@@ -58,34 +59,31 @@ export default function MarketsPanel({ books, onSelectMarket }: Props) {
 
   const sorted = [...filtered].sort((a, b) => {
     let diff = 0
-    if (sortBy === 'mid') {
-      diff = (a.mid || 0) - (b.mid || 0)
-    } else if (sortBy === 'spread') {
-      diff = (a.spread || 0) - (b.spread || 0)
-    } else if (sortBy === 'age') {
-      diff = a.updated_at - b.updated_at
-    }
-    return sortAsc ? diff : -diff
+    if (sortBy === 'mid') diff = (b.mid ?? 0) - (a.mid ?? 0)
+    else if (sortBy === 'spread') diff = (a.spread ?? 99) - (b.spread ?? 99)
+    else if (sortBy === 'age') diff = b.updated_at - a.updated_at
+    return sortAsc ? -diff : diff
   })
 
   return (
-    <div className="card flex flex-col h-full min-h-0 bg-[#111318] border border-[#252836]">
-      {/* Panel Header */}
-      <div className="card-header flex flex-wrap justify-between items-center px-3 py-2 border-b border-[#252836] gap-2">
+    <div className="card h-full flex flex-col p-3.5 bg-[#161822] border border-[#252836]">
+      {/* Header */}
+      <div className="card-header pb-2 mb-2 border-b border-[#252836]/60 flex items-center justify-between gap-2">
         <div className="flex items-center gap-2">
           <span className="card-title text-xs font-bold text-[#e8eaf0]">
-            📈 Markets &amp; Order Books
+            ⚡ Active Order Books ({books.length})
           </span>
-          <span className="text-[10px] text-[#8b91a8] mono">({sorted.length} active)</span>
+          <span className="badge badge-green text-[10px]">Real-Time Streaming</span>
         </div>
 
-        <div className="flex items-center gap-1.5">
+        {/* Search */}
+        <div className="relative">
           <input
             type="text"
             placeholder="Search markets…"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            className="bg-[#161822] border border-[#252836] rounded px-2 py-0.5 text-[11px] mono text-[#e8eaf0] placeholder-[#4a5068] focus:outline-none focus:border-blue-500 w-32"
+            className="bg-[#111318] border border-[#252836] rounded px-2.5 py-0.5 text-xs text-[#e8eaf0] placeholder-[#4a5068] w-36 focus:outline-none focus:border-blue-500 focus:w-48 transition-all"
           />
         </div>
       </div>
@@ -100,7 +98,7 @@ export default function MarketsPanel({ books, onSelectMarket }: Props) {
           <table className="data-table text-xs">
             <thead>
               <tr>
-                <th>Market</th>
+                <th>Prediction Market Contract</th>
                 <th>Bid</th>
                 <th>Ask</th>
                 <th
@@ -125,43 +123,50 @@ export default function MarketsPanel({ books, onSelectMarket }: Props) {
               </tr>
             </thead>
             <tbody>
-              {sorted.map((b) => (
-                <tr
-                  key={b.token_id}
-                  className="hover:bg-blue-500/10 transition-colors group"
-                >
-                  <td className="max-w-[150px]">
-                    <span
-                      onClick={() => onSelectMarket && onSelectMarket(b.token_id, b.slug)}
-                      className="text-[#e8eaf0] font-medium block truncate cursor-pointer hover:text-blue-400"
-                      title={b.slug}
-                    >
-                      {b.slug}
-                    </span>
-                  </td>
-                  <td className="text-green-400 mono font-semibold">
-                    {b.best_bid != null ? b.best_bid.toFixed(3) : '—'}
-                  </td>
-                  <td className="text-red-400 mono font-semibold">
-                    {b.best_ask != null ? b.best_ask.toFixed(3) : '—'}
-                  </td>
-                  <td>
-                    <ProbabilityGauge mid={b.mid} />
-                  </td>
-                  <td className="text-[#8b91a8] mono">
-                    {b.spread != null ? `${(b.spread * 100).toFixed(1)}¢` : '—'}
-                  </td>
-                  <td className="text-[#4a5068] mono text-[10px]">{age(b.updated_at)}</td>
-                  <td className="text-right">
-                    <button
-                      onClick={() => onSelectMarket && onSelectMarket(b.token_id, b.slug)}
-                      className="text-[10px] uppercase font-semibold text-blue-400 hover:text-white bg-blue-500/10 hover:bg-blue-500/30 px-2 py-0.5 rounded border border-blue-500/20"
-                    >
-                      Trade
-                    </button>
-                  </td>
-                </tr>
-              ))}
+              {sorted.map((b) => {
+                const title = formatMarketTitle(b.slug)
+                const cat = getCategoryBadge('', b.slug)
+                return (
+                  <tr
+                    key={b.token_id}
+                    className="hover:bg-blue-500/10 transition-colors group"
+                  >
+                    <td className="max-w-[200px]">
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-xs shrink-0">{cat.icon}</span>
+                        <span
+                          onClick={() => onSelectMarket && onSelectMarket(b.token_id, b.slug)}
+                          className="text-[#e8eaf0] font-semibold block truncate cursor-pointer hover:text-blue-400 text-[11px]"
+                          title={title}
+                        >
+                          {title}
+                        </span>
+                      </div>
+                    </td>
+                    <td className="text-green-400 mono font-semibold">
+                      {b.best_bid != null ? b.best_bid.toFixed(3) : '—'}
+                    </td>
+                    <td className="text-red-400 mono font-semibold">
+                      {b.best_ask != null ? b.best_ask.toFixed(3) : '—'}
+                    </td>
+                    <td>
+                      <ProbabilityGauge mid={b.mid} />
+                    </td>
+                    <td className="text-[#8b91a8] mono">
+                      {b.spread != null ? `${(b.spread * 100).toFixed(1)}¢` : '—'}
+                    </td>
+                    <td className="text-[#4a5068] mono text-[10px]">{age(b.updated_at)}</td>
+                    <td className="text-right">
+                      <button
+                        onClick={() => onSelectMarket && onSelectMarket(b.token_id, b.slug)}
+                        className="text-[10px] uppercase font-semibold text-blue-400 hover:text-white bg-blue-500/10 hover:bg-blue-500/30 px-2 py-0.5 rounded border border-blue-500/20"
+                      >
+                        Trade
+                      </button>
+                    </td>
+                  </tr>
+                )
+              })}
             </tbody>
           </table>
         )}

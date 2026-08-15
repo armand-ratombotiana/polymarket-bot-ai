@@ -3,6 +3,7 @@
 
 import { useEffect, useState } from 'react'
 import { getApiUrl } from '@/lib/api'
+import { formatMarketTitle, getCategoryBadge } from '@/lib/formatters'
 
 interface Bar {
   timestamp: number
@@ -28,8 +29,11 @@ export default function MarketChartModal({ tokenId, slug, onClose, onOrderPlaced
 
   // Fast Trade state
   const [price, setPrice] = useState('0.50')
-  const [sizeUsdc, setSizeUsdc] = useState('20')
+  const [sizeUsdc, setSizeUsdc] = useState('5')
   const [placing, setPlacing] = useState(false)
+
+  const title = formatMarketTitle(slug)
+  const cat = getCategoryBadge('', slug)
 
   const fetchOhlcv = async () => {
     try {
@@ -79,10 +83,13 @@ export default function MarketChartModal({ tokenId, slug, onClose, onOrderPlaced
         {/* Header */}
         <div className="px-5 py-3 border-b border-[#252836] flex justify-between items-center bg-[#161822]">
           <div className="flex items-center gap-3">
-            <span className="text-base">📊</span>
+            <span className="text-xl">{cat.icon}</span>
             <div>
-              <h3 className="text-sm font-bold text-[#e8eaf0] truncate max-w-md">{slug}</h3>
-              <span className="text-[10px] text-[#4a5068] mono">{tokenId.slice(0, 20)}…</span>
+              <h3 className="text-sm font-bold text-[#e8eaf0] truncate max-w-md">{title}</h3>
+              <div className="flex items-center gap-2 mt-0.5">
+                <span className={`text-[9px] px-1.5 py-0.2 rounded border ${cat.color}`}>{cat.label}</span>
+                <span className="text-[10px] text-[#4a5068] mono">{tokenId.slice(0, 18)}…</span>
+              </div>
             </div>
           </div>
 
@@ -203,12 +210,12 @@ export default function MarketChartModal({ tokenId, slug, onClose, onOrderPlaced
               />
             </div>
             <div>
-              <label className="text-[10px] text-[#8b91a8] block mb-0.5">Amount ($ USDC)</label>
+              <label className="text-[10px] text-[#8b91a8] block mb-0.5">Amount ($ USDC - Max $10)</label>
               <input
                 type="number"
-                step="5"
+                step="2"
                 min="1"
-                max="500"
+                max="10"
                 value={sizeUsdc}
                 onChange={(e) => setSizeUsdc(e.target.value)}
                 className="w-24 bg-[#111318] border border-[#252836] rounded px-2.5 py-1 text-xs mono text-[#e8eaf0] focus:outline-none focus:border-blue-500"

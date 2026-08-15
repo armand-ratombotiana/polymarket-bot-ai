@@ -99,10 +99,10 @@ class FundamentalIngestionEngine:
         if len(self.news_feed) > 100:
             self.news_feed = self.news_feed[-100:]
 
-        # Ingest into specialized market_db asynchronously
-        from core.market_db import market_db
+        # Ingest into TimescaleDB / PostgreSQL asynchronously
+        from core.timescale_db import timescale_db
         asyncio.create_task(
-            market_db.record_news(
+            timescale_db.record_news(
                 headline=headline,
                 source=source,
                 category=category,

@@ -118,9 +118,9 @@ class MarketMLModel:
         self.reliability_curve: List[Dict[str, float]] = []
 
     def fit_initial(self) -> None:
-        """Train initial calibrated ensemble on specialized DB history combined with synthetic market dynamics."""
-        from core.market_db import market_db
-        X_db, y_db = market_db.fetch_training_samples(min_samples=200)
+        """Train initial calibrated ensemble on TimescaleDB history combined with synthetic market dynamics."""
+        from core.timescale_db import timescale_db
+        X_db, y_db = timescale_db.fetch_training_samples(min_samples=200)
 
         X_synth, y_synth = _synthetic_training_data(3000)
         if X_db is not None and len(X_db) > 0:

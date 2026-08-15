@@ -4,11 +4,39 @@ networks:
 
 volumes:
   bot-logs:
-  bot-data:       # persists ML model across restarts
+  bot-data:       # persists ML models & fallback state
+  timescale-data: # persists TimescaleDB / PostgreSQL time-series
 
 services:
 
-  # ── Polymarket Bot (FastAPI + Supervisord + ML) ───────────────────────────
+  # ── TimescaleDB & PostgreSQL (Time-Series & Relational Engine) ────────────
+  timescaledb:
+    image: timescale/timescaledb:latest-pg16
+    container_name: polymarket-timescaledb
+    restart: always
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: polymarket_secret
+      POSTGRES_DB: polymarket
+      TIMESCALEDB_TELEMETRY: "off"
+    ports:
+      - "5432:5432"
+    volumes:
+      - timescale-data:/var/lib/postgresql/data
+    networks:
+      - bot-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d polymarket"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+  # ── Polymarket Bot (FastAPI + Supervisord + ML + Ingestion) ────────────────
   bot:
     build:
       context: .
@@ -19,15 +47,19 @@ services:
     env_file: .env
     environment:
       PAPER_TRADE: "true"            # safe default — override in .env
+      DATABASE_URL: postgresql://postgres:polymarket_secret@timescaledb:5432/polymarket
       MODEL_PATH: /app/data/model.pkl
       LOG_LEVEL: INFO
     ports:
       - "8080:8000"                  # host:8080 → container:8000
     volumes:
       - bot-logs:/app/logs           # persisted logs
-      - bot-data:/app/data           # persisted ML model
+      - bot-data:/app/data           # persisted ML model & SQLite fallback
     networks:
       - bot-net
+    depends_on:
+      timescaledb:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c",
              "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health', timeout=4)"]
@@ -64,30 +96,3 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
-
-  # ── Live trading (profile-gated) ──────────────────────────────────────────
-  bot-live:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: polymarket-bot:latest
-    container_name: polymarket-bot-live
-    restart: always
-    env_file: .env
-    environment:
-      PAPER_TRADE: "false"
-      MODEL_PATH: /app/data/model.pkl
-    ports:
-      - "8082:8000"                  # live bot on a different host port
-    volumes:
-      - bot-logs:/app/logs
-      - bot-data:/app/data
-    networks:
-      - bot-net
-    profiles:
-      - live
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "20m"
-        max-file: "5"

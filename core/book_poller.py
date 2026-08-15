@@ -144,11 +144,11 @@ class BookPoller:
         )
         await store.update_order_book(book)
 
-        # Ingest into specialized market_db asynchronously
+        # Ingest into TimescaleDB / PostgreSQL asynchronously
         slug = store.market_slugs.get(token_id, token_id[:16])
-        from core.market_db import market_db
+        from core.timescale_db import timescale_db
         asyncio.create_task(
-            market_db.record_snapshot(
+            timescale_db.record_snapshot(
                 token_id=token_id,
                 slug=slug,
                 best_bid=book.best_bid,
@@ -163,7 +163,7 @@ class BookPoller:
             ofi = (best_b_size - best_a_size) / max(best_b_size + best_a_size, 1.0)
             micro_p = (book.best_bid * best_a_size + book.best_ask * best_b_size) / max(best_b_size + best_a_size, 1.0) if (book.best_bid and book.best_ask) else (book.mid or 0.5)
             asyncio.create_task(
-                market_db.record_tick(
+                timescale_db.record_tick(
                     token_id=token_id,
                     best_bid_size=best_b_size,
                     best_ask_size=best_a_size,

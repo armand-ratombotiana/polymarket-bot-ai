@@ -139,15 +139,23 @@ async def _state_persistence_loop() -> None:
 async def lifespan(app: FastAPI):
     global _seeded_tokens
 
-    # 1. Start paper simulator
+    # 1. Start TimescaleDB / PostgreSQL time-series pool
+    from core.timescale_db import timescale_db
+    await timescale_db.init_postgres_pool()
+
+    # 2. Start paper simulator
     if settings.paper_trade:
         await paper_sim.start()
         await store.log_event("📄 Paper trading mode active — no real funds used")
 
-    # 2. Seed markets from Gamma API and initialize Vector Store
+    # 3. Seed markets from Gamma API and initialize Vector Store
     _seeded_tokens = await _seed_markets(60)
 
-    # 3. Start REST book poller & supplemental WebSocket client
+    # 4. Start Universal Market Discovery Engine (500+ markets)
+    from core.market_discovery import market_discovery
+    await market_discovery.start()
+
+    # 5. Start REST book poller & supplemental WebSocket client
     book_poller.set_tokens(_seeded_tokens)
     await book_poller.start()
     await store.log_event(f"📈 Book poller started — monitoring {len(_seeded_tokens)} tokens")
@@ -155,18 +163,18 @@ async def lifespan(app: FastAPI):
     await ws_client.start()
     await store.log_event("🔌 WebSocket supplemental feed started")
 
-    # 4. Start Settlement Engine, Fundamental News Ingest & Position Risk Manager
+    # 6. Start Settlement Engine, Fundamental News Ingest & Position Risk Manager
     await settlement_engine.start()
     await fundamental_engine.start()
     await position_manager.start()
 
-    # 5. Initialize Core Default Strategies in Registry
+    # 7. Initialize Core Default Strategies in Registry
     await strategy_registry.start_strategy("mm_avellaneda_stoikov")
     await strategy_registry.start_strategy("arb_binary_dutch_book")
     await strategy_registry.start_strategy("ml_random_forest_quant")
     await store.log_event(f"🤖 50+ Strategy Engine online — 3 active base strategies initialized")
 
-    # 6. Background tasks
+    # 8. Background tasks
     broadcast_task = asyncio.create_task(_broadcast_loop(), name="ws-broadcast")
     reseed_task = asyncio.create_task(_reseed_loop(), name="market-reseed")
     token_sync_task = asyncio.create_task(_token_sync_loop(), name="token-sync")
@@ -857,8 +865,8 @@ async def get_system_health():
     """Comprehensive pipeline health, latency, buffer depth, and uptime metrics."""
     poller_stats = book_poller.stats
     tracked_count = len(store.order_books)
-    from core.market_db import market_db
-    db_stats = market_db.get_stats()
+    from core.timescale_db import timescale_db
+    db_stats = timescale_db.get_stats()
     vector_docs = len(vector_store.doc_vectors)
 
     return {
@@ -880,11 +888,13 @@ async def get_system_health():
             "psi_drift": drift_detector.last_psi,
             "drift_status": drift_detector.drift_status,
         },
+        "timescale_db": db_stats,
         "market_db": db_stats,
         "storage": {
+            "database_engine": db_stats.get("db_backend", "TimescaleDB / PostgreSQL"),
             "vector_index_size": vector_docs,
             "audit_trail_backend": "SQLite3 WAL",
-            "market_intelligence_db": f"SQLite3 WAL ({db_stats.get('snapshots_recorded', 0)} snaps, {db_stats.get('ticks_recorded', 0)} ticks)",
+            "market_intelligence_db": f"{db_stats.get('db_backend')} ({db_stats.get('snapshots_recorded', 0)} snaps, {db_stats.get('ticks_recorded', 0)} ticks)",
             "state_persistence": "Atomic JSON (/app/data/store_state.json)",
         },
         "services": [

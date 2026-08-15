@@ -1,7 +1,8 @@
-// components/OrdersPanel.tsx — Pro Open Orders Desk
+// components/OrdersPanel.tsx — Live Working Orders Panel
 'use client'
 
 import { Order } from '@/hooks/useBot'
+import { formatMarketTitle, getCategoryBadge } from '@/lib/formatters'
 
 interface Props {
   orders: Order[]
@@ -11,34 +12,39 @@ interface Props {
 function age(ts: number) {
   const s = Math.floor(Date.now() / 1000 - ts)
   if (s < 60) return `${s}s`
-  if (s < 3600) return `${Math.floor(s / 60)}m`
-  return `${Math.floor(s / 3600)}h`
+  return `${Math.floor(s / 60)}m`
 }
 
 export default function OrdersPanel({ orders, onCancel }: Props) {
   return (
-    <div className="card flex flex-col h-full min-h-0 bg-[#111318] border border-[#252836]">
-      <div className="card-header flex justify-between items-center px-3 py-2 border-b border-[#252836]">
+    <div className="card h-full flex flex-col p-3.5 bg-[#161822] border border-[#252836]">
+      {/* Header */}
+      <div className="card-header pb-2 mb-2 border-b border-[#252836]/60 flex items-center justify-between">
         <div className="flex items-center gap-2">
-          <span className="card-title text-xs font-bold text-[#e8eaf0]">📋 Active Open Orders</span>
-          <span className="badge badge-blue text-[10px] mono font-semibold">{orders.length}</span>
+          <span className="card-title text-xs font-bold text-[#e8eaf0]">
+            📋 Open Orders ({orders.length})
+          </span>
+          <span className="badge badge-dim text-[10px]">Queue Active</span>
         </div>
+        <span className="text-[10px] text-[#8b91a8] mono">
+          {orders.length} active in book
+        </span>
       </div>
 
+      {/* Orders Table */}
       <div className="overflow-auto scrollbar-thin flex-1">
         {orders.length === 0 ? (
-          <div className="flex flex-col items-center justify-center h-28 text-[#4a5068] text-xs gap-1">
-            <span>No active open orders.</span>
-            <span className="text-[10px] text-[#3b4054]">Active market maker or signal orders will appear here.</span>
+          <div className="flex items-center justify-center h-28 text-[#4a5068] text-xs">
+            No working limit orders in queue
           </div>
         ) : (
           <table className="data-table text-xs">
             <thead>
               <tr>
+                <th>Market Contract</th>
                 <th>Side</th>
-                <th>Market</th>
                 <th>Price</th>
-                <th>Size / Filled</th>
+                <th>Size</th>
                 <th>Strategy</th>
                 <th>Age</th>
                 <th className="text-right">Action</th>
@@ -46,52 +52,43 @@ export default function OrdersPanel({ orders, onCancel }: Props) {
             </thead>
             <tbody>
               {orders.map((o) => {
-                const fillPct = o.size > 0 ? Math.round((o.size_matched / o.size) * 100) : 0
+                const title = formatMarketTitle(o.slug)
+                const cat = getCategoryBadge('', o.slug)
                 return (
-                  <tr key={o.order_id} className="hover:bg-blue-500/5 transition-colors">
+                  <tr key={o.order_id} className="hover:bg-blue-500/10 transition-colors">
+                    <td className="max-w-[140px]">
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-xs shrink-0">{cat.icon}</span>
+                        <span className="text-[#e8eaf0] font-semibold block truncate text-[11px]" title={title}>
+                          {title}
+                        </span>
+                      </div>
+                    </td>
                     <td>
                       <span
-                        className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${
-                          o.side === 'BUY'
-                            ? 'bg-green-500/20 text-green-400 border border-green-500/40'
-                            : 'bg-red-500/20 text-red-400 border border-red-500/40'
+                        className={`badge text-[9px] font-bold ${
+                          o.side === 'BUY' ? 'badge-green' : 'badge-red'
                         }`}
                       >
                         {o.side}
                       </span>
                     </td>
-                    <td className="max-w-[130px]">
-                      <span className="text-[#e8eaf0] font-medium truncate block" title={o.slug}>
-                        {o.slug || o.token_id.slice(0, 12)}
-                      </span>
+                    <td className="mono font-semibold text-cyan-400">
+                      ${o.price.toFixed(3)}
                     </td>
-                    <td className="mono font-semibold text-[#e8eaf0]">{o.price.toFixed(4)}</td>
-                    <td>
-                      <div className="flex flex-col gap-0.5">
-                        <span className="mono text-[11px] text-[#8b91a8]">
-                          {o.size_matched.toFixed(0)} / {o.size.toFixed(0)} sh
-                        </span>
-                        {fillPct > 0 && (
-                          <div className="w-16 h-1 bg-[#252836] rounded-full overflow-hidden">
-                            <div
-                              className="h-full bg-cyan-400 rounded-full"
-                              style={{ width: `${fillPct}%` }}
-                            />
-                          </div>
-                        )}
-                      </div>
+                    <td className="mono text-[#e8eaf0]">
+                      {o.size.toFixed(1)}
                     </td>
                     <td>
-                      <span className="text-[10px] text-[#8b91a8] bg-[#161822] px-1.5 py-0.5 rounded border border-[#252836] mono">
-                        {o.strategy || 'manual'}
+                      <span className="text-[10px] text-[#8b91a8] mono bg-[#111318] px-1.5 py-0.5 rounded border border-[#252836]">
+                        {o.strategy}
                       </span>
                     </td>
-                    <td className="text-[#4a5068] mono text-[10px]">{age(o.created_at)}</td>
+                    <td className="mono text-[#4a5068] text-[10px]">{age(o.created_at)}</td>
                     <td className="text-right">
                       <button
                         onClick={() => onCancel(o.order_id)}
-                        className="text-[10px] text-amber-400 hover:text-white bg-amber-500/10 hover:bg-amber-500/30 px-2 py-0.5 rounded border border-amber-500/20"
-                        title="Cancel this order"
+                        className="text-[10px] text-red-400 hover:text-red-300 hover:bg-red-500/10 px-2 py-0.5 rounded border border-red-500/20"
                       >
                         Cancel
                       </button>
