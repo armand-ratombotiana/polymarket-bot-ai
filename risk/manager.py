@@ -38,7 +38,7 @@ MAX_CORRELATED_EXPOSURE = Decimal("1000.00")
 MAX_STRATEGY_EXPOSURE = Decimal("2000.00")
 MAX_TOTAL_OPEN_RISK = Decimal("4000.00")
 MAX_PENDING_ORDER_CAPITAL = Decimal("1500.00")
-MAX_OPEN_POSITIONS = 25
+MAX_OPEN_POSITIONS = 100
 DAILY_LOSS_STOP = Decimal("250.00")
 WEEKLY_LOSS_STOP = Decimal("600.00")
 MAX_DRAWDOWN_LIMIT = Decimal("1000.00")
@@ -71,38 +71,42 @@ class InstitutionalRiskEngine:
             peak_equity_dec = to_dec(store.peak_equity)
             current_equity = BANKROLL_CEILING + daily_pnl_dec
 
-            # 2. Daily Loss Stop (USD 4.00)
+            # 2. Daily Loss Stop (USD 250.00)
             if daily_pnl_dec <= -DAILY_LOSS_STOP:
                 await self._trigger_kill_switch(f"Daily loss stop breach (${abs(daily_pnl_dec):.2f} >= ${DAILY_LOSS_STOP:.2f})")
                 return False, f"Daily loss stop reached (${DAILY_LOSS_STOP:.2f})"
 
-            # 3. Max Drawdown from High-Water Mark (USD 16.00)
+            # 3. Max Drawdown from High-Water Mark (USD 1,000.00)
             if peak_equity_dec > Decimal("0.0"):
                 drawdown_dollars = peak_equity_dec - current_equity
                 if drawdown_dollars >= MAX_DRAWDOWN_LIMIT:
                     await self._trigger_kill_switch(f"Max Drawdown stop breach (${drawdown_dollars:.2f} >= ${MAX_DRAWDOWN_LIMIT:.2f})")
                     return False, f"Max drawdown limit reached (${MAX_DRAWDOWN_LIMIT:.2f})"
 
-            # 4. Cash Reserve Protection ($80.00 Reserve minimum)
+            # 4. Cash Reserve Protection ($2,000 Reserve minimum)
             total_exp = to_dec(await store.total_exposure())
-            if (total_exp + order_cost) > MAX_DEPLOYABLE_CAPITAL:
+            if order.side == Side.BUY and (total_exp + order_cost) > MAX_DEPLOYABLE_CAPITAL:
                 return False, f"Cash reserve breach: total exposure ${total_exp + order_cost:.2f} exceeds deployable capital ${MAX_DEPLOYABLE_CAPITAL:.2f}"
 
-            # 5. Total Simultaneous Open Risk ($60.00 max)
-            if (total_exp + order_cost) > MAX_TOTAL_OPEN_RISK:
+            # 5. Total Simultaneous Open Risk ($4,000 max)
+            if order.side == Side.BUY and (total_exp + order_cost) > MAX_TOTAL_OPEN_RISK:
                 return False, f"Total open risk cap exceeded (${total_exp + order_cost:.2f} > ${MAX_TOTAL_OPEN_RISK:.2f})"
 
-            # 6. Absolute Maximum Single Position Size ($10.00 max)
+            # 6. Absolute Maximum Single Position Size ($500 max)
             market_exp = to_dec(await store.exposure_for_market(order.token_id))
-            if (market_exp + order_cost) > ABSOLUTE_MAX_POSITION:
+            if order.side == Side.BUY and (market_exp + order_cost) > ABSOLUTE_MAX_POSITION:
                 return False, f"Single position cap exceeded (${market_exp + order_cost:.2f} > ${ABSOLUTE_MAX_POSITION:.2f})"
 
-            # 7. Max Open Positions Count (8 contracts)
-            active_positions = len(store.positions)
-            if order.token_id not in store.positions and active_positions >= MAX_OPEN_POSITIONS:
-                return False, f"Max simultaneous open positions ({MAX_OPEN_POSITIONS}) reached"
+            # 7. Max Open Positions Count (Only counts active positions with yes_shares > 0 or total_invested > 0)
+            if order.side == Side.BUY:
+                active_positions = sum(1 for p in store.positions.values() if p.yes_shares > 0.001 or p.total_invested > 0.01)
+                existing_pos = store.positions.get(order.token_id)
+                is_new_market = not existing_pos or (existing_pos.yes_shares <= 0.001 and existing_pos.total_invested <= 0.01)
 
-            # 8. Pending Order Capital Cap ($20.00 max)
+                if is_new_market and active_positions >= MAX_OPEN_POSITIONS:
+                    return False, f"Max simultaneous open positions ({MAX_OPEN_POSITIONS}) reached"
+
+            # 8. Pending Order Capital Cap ($1,500 max)
             pending_capital = sum(to_dec(o.price) * to_dec(o.size) for o in store.open_orders.values())
             if (pending_capital + order_cost) > MAX_PENDING_ORDER_CAPITAL:
                 return False, f"Pending order capital cap exceeded (${pending_capital + order_cost:.2f} > ${MAX_PENDING_ORDER_CAPITAL:.2f})"
