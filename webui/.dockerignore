@@ -3,3 +3,6 @@ node_modules
 .env
 *.log
 .DS_Store
+.git
+tsconfig.tsbuildinfo
+next-env.d.ts

@@ -37,3 +37,22 @@ Thumbs.db
 
 # ── Docker ────────────────────────────────────────────────────────────────────
 docker-compose.override.yml
+
+# ── Git ───────────────────────────────────────────────────────────────────────
+.git/
+.gitignore
+.gitattributes
+
+# ── Web UI (built separately via webui/Dockerfile — not needed in bot image) ──
+webui/
+
+# ── Node ──────────────────────────────────────────────────────────────────────
+node_modules/
+.next/
+
+# ── Local databases & ML artifacts ────────────────────────────────────────────
+*.db
+*.sqlite
+*.sqlite3
+data/
+model.pkl

@@ -9,6 +9,9 @@ python-multipart>=0.0.9
 httpx>=0.27.0,<1.0.0
 websockets>=12.0,<14.0
 
+# ── Database (TimescaleDB / PostgreSQL async driver) ─────────────────────────
+asyncpg>=0.29.0,<1.0.0
+
 # ── Ethereum / wallet ─────────────────────────────────────────────────────────
 eth-account>=0.11.0,<1.0.0
 

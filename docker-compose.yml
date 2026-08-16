@@ -36,7 +36,8 @@ services:
         max-size: "20m"
         max-file: "5"
 
-  # ── Polymarket Bot (FastAPI + Supervisord + ML + Ingestion) ────────────────
+  # ── Polymarket Bot (PAPER MODE) — FastAPI + Supervisord + ML + Ingestion ───
+  # Started with: docker compose --profile paper up -d   (or `make up`)
   bot:
     build:
       context: .
@@ -44,6 +45,7 @@ services:
     image: polymarket-bot:latest
     container_name: polymarket-bot
     restart: always                  # 24/7 — always restart on any failure
+    profiles: ["paper"]
     env_file: .env
     environment:
       PAPER_TRADE: "true"            # safe default — override in .env
@@ -73,7 +75,45 @@ services:
         max-size: "20m"
         max-file: "5"
 
+  # ── Polymarket Bot (LIVE MODE) — real money! ────────────────────────────────
+  # Started with: docker compose --profile live up -d   (or `make live`)
+  # Mutually exclusive with `bot` (same host port 8080 — only one runs at a time).
+  bot-live:
+    image: polymarket-bot:latest
+    container_name: polymarket-bot-live
+    restart: always
+    profiles: ["live"]
+    env_file: .env
+    environment:
+      PAPER_TRADE: "false"           # ⚠️ LIVE — real funds at risk!
+      DATABASE_URL: postgresql://postgres:polymarket_secret@timescaledb:5432/polymarket
+      MODEL_PATH: /app/data/model.pkl
+      LOG_LEVEL: INFO
+    ports:
+      - "8080:8000"                  # host:8080 → container:8000
+    volumes:
+      - bot-logs:/app/logs
+      - bot-data:/app/data
+    networks:
+      - bot-net
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health', timeout=4)"]
+      interval: 20s
+      timeout: 6s
+      retries: 5
+      start_period: 60s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "5"
+
   # ── Web UI (Next.js) ──────────────────────────────────────────────────────
+  # Served on :3010; connects to the bot API on host :8080.
   webui:
     build:
       context: ./webui
@@ -88,9 +128,6 @@ services:
       - "3010:3000"                  # host:3010 → container:3000
     networks:
       - bot-net
-    depends_on:
-      bot:
-        condition: service_healthy
     logging:
       driver: "json-file"
       options:

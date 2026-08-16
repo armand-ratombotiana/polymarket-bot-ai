@@ -5,7 +5,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    PIP_DEFAULT_TIMEOUT=120 \
+    PIP_DEFAULT_TIMEOUT=300 \
     MODEL_PATH=/app/data/model.pkl
 
 WORKDIR /app
@@ -18,9 +18,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 FROM base AS deps
 COPY requirements.txt .
 
-# pip install with 3 retries and 120s timeout per package
-RUN pip install --upgrade pip --timeout 120 && \
-    pip install --timeout 120 --retries 5 -r requirements.txt
+# pip install with 10 retries and 300s timeout per operation
+# (PyPI can be slow/flaky — retries absorb transient timeouts)
+RUN pip install --upgrade pip --timeout 300 && \
+    pip install --timeout 300 --retries 10 -r requirements.txt
 
 # ── Runtime ───────────────────────────────────────────────────────────────────
 FROM deps AS final

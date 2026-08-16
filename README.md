@@ -66,6 +66,34 @@ Settings → API Keys → Create New Key
 
 ---
 
+## Docker (Recommended — 24/7 Deployment)
+
+The whole stack is containerized: **TimescaleDB/PostgreSQL + bot (FastAPI/supervisord) + Next.js web UI**.
+
+```bash
+cp .env.example .env          # configure wallet, keep PAPER_TRADE=true
+docker compose --profile paper up -d --build   # or: make up
+```
+
+| URL | Service |
+|---|---|
+| http://localhost:3010 | Web dashboard (Next.js) |
+| http://localhost:8080  | Bot REST API + WebSocket (`/api/health`, `/ws`) |
+| http://localhost:5432  | TimescaleDB/PostgreSQL |
+
+**Live mode** (real money — run paper mode first for 24h+):
+
+```bash
+docker compose --profile live up -d --build    # or: make live
+```
+
+Convenience commands via `make`: `build`, `up`, `live`, `down`, `logs`, `cancel`, `status`, `shell-bot`, `shell-ui`, `clean`.
+
+> The paper and live bot profiles are mutually exclusive (both map host port `8080`).  
+> The bot reads `DATABASE_URL` and connects to the bundled TimescaleDB; if unavailable it falls back to SQLite in `/app/data`.
+
+---
+
 ## Commands
 
 ```bash
