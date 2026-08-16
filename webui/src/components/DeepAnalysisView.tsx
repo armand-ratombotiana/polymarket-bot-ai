@@ -3,7 +3,7 @@
 
 import { useEffect, useState } from 'react'
 import { getApiUrl } from '@/lib/api'
-import { formatMarketTitle, getCategoryBadge } from '@/lib/formatters'
+import { formatHierarchicalMarket, formatMarketTitle, getCategoryBadge } from '@/lib/formatters'
 
 interface MarketAnalysis {
   token_id: string
@@ -112,8 +112,7 @@ export default function DeepAnalysisView() {
   }
 
   const analysis = singleAnalysis || data?.top_opportunities[0]
-  const title = formatMarketTitle(analysis?.slug)
-  const cat = getCategoryBadge('', analysis?.slug)
+  const info = formatHierarchicalMarket(analysis?.slug)
 
   return (
     <div className="flex flex-col h-full bg-[#111318] border border-[#252836] rounded-lg overflow-hidden p-4 space-y-4 overflow-y-auto scrollbar-thin select-none">
@@ -126,9 +125,14 @@ export default function DeepAnalysisView() {
               Deep Market Intelligence &amp; Multi-Factor Alpha Forecaster
             </h2>
           </div>
-          <p className="text-xs text-[#8b91a8]">
-            Calibrated AI Probability vs Market Implied, 5-Level Depth OFI, Fundamental NLP Evidence &amp; Execution Feasibility
-          </p>
+          <div className="flex items-center gap-2 mt-0.5">
+            <span className={`text-[10px] px-2 py-0.5 rounded border ${info.category.color} font-bold`}>
+              {info.category.icon} {info.eventTitle}
+            </span>
+            <span className="text-xs text-[#8b91a8] font-medium truncate max-w-xl">
+              {info.question}
+            </span>
+          </div>
         </div>
 
         {/* Global Action Recommendation Badge */}

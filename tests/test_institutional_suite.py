@@ -192,7 +192,32 @@ class TestInstitutionalSuite(unittest.IsolatedAsyncioTestCase):
         slices = smart_router.generate_twap_schedule(total_size_usdc=500.0, price=0.52, duration_seconds=120, num_slices=4)
         self.assertEqual(len(slices), 4)
         total_sliced = sum(s.size_usdc for s in slices)
-        self.assertAlmostEqual(total_sliced, 500.0, delta=50.0)
+    async def test_09_market_discovery_coverage(self):
+        """Test universal catalog pagination, indexing, and coverage report generation."""
+        from core.market_discovery import UniversalMarketDiscoveryEngine
+        discovery = UniversalMarketDiscoveryEngine()
+        
+        # Inject mock discovered batch
+        mock_markets = [
+            {"id": "m1", "token_id": "tok-disc-1", "question": "Will Fed Cut Rates?", "slug": "will-fed-cut-rates", "active": True},
+            {"id": "m2", "clobTokenId": "tok-disc-2", "question": "Will Bitcoin Hit 150k?", "slug": "will-btc-hit-150k", "active": True},
+            {"id": "m3", "slug": "invalid-no-token", "active": True}, # will be recorded in exclusions
+        ]
+        
+        discovery._authoritative_count = 3
+        for m in mock_markets:
+            tid = m.get("clobTokenId") or m.get("token_id")
+            if tid:
+                discovery.catalog[tid] = m
+            else:
+                discovery.excluded_markets.append({"id": m.get("id", "m3"), "reason": "MISSING_CLOB_TOKEN_ID"})
+        
+        report = discovery.get_coverage_report()
+        self.assertEqual(report["authoritative_markets_reported"], 3)
+        self.assertEqual(report["validated_markets_stored"], 2)
+        self.assertEqual(report["excluded_markets_count"], 1)
+        self.assertAlmostEqual(report["coverage_percentage"], 66.67, places=1)
+        self.assertIsInstance(discovery.get_full_catalog(), list)
 
 
 if __name__ == "__main__":

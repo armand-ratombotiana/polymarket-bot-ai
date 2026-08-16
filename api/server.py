@@ -532,7 +532,7 @@ async def update_config(cfg: StrategyConfigUpdate):
 # ── Markets & Order Book Depth ────────────────────────────────────────────────
 
 @app.get("/api/markets", tags=["markets"])
-async def get_markets(limit: int = 20, search: Optional[str] = None):
+async def get_markets(limit: int = 50, search: Optional[str] = None):
     try:
         if search:
             items = await gamma_client.search_markets(search, limit=limit)
@@ -541,6 +541,22 @@ async def get_markets(limit: int = 20, search: Optional[str] = None):
         return {"markets": items, "count": len(items)}
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
+
+
+@app.get("/api/markets/coverage", tags=["markets"])
+async def get_market_coverage_report():
+    """Return authoritative Polymarket catalog coverage metrics and exclusion audit log."""
+    from core.market_discovery import market_discovery
+    report = market_discovery.get_coverage_report()
+    return report
+
+
+@app.get("/api/markets/catalog", tags=["markets"])
+async def get_market_catalog(limit: int = 100, category: Optional[str] = None):
+    """Return indexed market catalog with full hierarchy metadata."""
+    from core.market_discovery import market_discovery
+    catalog = market_discovery.get_full_catalog(limit=limit, category=category)
+    return {"catalog": catalog, "count": len(catalog)}
 
 
 @app.get("/api/depth/{token_id}", tags=["markets"])

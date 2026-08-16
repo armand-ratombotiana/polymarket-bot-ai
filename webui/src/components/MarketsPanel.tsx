@@ -1,9 +1,9 @@
-// components/MarketsPanel.tsx — Pro Markets & Live Order Books Panel
+// components/MarketsPanel.tsx — Pro Markets & Live Order Books Panel with Hierarchical Multi-Line Typography
 'use client'
 
 import { useState } from 'react'
 import { OrderBook } from '@/hooks/useBot'
-import { formatMarketTitle, getCategoryBadge } from '@/lib/formatters'
+import { formatHierarchicalMarket } from '@/lib/formatters'
 
 interface Props {
   books: OrderBook[]
@@ -71,19 +71,19 @@ export default function MarketsPanel({ books, onSelectMarket }: Props) {
       <div className="card-header pb-2 mb-2 border-b border-[#252836]/60 flex items-center justify-between gap-2">
         <div className="flex items-center gap-2">
           <span className="card-title text-xs font-bold text-[#e8eaf0]">
-            ⚡ Active Order Books ({books.length})
+            ⚡ Active Markets &amp; Live Order Books ({books.length})
           </span>
-          <span className="badge badge-green text-[10px]">Real-Time Streaming</span>
+          <span className="badge badge-green text-[10px]">Continuous Stream</span>
         </div>
 
         {/* Search */}
         <div className="relative">
           <input
             type="text"
-            placeholder="Search markets…"
+            placeholder="Search prediction markets…"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            className="bg-[#111318] border border-[#252836] rounded px-2.5 py-0.5 text-xs text-[#e8eaf0] placeholder-[#4a5068] w-36 focus:outline-none focus:border-blue-500 focus:w-48 transition-all"
+            className="bg-[#111318] border border-[#252836] rounded px-2.5 py-0.5 text-xs text-[#e8eaf0] placeholder-[#4a5068] w-40 focus:outline-none focus:border-blue-500 focus:w-56 transition-all"
           />
         </div>
       </div>
@@ -92,13 +92,13 @@ export default function MarketsPanel({ books, onSelectMarket }: Props) {
       <div className="overflow-auto scrollbar-thin flex-1">
         {books.length === 0 ? (
           <div className="flex items-center justify-center h-28 text-[#4a5068] text-xs">
-            Loading real-time order books…
+            Synchronizing live prediction market order books…
           </div>
         ) : (
           <table className="data-table text-xs">
             <thead>
               <tr>
-                <th>Prediction Market Contract</th>
+                <th className="min-w-[240px]">Event &amp; Market Question</th>
                 <th>Bid</th>
                 <th>Ask</th>
                 <th
@@ -124,22 +124,28 @@ export default function MarketsPanel({ books, onSelectMarket }: Props) {
             </thead>
             <tbody>
               {sorted.map((b) => {
-                const title = formatMarketTitle(b.slug)
-                const cat = getCategoryBadge('', b.slug)
+                const info = formatHierarchicalMarket(b.slug)
                 return (
                   <tr
                     key={b.token_id}
                     className="hover:bg-blue-500/10 transition-colors group"
                   >
-                    <td className="max-w-[200px]">
-                      <div className="flex items-center gap-1.5">
-                        <span className="text-xs shrink-0">{cat.icon}</span>
+                    <td className="py-2.5 max-w-[320px]">
+                      <div className="flex flex-col gap-0.5">
+                        {/* Event Category Tag */}
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-xs">{info.category.icon}</span>
+                          <span className="text-[10px] text-[#8b91a8] uppercase font-bold tracking-wider truncate">
+                            {info.eventTitle}
+                          </span>
+                        </div>
+                        {/* Secondary Multi-Line Natural Wrapping Question */}
                         <span
                           onClick={() => onSelectMarket && onSelectMarket(b.token_id, b.slug)}
-                          className="text-[#e8eaf0] font-semibold block truncate cursor-pointer hover:text-blue-400 text-[11px]"
-                          title={title}
+                          className="text-[#e8eaf0] font-medium leading-snug cursor-pointer hover:text-blue-400 text-xs block whitespace-normal"
+                          title={info.fullLabel}
                         >
-                          {title}
+                          {info.question}
                         </span>
                       </div>
                     </td>
@@ -159,7 +165,7 @@ export default function MarketsPanel({ books, onSelectMarket }: Props) {
                     <td className="text-right">
                       <button
                         onClick={() => onSelectMarket && onSelectMarket(b.token_id, b.slug)}
-                        className="text-[10px] uppercase font-semibold text-blue-400 hover:text-white bg-blue-500/10 hover:bg-blue-500/30 px-2 py-0.5 rounded border border-blue-500/20"
+                        className="text-[10px] uppercase font-bold text-blue-400 hover:text-white bg-blue-500/10 hover:bg-blue-500/30 px-2.5 py-1 rounded border border-blue-500/20"
                       >
                         Trade
                       </button>
