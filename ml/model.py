@@ -114,8 +114,14 @@ class MarketMLModel:
         self.roc_auc: float = 0.835
         self.log_loss_score: float = 0.412
         self.ece: float = 0.032
-        self.sharpe_ratio: float = 2.15
+        self.sharpe_ratio: float = 0.0
         self.reliability_curve: List[Dict[str, float]] = []
+
+        # Training-data provenance (the ensemble is blended with synthetic data
+        # until enough real resolved-market samples accumulate).
+        self.training_source: str = "synthetic_only"
+        self.n_real_samples: int = 0
+        self.n_synthetic_samples: int = 0
 
     def fit_initial(self) -> None:
         """Train initial calibrated ensemble on TimescaleDB history combined with synthetic market dynamics."""
@@ -123,12 +129,17 @@ class MarketMLModel:
         X_db, y_db = timescale_db.fetch_training_samples(min_samples=200)
 
         X_synth, y_synth = _synthetic_training_data(3000)
+        self.n_synthetic_samples = len(X_synth)
         if X_db is not None and len(X_db) > 0:
             X = np.vstack([X_db, X_synth])
             y = np.concatenate([y_db, y_synth])
+            self.n_real_samples = len(X_db)
+            self.training_source = "real_and_synthetic"
             log.info("[ml_model] Blended %d real DB samples with %d synthetic samples for training", len(X_db), len(X_synth))
         else:
             X, y = X_synth, y_synth
+            self.training_source = "synthetic_only"
+            log.warning("[ml_model] No real DB samples found — training on synthetic data only")
 
         X_scaled = self.scaler.fit_transform(X)
 
@@ -196,7 +207,7 @@ class MarketMLModel:
 
         self.ece = round(float(ece_total), 4)
         self.reliability_curve = rel_curve
-        self.sharpe_ratio = 2.15
+        self.sharpe_ratio = 0.0  # not meaningful on synthetic validation; set by live backtests
 
         # Register in Model Registry
         version_str = f"v1.{int(time.time()) % 1000:03d}.0"

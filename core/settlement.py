@@ -16,7 +16,7 @@ import json
 import logging
 from typing import Dict, Set
 
-from core.data_store import Side, Trade, store
+from core.data_store import BANKROLL_BASELINE, Side, Trade, store
 from core.gamma_client import gamma_client
 from ml.model import ml_model
 
@@ -113,6 +113,14 @@ class SettlementEngine:
                 )
                 store.trades.append(trade)
                 store.daily_pnl += pnl
+                store.paper_balance += payout
+                current_eq = BANKROLL_BASELINE + store.daily_pnl
+                store.peak_equity = max(store.peak_equity, current_eq)
+                store.equity_history.append({
+                    "timestamp": time.time(),
+                    "equity": round(current_eq, 2),
+                    "pnl": round(store.daily_pnl, 2),
+                })
 
                 # Reset position
                 pos.yes_shares = 0.0

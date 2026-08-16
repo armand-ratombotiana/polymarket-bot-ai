@@ -8,6 +8,7 @@ import hashlib
 import hmac
 import json
 import logging
+import secrets
 import time
 import uuid
 from base64 import b64encode
@@ -22,6 +23,10 @@ from config import settings
 from core.data_store import Order, OrderStatus, Side
 
 log = logging.getLogger(__name__)
+
+# Polymarket CTF Exchange EIP-712 order domain (Polygon mainnet).
+CTF_EXCHANGE_ADDRESS = "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E"
+PRICE_SCALE = 1_000_000  # price and size are expressed in 6 decimals on-chain
 
 
 # ── Data classes ─────────────────────────────────────────────────────────────
@@ -222,26 +227,84 @@ class ClobClient:
 
     async def create_order(self, args: OrderArgs) -> Optional[Dict]:
         """
-        Sign and submit a limit order. Returns server response or None on error.
-        Price is in range [0.01, 0.99]. Size is in USDC.
+        Sign an EIP-712 limit order and submit it to the CLOB. Returns the server
+        response dict or None on error. Price is in [0.01, 0.99], size in shares.
         """
         if not self._creds:
             raise RuntimeError("Not authenticated. Call derive_api_key() first.")
+        if not self._key or self._key == "your_wallet_private_key_here":
+            log.error("POLY_PRIVATE_KEY not configured — cannot sign live orders")
+            return None
+
+        maker = Account.from_key(self._key).address
+        signer = maker
+        taker = "0x0000000000000000000000000000000000000000"
+        nonce = int.from_bytes(secrets.token_bytes(16), "big")
+
+        order_data = {
+            "maker": maker,
+            "signer": signer,
+            "taker": taker,
+            "tokenId": int(args.token_id),
+            "price": int(round(args.price * PRICE_SCALE)),
+            "size": int(round(args.size * PRICE_SCALE)),
+            "side": 0 if args.side == Side.BUY else 1,
+            "nonce": nonce,
+            "feeRateBps": 0,
+            "signatureType": 0,  # 0 = EIP-712
+        }
+
+        domain_data = {
+            "name": "Polymarket CTF Exchange",
+            "version": "1",
+            "chainId": int(settings.poly_chain_id),
+            "verifyingContract": CTF_EXCHANGE_ADDRESS,
+        }
+        message_types = {
+            "Order": [
+                {"name": "maker", "type": "address"},
+                {"name": "signer", "type": "address"},
+                {"name": "taker", "type": "address"},
+                {"name": "tokenId", "type": "uint256"},
+                {"name": "price", "type": "uint256"},
+                {"name": "size", "type": "uint256"},
+                {"name": "side", "type": "uint8"},
+                {"name": "nonce", "type": "uint256"},
+                {"name": "feeRateBps", "type": "uint256"},
+                {"name": "signatureType", "type": "uint8"},
+            ],
+        }
+
+        try:
+            signed = Account.sign_typed_data(
+                self._key,
+                domain_data=domain_data,
+                message_types=message_types,
+                message_data=order_data,
+            )
+            signature = signed.signature.hex()
+        except Exception as e:
+            log.error("Order signing failed: %s", e)
+            return None
 
         order_id = str(uuid.uuid4())
         payload = {
             "order": {
-                "token_id": args.token_id,
-                "price": str(round(args.price, 4)),
+                "maker": maker,
+                "signer": signer,
+                "taker": taker,
+                "tokenId": str(order_data["tokenId"]),
+                "price": str(order_data["price"]),
+                "size": str(order_data["size"]),
                 "side": args.side.value,
-                "size": str(round(args.size, 2)),
-                "type": args.order_type,
-                "nonce": str(int(time.time() * 1000)),
-                "maker_address": self.address,
-                "order_id": order_id,
+                "nonce": str(nonce),
+                "feeRateBps": "0",
+                "signatureType": 0,
+                "signature": signature,
             },
-            "owner": self.address,
+            "owner": maker,
             "orderType": args.order_type,
+            "order_id": order_id,
         }
 
         try:

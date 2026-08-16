@@ -18,6 +18,10 @@ log = logging.getLogger(__name__)
 
 STATE_FILE = Path(os.environ.get("STORE_STATE_PATH", "/app/data/store_state.json"))
 
+# Single source of truth for the bankroll/equity baseline so accounting,
+# risk limits, and paper simulation all reference the same starting capital.
+BANKROLL_BASELINE = 10000.0
+
 
 class Side(str, Enum):
     BUY = "BUY"
@@ -99,7 +103,8 @@ class Position:
 
     @property
     def current_exposure(self) -> float:
-        return self.total_invested
+        """Capital at risk = cost basis of remaining shares."""
+        return self.yes_shares * self.avg_entry_price
 
 
 @dataclass
@@ -136,12 +141,13 @@ class DataStore:
         # Trades & P&L ($10,000 USD Institutional Bankroll)
         self.trades: List[Trade] = []
         self.daily_pnl: float = 0.0
-        self.peak_equity: float = 10000.0
+        self.paper_balance: float = BANKROLL_BASELINE
+        self.peak_equity: float = BANKROLL_BASELINE
         self.session_start: float = time.time()
 
         # Equity curve time-series (timestamp, equity, pnl)
         self.equity_history: List[Dict[str, float]] = [
-            {"timestamp": time.time(), "equity": 10000.0, "pnl": 0.0}
+            {"timestamp": time.time(), "equity": BANKROLL_BASELINE, "pnl": 0.0}
         ]
 
         # Risk
@@ -210,6 +216,9 @@ class DataStore:
         async with self._lock:
             self.trades.append(trade)
             self.daily_pnl += trade.pnl
+            self.paper_balance += (
+                trade.price * trade.size * (1.0 if trade.side == Side.SELL else -1.0)
+            )
 
             pos = self.positions.setdefault(
                 trade.token_id,
@@ -231,7 +240,7 @@ class DataStore:
                 pos.realised_pnl += trade.pnl
 
             # Record point in equity history
-            current_eq = 10000.0 + self.daily_pnl
+            current_eq = BANKROLL_BASELINE + self.daily_pnl
             self.peak_equity = max(self.peak_equity, current_eq)
             self.equity_history.append({
                 "timestamp": time.time(),
@@ -264,6 +273,7 @@ class DataStore:
         try:
             data = {
                 "daily_pnl": self.daily_pnl,
+                "paper_balance": self.paper_balance,
                 "peak_equity": self.peak_equity,
                 "equity_history": self.equity_history,
                 "positions": {
@@ -289,7 +299,7 @@ class DataStore:
                         "paper": t.paper,
                         "timestamp": t.timestamp,
                     }
-                    for t in self.trades[-100:]
+                    for t in self.trades
                 ],
             }
             with open(tmp_file, "w", encoding="utf-8") as f:
@@ -307,8 +317,13 @@ class DataStore:
             with open(STATE_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
             self.daily_pnl = float(data.get("daily_pnl", 0.0))
-            raw_peak = float(data.get("peak_equity", 200.0))
-            self.peak_equity = raw_peak if raw_peak <= 300.0 else (200.0 + self.daily_pnl)
+            self.paper_balance = float(data.get("paper_balance", BANKROLL_BASELINE))
+            raw_peak = float(data.get("peak_equity", 0.0))
+            self.peak_equity = (
+                max(raw_peak, BANKROLL_BASELINE + self.daily_pnl)
+                if raw_peak > 0.0
+                else BANKROLL_BASELINE + self.daily_pnl
+            )
             self.equity_history = data.get("equity_history", self.equity_history)
 
             raw_pos = data.get("positions", {})
@@ -335,6 +350,19 @@ class DataStore:
                     paper=tdict.get("paper", True),
                     timestamp=float(tdict.get("timestamp", time.time())),
                 ))
+
+            # Recompute ledger-derived figures from the trade log so the persisted
+            # state is always self-consistent (daily_pnl == sum(pnl), balance ==
+            # baseline - buys + sells). This also heals state written by older
+            # versions that pruned trades but kept cumulative P&L.
+            if self.trades:
+                self.daily_pnl = sum(t.pnl for t in self.trades)
+                self.paper_balance = BANKROLL_BASELINE + sum(
+                    t.price * t.size * (1.0 if t.side == Side.SELL else -1.0)
+                    for t in self.trades
+                )
+                self.peak_equity = max(self.peak_equity, BANKROLL_BASELINE + self.daily_pnl)
+
             log.info("Loaded DataStore state from disk: daily_pnl=$%.2f, %d positions, %d trades",
                      self.daily_pnl, len(self.positions), len(self.trades))
         except Exception as e:

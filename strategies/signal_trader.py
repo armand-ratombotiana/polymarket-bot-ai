@@ -19,7 +19,7 @@ from typing import Dict, List, Optional
 from config import settings
 from core.book_poller import book_poller
 from core.clob_client import OrderArgs
-from core.data_store import OrderBook, Side, store
+from core.data_store import BANKROLL_BASELINE, OrderBook, Side, store
 from core.gamma_client import gamma_client
 from ml.features import extract_features
 from ml.model import ml_model
@@ -155,7 +155,8 @@ class SignalTraderStrategy(BaseStrategy):
         kelly_f = max(0.0, (win_prob * payout_ratio - (1.0 - win_prob)) / max(payout_ratio, 0.01))
         kelly_f = min(0.3, kelly_f * KELLY_FRACTION)  # capped at 30% max
 
-        size_usdc = max(10.0, min(100.0, 1000.0 * kelly_f))
+        # Scale against the institutional bankroll (not a hardcoded $1,000).
+        size_usdc = max(10.0, min(100.0, BANKROLL_BASELINE * kelly_f))
 
         return MarketSignal(
             token_id=token_id,

@@ -130,6 +130,9 @@ class StrategyRegistry:
         self._instances: Dict[str, BaseStrategy] = {}
 
     def get_catalog(self) -> List[dict]:
+        # Only the three concrete strategy classes actually execute a trading loop.
+        # Everything else in the catalog is a metadata entry / no-op stub.
+        implemented = {"mm_avellaneda_stoikov", "arb_binary_dutch_book", "ml_random_forest_quant"}
         return [
             {
                 "strategy_id": s.strategy_id,
@@ -137,7 +140,8 @@ class StrategyRegistry:
                 "category": s.category,
                 "description": s.description,
                 "risk_level": s.risk_level,
-                "is_running": s.strategy_id in self._instances,
+                "implemented": s.strategy_id in implemented,
+                "is_running": (s.strategy_id in implemented) and (s.strategy_id in self._instances),
             }
             for s in STRATEGY_CATALOG
         ]

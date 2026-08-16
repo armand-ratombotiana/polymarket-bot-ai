@@ -381,15 +381,19 @@ async def get_equity_history():
 async def get_analytics():
     trades = store.trades
     total_trades = len(trades)
-    winning_trades = sum(1 for t in trades if t.pnl > 0)
-    losing_trades = sum(1 for t in trades if t.pnl < 0)
-    win_rate = (winning_trades / total_trades) if total_trades > 0 else 0.0
+    # Only trades that actually closed a position (pnl != 0) determine win rate.
+    closed_trades = [t for t in trades if t.pnl != 0]
+    winning_trades = sum(1 for t in closed_trades if t.pnl > 0)
+    losing_trades = sum(1 for t in closed_trades if t.pnl < 0)
+    win_rate = (winning_trades / len(closed_trades)) if closed_trades else 0.0
     total_vol = sum(t.price * t.size for t in trades)
 
     return {
         "total_trades": total_trades,
         "winning_trades": winning_trades,
         "losing_trades": losing_trades,
+        "closed_trades": len(closed_trades),
+        "open_trades": total_trades - len(closed_trades),
         "win_rate": round(win_rate, 4),
         "total_volume_usdc": round(total_vol, 2),
         "realised_pnl": round(store.daily_pnl, 2),

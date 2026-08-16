@@ -168,7 +168,7 @@ class MarketMakerStrategy(BaseStrategy):
 
         # Sizing with inventory cap
         can_buy = (invested + self._quote_size) <= self._max_inv
-        can_sell = (q > 0) or (invested > 0) or True  # Allow two-sided market making
+        can_sell = (q > 0.0) and (invested > 0.0)  # never sell shares we don't hold
 
         if can_buy and bid_price > 0:
             bid_size = max(5.0, self._quote_size / bid_price)

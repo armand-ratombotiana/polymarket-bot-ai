@@ -1,20 +1,19 @@
 """
-risk/manager.py — Institutional Risk Governance Engine ($200 USD Hard Bankroll).
+risk/manager.py — Institutional Risk Governance Engine ($10,000 USD Hard Bankroll).
 
-Strictly enforces Phase 6 Institutional Rules:
-  - Hard bankroll ceiling: USD 200.00
-  - Minimum cash reserve: USD 80.00 (Max deployable capital: USD 120.00)
-  - Default initial position: USD 2.00
-  - Normal max position: USD 5.00
-  - Absolute max position: USD 10.00
-  - Max correlated event group exposure: USD 20.00
-  - Max exposure per strategy: USD 30.00
-  - Max total simultaneous open risk: USD 60.00
-  - Max pending-order capital: USD 20.00
-  - Max simultaneous open positions: 8
-  - Daily loss stop: USD 4.00 (Hard Circuit Breaker)
-  - Weekly loss stop: USD 10.00
-  - Max drawdown from high-water mark: USD 16.00 (Hard Circuit Breaker)
+Strictly enforces the institutional rules:
+  - Hard bankroll ceiling: USD 10,000.00
+  - Minimum cash reserve: USD 2,000.00 (Max deployable capital: USD 8,000.00)
+  - Normal max position: USD 250.00
+  - Absolute max position: USD 500.00
+  - Max correlated event group exposure: USD 1,000.00
+  - Max exposure per strategy: USD 2,000.00
+  - Max total simultaneous open risk: USD 4,000.00
+  - Max pending-order capital: USD 1,500.00
+  - Max simultaneous open positions: 100
+  - Daily loss stop: USD 250.00 (Hard Circuit Breaker)
+  - Weekly loss stop: USD 600.00
+  - Max drawdown from high-water mark: USD 1,000.00 (Hard Circuit Breaker)
 """
 from __future__ import annotations
 
@@ -141,7 +140,7 @@ class InstitutionalRiskEngine:
         async with self._lock:
             store.kill_switch_active = False
             # Update peak equity to current equity to reset MDD baseline
-            current_eq = 200.0 + store.daily_pnl
+            current_eq = float(BANKROLL_CEILING) + store.daily_pnl
             store.peak_equity = current_eq
             log.info("[risk_manager] Risk gate reset — trading resumed (peak equity=$%.2f)", current_eq)
             await store.log_event("▶ Risk gate reset — trading resumed")
@@ -149,7 +148,7 @@ class InstitutionalRiskEngine:
     async def status_report(self) -> dict:
         open_count = await store.open_order_count()
         total_exp = await store.total_exposure()
-        current_eq = 200.0 + store.daily_pnl
+        current_eq = float(BANKROLL_CEILING) + store.daily_pnl
         drawdown_dollars = max(store.peak_equity - current_eq, 0.0)
 
         return {

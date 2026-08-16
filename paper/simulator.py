@@ -11,7 +11,7 @@ import time
 import uuid
 from typing import Optional
 
-from core.data_store import Order, OrderBook, OrderStatus, Side, Trade, store
+from core.data_store import BANKROLL_BASELINE, Order, OrderBook, OrderStatus, Side, Trade, store
 from core.clob_client import OrderArgs
 
 log = logging.getLogger(__name__)
@@ -27,7 +27,7 @@ class PaperSimulator:
     def __init__(self) -> None:
         self._running = False
         self._task: Optional[asyncio.Task] = None
-        self._virtual_balance_usdc: float = 10000.0  # starting paper capital ($10,000 USD account)
+        self._virtual_balance_usdc: float = store.paper_balance  # persists via DataStore
 
     @property
     def virtual_balance(self) -> float:
@@ -124,12 +124,6 @@ class PaperSimulator:
         fill_size = order.size_remaining
         revenue_or_cost = fill_price * fill_size
 
-        # Update virtual balance
-        if order.side == Side.BUY:
-            self._virtual_balance_usdc -= revenue_or_cost
-        else:
-            self._virtual_balance_usdc += revenue_or_cost
-
         # Compute simple P&L for SELL (revenue - cost basis)
         pos = store.positions.get(order.token_id)
         pnl = 0.0
@@ -146,7 +140,9 @@ class PaperSimulator:
             paper=True,
             pnl=pnl,
         )
+        # record_fill updates daily_pnl and store.paper_balance (the source of truth).
         await store.record_fill(trade)
+        self._virtual_balance_usdc = store.paper_balance
         await store.update_order(order.order_id, status=OrderStatus.FILLED, size_matched=order.size)
         await store.log_event(
             f"✅ Paper fill: {order.side.value} {fill_size:.2f} @ {fill_price:.4f} "

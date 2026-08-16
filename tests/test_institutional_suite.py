@@ -17,7 +17,7 @@ import numpy as np
 # Adjust path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from core.data_store import Order, OrderBook, OrderStatus, PriceLevel, Side, store
+from core.data_store import BANKROLL_BASELINE, Order, OrderBook, OrderStatus, PriceLevel, Side, store
 from core.market_db import MarketIntelligenceDB
 from ml.features import extract_features, FEATURE_NAMES, N_FEATURES
 from ml.model import MarketMLModel
@@ -31,9 +31,11 @@ class TestInstitutionalSuite(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         store.kill_switch_active = False
         store.daily_pnl = 0.0
-        store.peak_equity = 10000.0
+        store.peak_equity = BANKROLL_BASELINE
+        store.paper_balance = BANKROLL_BASELINE
         store.open_orders.clear()
         store.positions.clear()
+        store.trades.clear()
         self.risk = InstitutionalRiskEngine()
 
     async def test_01_bankroll_and_cash_reserve(self):
@@ -240,6 +242,34 @@ class TestInstitutionalSuite(unittest.IsolatedAsyncioTestCase):
         stats = fundamental_engine.get_news_stats()
         self.assertGreater(stats["sources_indexed"], 100000)
         self.assertIn("bullish", stats["sentiment_distribution"])
+
+    async def test_11_accounting_reconciliation(self):
+        """daily_pnl must equal the sum of trade pnl; exposure must equal cost basis."""
+        store.daily_pnl = 0.0
+        store.paper_balance = BANKROLL_BASELINE
+        store.positions.clear()
+        store.trades.clear()
+
+        # Buy 100 shares @ 0.50 (cost $50) then sell 40 shares @ 0.60 (pnl +$4)
+        await store.record_fill(type("T", (), {
+            "trade_id": "t1", "token_id": "tok-rec", "side": Side.BUY,
+            "price": 0.50, "size": 100.0, "pnl": 0.0,
+        })())
+        await store.record_fill(type("T", (), {
+            "trade_id": "t2", "token_id": "tok-rec", "side": Side.SELL,
+            "price": 0.60, "size": 40.0, "pnl": 4.0,
+        })())
+
+        # daily_pnl must reconcile to the sum of trade pnl
+        self.assertEqual(round(store.daily_pnl, 2), 4.0)
+        self.assertEqual(round(sum(t.pnl for t in store.trades), 2), 4.0)
+
+        # Exposure = cost basis of remaining shares (60 * avg_entry)
+        pos = store.positions["tok-rec"]
+        self.assertEqual(pos.yes_shares, 60.0)
+        self.assertAlmostEqual(pos.avg_entry_price, 0.50, places=4)
+        self.assertAlmostEqual(await store.total_exposure(), 60.0 * pos.avg_entry_price, places=2)
+        self.assertAlmostEqual(store.paper_balance, BANKROLL_BASELINE - 50.0 + 24.0, places=2)
 
 
 if __name__ == "__main__":
