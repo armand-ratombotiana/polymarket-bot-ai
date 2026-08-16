@@ -1,8 +1,8 @@
-// components/OrdersPanel.tsx — Live Working Orders Panel
+// components/OrdersPanel.tsx — Live Working Orders Panel with Redesigned Institutional Table UX
 'use client'
 
 import { Order } from '@/hooks/useBot'
-import { formatMarketTitle, getCategoryBadge } from '@/lib/formatters'
+import { formatHierarchicalMarket } from '@/lib/formatters'
 
 interface Props {
   orders: Order[]
@@ -12,7 +12,8 @@ interface Props {
 function age(ts: number) {
   const s = Math.floor(Date.now() / 1000 - ts)
   if (s < 60) return `${s}s`
-  return `${Math.floor(s / 60)}m`
+  if (s < 3600) return `${Math.floor(s / 60)}m`
+  return `${Math.floor(s / 3600)}h`
 }
 
 export default function OrdersPanel({ orders, onCancel }: Props) {
@@ -41,10 +42,10 @@ export default function OrdersPanel({ orders, onCancel }: Props) {
           <table className="data-table text-xs">
             <thead>
               <tr>
-                <th>Market Contract</th>
+                <th className="min-w-[180px]">Market Contract</th>
                 <th>Side</th>
-                <th>Price</th>
-                <th>Size</th>
+                <th className="text-right">Price</th>
+                <th className="text-right">Size</th>
                 <th>Strategy</th>
                 <th>Age</th>
                 <th className="text-right">Action</th>
@@ -52,15 +53,16 @@ export default function OrdersPanel({ orders, onCancel }: Props) {
             </thead>
             <tbody>
               {orders.map((o) => {
-                const title = formatMarketTitle(o.slug)
-                const cat = getCategoryBadge('', o.slug)
+                const info = formatHierarchicalMarket(o.slug)
                 return (
                   <tr key={o.order_id} className="hover:bg-blue-500/10 transition-colors">
-                    <td className="max-w-[140px]">
-                      <div className="flex items-center gap-1.5">
-                        <span className="text-xs shrink-0">{cat.icon}</span>
-                        <span className="text-[#e8eaf0] font-semibold block truncate text-[11px]" title={title}>
-                          {title}
+                    <td className="py-2 max-w-[200px]">
+                      <div className="flex flex-col gap-0.5">
+                        <span className="text-[9px] text-[#8b91a8] uppercase font-bold tracking-wider truncate">
+                          {info.category.icon} {info.eventTitle}
+                        </span>
+                        <span className="text-[#e8eaf0] font-medium leading-tight text-xs block whitespace-normal" title={info.fullLabel}>
+                          {info.question}
                         </span>
                       </div>
                     </td>
@@ -73,22 +75,22 @@ export default function OrdersPanel({ orders, onCancel }: Props) {
                         {o.side}
                       </span>
                     </td>
-                    <td className="mono font-semibold text-cyan-400">
+                    <td className="mono text-right font-bold text-cyan-400">
                       ${o.price.toFixed(3)}
                     </td>
-                    <td className="mono text-[#e8eaf0]">
+                    <td className="mono text-right font-medium text-[#e8eaf0]">
                       {o.size.toFixed(1)}
                     </td>
                     <td>
-                      <span className="text-[10px] text-[#8b91a8] mono bg-[#111318] px-1.5 py-0.5 rounded border border-[#252836]">
+                      <span className="text-[10px] text-[#8b91a8] mono bg-[#111318] px-2 py-0.5 rounded border border-[#252836]">
                         {o.strategy}
                       </span>
                     </td>
-                    <td className="mono text-[#4a5068] text-[10px]">{age(o.created_at)}</td>
+                    <td className="mono text-[#8b91a8] text-[10px]">{age(o.created_at)}</td>
                     <td className="text-right">
                       <button
                         onClick={() => onCancel(o.order_id)}
-                        className="text-[10px] text-red-400 hover:text-red-300 hover:bg-red-500/10 px-2 py-0.5 rounded border border-red-500/20"
+                        className="btn btn-danger text-[10px] py-0.5 px-2 font-bold"
                       >
                         Cancel
                       </button>

@@ -1,8 +1,8 @@
-// components/PositionsPanel.tsx — Active Portfolio Positions & P&L
+// components/PositionsPanel.tsx — Active Portfolio Positions & P&L with Institutional Table UX
 'use client'
 
 import { Position } from '@/hooks/useBot'
-import { formatMarketTitle, getCategoryBadge } from '@/lib/formatters'
+import { formatHierarchicalMarket } from '@/lib/formatters'
 
 interface Props {
   positions: Position[]
@@ -31,15 +31,15 @@ export default function PositionsPanel({ positions, dailyPnl }: Props) {
 
         <div className="flex items-center gap-3 text-xs">
           <div>
-            <span className="text-[#4a5068]">Invested: </span>
-            <span className="mono font-semibold text-cyan-400">
+            <span className="text-[#8b91a8]">Invested: </span>
+            <span className="mono font-bold text-cyan-400">
               ${totalInvested.toFixed(2)}
             </span>
           </div>
           <div>
-            <span className="text-[#4a5068]">Realized: </span>
+            <span className="text-[#8b91a8]">Realized: </span>
             <span
-              className={`mono font-semibold ${
+              className={`mono font-bold ${
                 totalRealized >= 0 ? 'text-green-400' : 'text-red-400'
               }`}
             >
@@ -53,14 +53,14 @@ export default function PositionsPanel({ positions, dailyPnl }: Props) {
       <div className="overflow-auto scrollbar-thin flex-1">
         {positions.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-28 text-[#4a5068] text-xs">
-            <span>No active positions</span>
-            <span className="text-[10px] text-[#4a5068] mt-0.5">Automated strategies will open positions when alpha &gt; threshold</span>
+            <span className="font-semibold">No active positions</span>
+            <span className="text-[10px] text-[#4a5068] mt-0.5">Automated strategies will open positions when alpha exceeds threshold</span>
           </div>
         ) : (
           <table className="data-table text-xs">
             <thead>
               <tr>
-                <th>Market Contract</th>
+                <th className="min-w-[200px]">Market Contract</th>
                 <th>Outcome</th>
                 <th className="text-right">Shares</th>
                 <th className="text-right">Entry</th>
@@ -70,15 +70,16 @@ export default function PositionsPanel({ positions, dailyPnl }: Props) {
             </thead>
             <tbody>
               {positions.map((p) => {
-                const title = formatMarketTitle(p.slug)
-                const cat = getCategoryBadge('', p.slug)
+                const info = formatHierarchicalMarket(p.slug)
                 return (
                   <tr key={p.token_id} className="hover:bg-blue-500/10 transition-colors">
-                    <td className="max-w-[150px]">
-                      <div className="flex items-center gap-1.5">
-                        <span className="text-xs shrink-0">{cat.icon}</span>
-                        <span className="text-[#e8eaf0] font-semibold block truncate text-[11px]" title={title}>
-                          {title}
+                    <td className="py-2 max-w-[220px]">
+                      <div className="flex flex-col gap-0.5">
+                        <span className="text-[9px] text-[#8b91a8] uppercase font-bold tracking-wider truncate">
+                          {info.category.icon} {info.eventTitle}
+                        </span>
+                        <span className="text-[#e8eaf0] font-medium leading-tight text-xs block whitespace-normal" title={info.fullLabel}>
+                          {info.question}
                         </span>
                       </div>
                     </td>
@@ -87,13 +88,13 @@ export default function PositionsPanel({ positions, dailyPnl }: Props) {
                         {p.yes_shares > 0 ? 'YES' : 'NO'}
                       </span>
                     </td>
-                    <td className="mono text-right font-medium">
+                    <td className="mono text-right font-semibold text-[#e8eaf0]">
                       {p.yes_shares.toFixed(1)}
                     </td>
                     <td className="mono text-right text-[#8b91a8]">
                       ${p.avg_entry_price.toFixed(3)}
                     </td>
-                    <td className="mono text-right text-[#e8eaf0]">
+                    <td className="mono text-right font-medium text-[#e8eaf0]">
                       ${p.total_invested.toFixed(2)}
                     </td>
                     <td

@@ -1,8 +1,8 @@
-// components/TradesPanel.tsx — Recent Trade Executions Feed
+// components/TradesPanel.tsx — Recent Trade Executions Feed with Redesigned Institutional Table UX
 'use client'
 
 import { Trade } from '@/hooks/useBot'
-import { formatMarketTitle, getCategoryBadge } from '@/lib/formatters'
+import { formatHierarchicalMarket } from '@/lib/formatters'
 
 interface Props {
   trades: Trade[]
@@ -38,25 +38,26 @@ export default function TradesPanel({ trades }: Props) {
           <table className="data-table text-xs">
             <thead>
               <tr>
-                <th>Market Contract</th>
+                <th className="min-w-[180px]">Market Contract</th>
                 <th>Side</th>
-                <th>Price</th>
-                <th>Size</th>
-                <th>P&amp;L</th>
-                <th>Time</th>
+                <th className="text-right">Price</th>
+                <th className="text-right">Size</th>
+                <th className="text-right">P&amp;L</th>
+                <th className="text-right">Time</th>
               </tr>
             </thead>
             <tbody>
               {trades.slice(0, 50).map((t) => {
-                const title = formatMarketTitle(t.slug)
-                const cat = getCategoryBadge('', t.slug)
+                const info = formatHierarchicalMarket(t.slug)
                 return (
                   <tr key={t.trade_id} className="hover:bg-blue-500/10 transition-colors">
-                    <td className="max-w-[130px]">
-                      <div className="flex items-center gap-1.5">
-                        <span className="text-xs shrink-0">{cat.icon}</span>
-                        <span className="text-[#e8eaf0] font-semibold block truncate text-[11px]" title={title}>
-                          {title}
+                    <td className="py-2 max-w-[200px]">
+                      <div className="flex flex-col gap-0.5">
+                        <span className="text-[9px] text-[#8b91a8] uppercase font-bold tracking-wider truncate">
+                          {info.category.icon} {info.eventTitle}
+                        </span>
+                        <span className="text-[#e8eaf0] font-medium leading-tight text-xs block whitespace-normal" title={info.fullLabel}>
+                          {info.question}
                         </span>
                       </div>
                     </td>
@@ -69,20 +70,20 @@ export default function TradesPanel({ trades }: Props) {
                         {t.side}
                       </span>
                     </td>
-                    <td className="mono text-cyan-400 font-semibold">
+                    <td className="mono text-right text-cyan-400 font-bold">
                       ${t.price.toFixed(3)}
                     </td>
-                    <td className="mono text-[#e8eaf0]">
+                    <td className="mono text-right font-medium text-[#e8eaf0]">
                       {t.size.toFixed(1)}
                     </td>
                     <td
-                      className={`mono font-bold ${
+                      className={`mono text-right font-bold ${
                         t.pnl > 0 ? 'text-green-400' : t.pnl < 0 ? 'text-red-400' : 'text-[#8b91a8]'
                       }`}
                     >
                       {t.pnl !== 0 ? `${t.pnl > 0 ? '+' : ''}$${t.pnl.toFixed(2)}` : '—'}
                     </td>
-                    <td className="mono text-[#4a5068] text-[10px]">{age(t.timestamp)}</td>
+                    <td className="mono text-right text-[#8b91a8] text-[10px]">{age(t.timestamp)}</td>
                   </tr>
                 )
               })}
