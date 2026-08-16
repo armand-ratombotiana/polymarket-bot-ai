@@ -17,12 +17,18 @@ import numpy as np
 # Adjust path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from core.data_store import BANKROLL_BASELINE, Order, OrderBook, OrderStatus, PriceLevel, Side, store
+from core.data_store import BANKROLL_BASELINE, Order, OrderBook, OrderStatus, Position, PriceLevel, Side, store
 from core.market_db import MarketIntelligenceDB
 from ml.features import extract_features, FEATURE_NAMES, N_FEATURES
 from ml.model import MarketMLModel
 from ml.model_registry import ModelRegistry
-from risk.manager import InstitutionalRiskEngine, BANKROLL_CEILING, MAX_DEPLOYABLE_CAPITAL, DAILY_LOSS_STOP
+from risk.manager import (
+    InstitutionalRiskEngine,
+    BANKROLL_CEILING,
+    MAX_DEPLOYABLE_CAPITAL,
+    DAILY_LOSS_STOP,
+    recognized_operating_capital,
+)
 from backtesting.engine import BacktestEngine
 
 
@@ -39,43 +45,105 @@ class TestInstitutionalSuite(unittest.IsolatedAsyncioTestCase):
         self.risk = InstitutionalRiskEngine()
 
     async def test_01_bankroll_and_cash_reserve(self):
-        """Test that orders exceeding deployable capital ($8,000) or single position ($500) are blocked."""
-        # 1. Oversized single position ($600 > $500 max)
+        """Test per-market ($3) and absolute ($5) position caps under USD 100 operating capital."""
+        # 1. Oversized single position ($4.00 > $3.00 per-market cap)
         oversized_order = Order(
             order_id="test-1",
             token_id="tok-1",
             side=Side.BUY,
             price=0.50,
-            size=1200.0,  # $600.00 cost > $500.00 max
+            size=8.0,  # $4.00 cost > $3.00 per-market max
             strategy="test",
+            paper=True,
         )
         allowed, reason = await self.risk.check_order(oversized_order)
         self.assertFalse(allowed)
-        self.assertIn("Single position cap exceeded", reason)
+        self.assertIn("Per-market position cap exceeded", reason)
 
-        # 2. Valid position ($200.00 cost <= $500.00 max)
+        # 2. Valid position ($1.50 cost <= $3.00 per-market, <= $2 normal cap)
         valid_order = Order(
             order_id="test-2",
             token_id="tok-2",
             side=Side.BUY,
             price=0.50,
-            size=400.0,  # $200.00 cost
+            size=3.0,  # $1.50 cost
             strategy="test",
+            paper=True,
         )
         allowed, reason = await self.risk.check_order(valid_order)
         self.assertTrue(allowed, f"Expected allowed, got reason: {reason}")
 
+    async def test_01a_recognized_operating_capital(self):
+        """recognized_operating_capital = min(verified equity, USD 100)."""
+        self.assertEqual(float(recognized_operating_capital(50.0)), 50.0)
+        self.assertEqual(float(recognized_operating_capital(100.0)), 100.0)
+        self.assertEqual(float(recognized_operating_capital(459.66)), 100.0)
+
+    async def test_01c_live_trading_disabled_by_default(self):
+        """Live orders are blocked unless explicitly authorized; paper orders pass."""
+        order = Order(
+            order_id="test-live",
+            token_id="tok-live",
+            side=Side.BUY,
+            price=0.50,
+            size=3.0,
+            strategy="test",
+            paper=False,
+        )
+        allowed, reason = await self.risk.check_order(order)
+        self.assertFalse(allowed)
+        self.assertIn("Live trading is disabled", reason)
+
+    async def test_01b_correlated_and_strategy_exposure_caps(self):
+        """Strategy ($15) and correlated-group ($8) exposure caps are enforced."""
+        def mk_pos(tok, slug, strat, cost):
+            # shares * price such that current_exposure == cost
+            return Position(
+                token_id=tok, market_slug=slug, yes_shares=cost * 2.0,
+                avg_entry_price=0.50, total_invested=cost, strategy=strat,
+            )
+
+        # Part A — correlated group binding: 4 positions @ $3.00 in one slug,
+        # split across two strategies so per-strategy stays under its $15 cap.
+        for i in range(2):
+            store.positions[f"tok-g{i}"] = mk_pos(f"tok-g{i}", "same-event", "mm_avellaneda_stoikov", 3.0)
+        for i in range(2, 4):
+            store.positions[f"tok-g{i}"] = mk_pos(f"tok-g{i}", "same-event", "arb_binary_dutch_book", 3.0)
+
+        # $1.50 more on the same slug → group $13.50 > $8 (blocked); strategy only $7.50.
+        store.market_slugs["tok-g9"] = "same-event"
+        order = Order(
+            order_id="test-g", token_id="tok-g9", side=Side.BUY,
+            price=0.50, size=3.0, strategy="mm_avellaneda_stoikov", paper=True,
+        )
+        allowed, reason = await self.risk.check_order(order)
+        self.assertFalse(allowed)
+        self.assertIn("Correlated exposure cap exceeded", reason)
+
+        # Part B — strategy binding: push mm strategy to $15, then $1.50 more → $16.50 > $15.
+        for i in range(4, 7):
+            store.positions[f"tok-g{i}"] = mk_pos(f"tok-g{i}", f"other-event-{i}", "mm_avellaneda_stoikov", 3.0)
+        store.market_slugs["tok-g9"] = "strategy-bound"
+        order = Order(
+            order_id="test-s", token_id="tok-g9", side=Side.BUY,
+            price=0.50, size=3.0, strategy="mm_avellaneda_stoikov", paper=True,
+        )
+        allowed, reason = await self.risk.check_order(order)
+        self.assertFalse(allowed)
+        self.assertIn("Strategy exposure cap exceeded", reason)
+
     async def test_02_daily_loss_circuit_breaker(self):
-        """Test that breaching the $250.00 daily loss stop halts trading."""
-        store.daily_pnl = -260.00  # Breached $250.00 stop
+        """Test that breaching the $4.00 daily loss stop halts trading."""
+        store.daily_pnl = -6.00  # Breached $4.00 stop
 
         order = Order(
             order_id="test-3",
             token_id="tok-3",
             side=Side.BUY,
             price=0.50,
-            size=100.0,
+            size=8.0,
             strategy="test",
+            paper=True,
         )
         allowed, reason = await self.risk.check_order(order)
         self.assertFalse(allowed)
@@ -253,11 +321,11 @@ class TestInstitutionalSuite(unittest.IsolatedAsyncioTestCase):
         # Buy 100 shares @ 0.50 (cost $50) then sell 40 shares @ 0.60 (pnl +$4)
         await store.record_fill(type("T", (), {
             "trade_id": "t1", "token_id": "tok-rec", "side": Side.BUY,
-            "price": 0.50, "size": 100.0, "pnl": 0.0,
+            "price": 0.50, "size": 100.0, "pnl": 0.0, "strategy": "test", "paper": True,
         })())
         await store.record_fill(type("T", (), {
             "trade_id": "t2", "token_id": "tok-rec", "side": Side.SELL,
-            "price": 0.60, "size": 40.0, "pnl": 4.0,
+            "price": 0.60, "size": 40.0, "pnl": 4.0, "strategy": "test", "paper": True,
         })())
 
         # daily_pnl must reconcile to the sum of trade pnl
@@ -270,6 +338,42 @@ class TestInstitutionalSuite(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(pos.avg_entry_price, 0.50, places=4)
         self.assertAlmostEqual(await store.total_exposure(), 60.0 * pos.avg_entry_price, places=2)
         self.assertAlmostEqual(store.paper_balance, BANKROLL_BASELINE - 50.0 + 24.0, places=2)
+
+    async def test_12_portfolio_exposure_reconciliation_and_leaderboard(self):
+        """Exposure decomposition, reconciliation verdict, and strategy ranking."""
+        from core.portfolio import compute_exposure, compute_reconciliation, leaderboard, strategy_stats
+
+        store.daily_pnl = 0.0
+        store.paper_balance = BANKROLL_BASELINE
+        store.positions.clear()
+        store.trades.clear()
+        store.open_orders.clear()
+
+        # One $12.00 position across two fills and a closed winner for a second strategy.
+        await store.record_fill(type("T", (), {
+            "trade_id": "p1", "token_id": "tok-exp", "side": Side.BUY,
+            "price": 0.50, "size": 24.0, "pnl": 0.0, "strategy": "mm_avellaneda_stoikov", "paper": True,
+        })())
+        await store.record_fill(type("T", (), {
+            "trade_id": "p2", "token_id": "tok-win", "side": Side.BUY,
+            "price": 0.50, "size": 4.0, "pnl": 0.0, "strategy": "arb_binary_dutch_book", "paper": True,
+        })())
+
+        exp = compute_exposure()
+        self.assertEqual(exp["capital_invested"], 14.0)
+        self.assertEqual(exp["maximum_remaining_loss"], 14.0)
+
+        rec = compute_reconciliation(bankroll_ceiling=200.0)
+        # $14 <= $120 (60% of ceiling) and no anomalies → reconciled OK.
+        self.assertTrue(rec["reconciled"])
+        self.assertEqual(rec["status"], "OK")
+        self.assertEqual(rec["checks"]["paper_trades"], 2)
+
+        lb = leaderboard()
+        self.assertGreaterEqual(lb["count"], 1)
+        top = lb["ranked"][0]
+        self.assertIn("risk_adjusted_score", top)
+        self.assertGreater(top["risk_adjusted_score"], -1000.0)
 
 
 if __name__ == "__main__":

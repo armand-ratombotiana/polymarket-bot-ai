@@ -25,6 +25,7 @@ from core.deep_analysis import deep_analysis_engine
 from core.fundamental_ingest import fundamental_engine
 from core.gamma_client import gamma_client
 from core.position_manager import position_manager
+from core.portfolio import compute_exposure, compute_reconciliation, leaderboard
 from core.settlement import settlement_engine
 from core.ws_client import ws_client
 from ml.copilot import copilot_engine
@@ -33,7 +34,7 @@ from ml.model import ml_model
 from ml.model_registry import model_registry
 from ml.vector_store import vector_store
 from paper.simulator import paper_sim
-from risk.manager import risk_manager
+from risk.manager import BANKROLL_CEILING, risk_manager
 from strategies.registry import strategy_registry
 
 log = logging.getLogger(__name__)
@@ -283,6 +284,8 @@ async def _build_snapshot() -> Dict:
         "timestamp": time.time(),
         "mode": "paper" if settings.paper_trade else "live",
         "kill_switch": store.kill_switch_active,
+        "observation_only": risk_manager.observation_only,
+        "observation_reason": risk_manager.observation_reason,
         "daily_pnl": store.daily_pnl,
         "paper_balance": paper_sim.virtual_balance if settings.paper_trade else None,
         "strategies": active_strats,
@@ -336,12 +339,12 @@ class MarketAnalyzeRequest(BaseModel):
 
 class StrategyConfigUpdate(BaseModel):
     mm_spread_bps: Optional[int] = Field(default=None, ge=10, le=2000)
-    mm_quote_size_usdc: Optional[float] = Field(default=None, ge=1.0, le=500.0)
-    mm_max_inventory_usdc: Optional[float] = Field(default=None, ge=10.0, le=2000.0)
+    mm_quote_size_usdc: Optional[float] = Field(default=None, ge=0.5, le=5.0)
+    mm_max_inventory_usdc: Optional[float] = Field(default=None, ge=1.0, le=15.0)
     arb_min_profit_bps: Optional[int] = Field(default=None, ge=5, le=1000)
-    arb_order_size_usdc: Optional[float] = Field(default=None, ge=1.0, le=500.0)
+    arb_order_size_usdc: Optional[float] = Field(default=None, ge=0.5, le=5.0)
     signal_min_confidence: Optional[float] = Field(default=None, ge=0.5, le=0.99)
-    daily_loss_limit_usdc: Optional[float] = Field(default=None, ge=1.0, le=1000.0)
+    daily_loss_limit_usdc: Optional[float] = Field(default=None, ge=0.25, le=2.0)
 
 
 # ── System Endpoints ──────────────────────────────────────────────────────────
@@ -388,19 +391,94 @@ async def get_analytics():
     win_rate = (winning_trades / len(closed_trades)) if closed_trades else 0.0
     total_vol = sum(t.price * t.size for t in trades)
 
+    # Wilson 95% confidence interval for the win rate (sample-size honest).
+    n = len(closed_trades)
+    z = 1.96
+    ci_low = ci_high = None
+    if n > 0:
+        p = win_rate
+        denom = 1 + z * z / n
+        centre = (p + z * z / (2 * n)) / denom
+        half = z * ((p * (1 - p) / n + z * z / (4 * n * n)) ** 0.5) / denom
+        ci_low = max(0.0, centre - half)
+        ci_high = min(1.0, centre + half)
+
+    wins = sum(t.pnl for t in closed_trades if t.pnl > 0)
+    losses = sum(t.pnl for t in closed_trades if t.pnl < 0)
+    profit_factor = wins / max(1e-9, -losses) if losses else (None if not wins else float("inf"))
+
+    # Unrealized P&L: mark open positions to the live order-book mid when present.
+    unrealized_pnl = 0.0
+    for p in store.positions.values():
+        if p.current_exposure <= 0.001:
+            continue
+        book = store.order_books.get(p.token_id)
+        mark = book.mid if book and book.mid is not None else None
+        if mark is None:
+            mark = p.avg_entry_price  # cost-basis mark (no live quote)
+        unrealized_pnl += (mark - p.avg_entry_price) * p.yes_shares
+        unrealized_pnl += ((1.0 - mark) - p.avg_entry_price) * p.no_shares
+
+    realized_pnl = store.daily_pnl
+    net_pnl = realized_pnl + unrealized_pnl
+    equity = store.paper_balance
+    max_drawdown_dollars = max(0.0, store.peak_equity - equity)
+    max_drawdown_pct = (max_drawdown_dollars / store.peak_equity) if store.peak_equity > 0 else 0.0
+
+    exp = compute_exposure()
+    deployable = float(MAX_DEPLOYABLE_CAPITAL)
+    risk_utilization = min(1.0, exp["maximum_remaining_loss"] / deployable) if deployable > 0 else 0.0
+
+    # Data freshness: seconds since the newest tracked order-book update.
+    books = store.order_books.values()
+    freshness = max((time.time() - b.updated_at for b in books), default=0.0)
+
     return {
+        "equity": round(equity, 2),
+        "realized_pnl": round(realized_pnl, 2),
+        "unrealized_pnl": round(unrealized_pnl, 2),
+        "net_pnl": round(net_pnl, 2),
         "total_trades": total_trades,
         "winning_trades": winning_trades,
         "losing_trades": losing_trades,
         "closed_trades": len(closed_trades),
         "open_trades": total_trades - len(closed_trades),
         "win_rate": round(win_rate, 4),
+        "win_rate_ci_low": round(ci_low, 4) if ci_low is not None else None,
+        "win_rate_ci_high": round(ci_high, 4) if ci_high is not None else None,
+        "profit_factor": round(profit_factor, 2) if isinstance(profit_factor, float) else profit_factor,
+        "max_drawdown_dollars": round(max_drawdown_dollars, 2),
+        "max_drawdown_pct": round(max_drawdown_pct, 4),
         "total_volume_usdc": round(total_vol, 2),
-        "realised_pnl": round(store.daily_pnl, 2),
-        "open_exposure": round(await store.total_exposure(), 2),
+        "open_exposure": round(exp["maximum_remaining_loss"], 2),
+        "open_position_count": exp["open_position_count"],
+        "pending_order_capital": round(exp["reserved_for_pending_orders"], 2),
+        "risk_utilization": round(risk_utilization, 4),
+        "mode": store.mode,
+        "data_freshness_seconds": round(freshness, 1),
         "peak_equity": round(store.peak_equity, 2),
         "active_strategies": list(strategy_registry.get_active_instances().keys()),
     }
+
+
+# ── Risk-Adjusted Portfolio: Exposure, Reconciliation & Leaderboard ─────────
+
+@app.get("/api/exposure", tags=["risk"])
+async def get_exposure():
+    """Full exposure decomposition (mandate section 2)."""
+    return compute_exposure()
+
+
+@app.get("/api/risk/reconcile", tags=["risk"])
+async def get_reconciliation():
+    """Reconciliation investigation for the current open exposure."""
+    return compute_reconciliation(bankroll_ceiling=float(BANKROLL_CEILING))
+
+
+@app.get("/api/leaderboard", tags=["risk"])
+async def get_leaderboard():
+    """Strategy leaderboard ranked by reproducible risk-adjusted net performance."""
+    return leaderboard()
 
 
 # ── 50+ Strategy Hub Endpoints ────────────────────────────────────────────────
@@ -620,6 +698,21 @@ async def place_manual_trade(req: ManualTradeRequest):
     side = Side.BUY if req.side.upper() == "BUY" else Side.SELL
     size_shares = req.size_usdc / req.price
 
+    # Pre-trade risk validation (all orders, paper or live, pass the same gate).
+    provisional = Order(
+        order_id="manual-pre-check",
+        token_id=req.token_id,
+        side=side,
+        price=req.price,
+        size=size_shares,
+        strategy="manual",
+        paper=settings.paper_trade,
+    )
+    allowed, reason = await risk_manager.check_order(provisional)
+    if not allowed:
+        await store.log_event(f"⚠ Risk block [manual]: {reason}")
+        raise HTTPException(status_code=400, detail=f"Risk rejection: {reason}")
+
     args = OrderArgs(
         token_id=req.token_id,
         price=req.price,
@@ -750,6 +843,18 @@ async def deactivate_kill_switch():
     await risk_manager.deactivate_kill_switch()
     await store.log_event("▶ Kill switch deactivated — trading resumed")
     return {"status": "deactivated", "kill_switch": False}
+
+
+class ObservationModeRequest(BaseModel):
+    active: bool
+    reason: str = ""
+
+
+@app.post("/api/risk/observation-mode", tags=["risk"])
+async def set_observation_mode(req: ObservationModeRequest):
+    """Toggle observation-only mode. When active, new live orders are blocked."""
+    result = await risk_manager.set_observation_mode(req.active, req.reason)
+    return {"status": "observation_mode_" + ("enabled" if result["observation_only"] else "disabled"), **result}
 
 
 # ── ML Model & Quantitative Diagnostics ───────────────────────────────────────
@@ -898,6 +1003,87 @@ async def get_arbitrage_opportunities():
     from core.arbitrage_scanner import arbitrage_scanner
     opps = arbitrage_scanner.scan_opportunities()
     return {"opportunities": [o.to_dict() for o in opps], "count": len(opps)}
+
+
+class ArbitrageExecuteRequest(BaseModel):
+    token_id_yes: str
+    token_id_no: str
+    size_usdc: float
+
+
+@app.post("/api/arbitrage/execute", tags=["arbitrage"])
+async def execute_arbitrage(req: ArbitrageExecuteRequest):
+    """
+    Execute a dual-leg Dutch-book arbitrage. Both legs pass the same risk gate
+    and are hard-capped by the per-market ceiling. Live execution is only
+    possible for real token ids; synthetic complementary legs are reported
+    but not transmitted to the exchange.
+    """
+    from core.arbitrage_scanner import arbitrage_scanner
+    from core.clob_client import clob_client
+    from risk.manager import MAX_POSITION_PER_MARKET
+
+    size_usdc = min(float(req.size_usdc), float(MAX_POSITION_PER_MARKET))
+    if size_usdc <= 0:
+        raise HTTPException(status_code=400, detail="size_usdc must be positive")
+
+    results = []
+    legs = [
+        ("yes", req.token_id_yes),
+        ("no", req.token_id_no),
+    ]
+    for leg, token_id in legs:
+        book = store.order_books.get(token_id)
+        price = book.best_ask if book and book.best_ask else 0.50
+        shares = size_usdc / max(price, 0.01)
+
+        provisional = Order(
+            order_id=f"arb-{leg}-pre",
+            token_id=token_id,
+            side=Side.BUY,
+            price=price,
+            size=shares,
+            strategy="arb_scanner",
+            paper=settings.paper_trade,
+        )
+        allowed, reason = await risk_manager.check_order(provisional)
+        if not allowed:
+            results.append({"leg": leg, "token_id": token_id, "status": "REJECTED", "reason": reason})
+            continue
+
+        if settings.paper_trade:
+            order = await paper_sim.create_order(
+                OrderArgs(token_id=token_id, price=price, side=Side.BUY, size=shares),
+                strategy="arb_scanner",
+            )
+            status = "PLACED_PAPER"
+        else:
+            if token_id.endswith("_no"):
+                results.append({"leg": leg, "token_id": token_id, "status": "SKIPPED", "reason": "synthetic complementary token — not transmissible"})
+                continue
+            resp = await clob_client.create_order(
+                OrderArgs(token_id=token_id, price=price, side=Side.BUY, size=shares)
+            )
+            if resp is None:
+                results.append({"leg": leg, "token_id": token_id, "status": "FAILED", "reason": "exchange rejected order"})
+                continue
+            order = Order(
+                order_id=resp.get("orderID") or resp.get("order_id", "unknown"),
+                token_id=token_id,
+                side=Side.BUY,
+                price=price,
+                size=shares,
+                strategy="arb_scanner",
+                paper=False,
+            )
+            await store.add_order(order)
+            status = "PLACED_LIVE"
+
+        results.append({"leg": leg, "token_id": token_id, "status": status, "order_id": order.order_id})
+
+    slug = store.market_slugs.get(req.token_id_yes, req.token_id_yes[:12])
+    await store.log_event(f"⚡ Manual arb execute: {slug} (${size_usdc:.2f}/leg): {[r['status'] for r in results]}")
+    return {"status": "processed", "size_usdc": size_usdc, "legs": results, "slug": slug}
 
 
 @app.get("/api/database/records", tags=["database"])

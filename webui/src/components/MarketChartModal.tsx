@@ -27,10 +27,11 @@ export default function MarketChartModal({ tokenId, slug, onClose, onOrderPlaced
   const [loading, setLoading] = useState(true)
   const [showEma, setShowEma] = useState(true)
 
-  // Fast Trade state ($10,000 USD portfolio sizing)
+  // Fast Trade state ($100 operating capital — $3 per-market cap)
   const [price, setPrice] = useState('0.50')
-  const [sizeUsdc, setSizeUsdc] = useState('100')
+  const [sizeUsdc, setSizeUsdc] = useState('1.5')
   const [placing, setPlacing] = useState(false)
+  const [tradeMsg, setTradeMsg] = useState<{ ok: boolean; text: string } | null>(null)
 
   const title = formatMarketTitle(slug)
   const cat = getCategoryBadge('', slug)
@@ -56,9 +57,10 @@ export default function MarketChartModal({ tokenId, slug, onClose, onOrderPlaced
 
   const handlePlaceOrder = async (side: 'BUY' | 'SELL') => {
     setPlacing(true)
+    setTradeMsg(null)
     try {
       const apiUrl = getApiUrl()
-      await fetch(`${apiUrl}/api/trade`, {
+      const res = await fetch(`${apiUrl}/api/trade`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -68,8 +70,16 @@ export default function MarketChartModal({ tokenId, slug, onClose, onOrderPlaced
           size_usdc: parseFloat(sizeUsdc),
         }),
       })
-      if (onOrderPlaced) onOrderPlaced()
-    } catch {}
+      const body = await res.json().catch(() => null)
+      if (res.ok) {
+        setTradeMsg({ ok: true, text: body?.detail || 'Order placed' })
+        if (onOrderPlaced) onOrderPlaced()
+      } else {
+        setTradeMsg({ ok: false, text: body?.detail || `Order failed (HTTP ${res.status})` })
+      }
+    } catch {
+      setTradeMsg({ ok: false, text: 'Order request failed — check connection' })
+    }
     setPlacing(false)
   }
 
@@ -176,14 +186,26 @@ export default function MarketChartModal({ tokenId, slug, onClose, onOrderPlaced
                   )
                 })}
 
-                {/* EMA Line */}
-                {showEma && bars.length > 2 && (
+                {/* Real EMA(21) overlay */}
+                {showEma && bars.length > 21 && (
                   <path
-                    d={bars.reduce((acc, b, i) => {
-                      const x = 15 + i * 10.2
-                      const y = 170 - ((b.close - minP) / rangeP) * 160
-                      return i === 0 ? `M ${x},${y}` : `${acc} L ${x},${y}`
-                    }, '')}
+                    d={(() => {
+                      const k = 2 / (21 + 1)
+                      let ema = bars[0].close
+                      const pts: Array<{ x: number; y: number }> = []
+                      bars.forEach((b, i) => {
+                        ema = b.close * k + ema * (1 - k)
+                        if (i >= 20) {
+                          const x = 15 + i * 10.2
+                          const y = 170 - ((ema - minP) / rangeP) * 160
+                          pts.push({ x, y })
+                        }
+                      })
+                      return pts.reduce(
+                        (acc, pt, i) => (i === 0 ? `M ${pt.x},${pt.y}` : `${acc} L ${pt.x},${pt.y}`),
+                        ''
+                      )
+                    })()}
                     fill="none"
                     stroke="#38bdf8"
                     strokeWidth="1.8"
@@ -210,18 +232,26 @@ export default function MarketChartModal({ tokenId, slug, onClose, onOrderPlaced
               />
             </div>
             <div>
-              <label className="text-[10px] text-[#8b91a8] block mb-0.5">Amount ($ USDC - Max $500)</label>
+              <label className="text-[10px] text-[#8b91a8] block mb-0.5">Amount ($ USDC - Max $3/market)</label>
               <input
                 type="number"
-                step="50"
-                min="10"
-                max="500"
+                step="0.5"
+                min="0.5"
+                max="3"
                 value={sizeUsdc}
                 onChange={(e) => setSizeUsdc(e.target.value)}
                 className="w-24 bg-[#111318] border border-[#252836] rounded px-2.5 py-1 text-xs mono text-[#e8eaf0] focus:outline-none focus:border-blue-500"
               />
             </div>
           </div>
+
+          {tradeMsg && (
+            <div className={`text-[11px] px-3 py-1.5 rounded w-full sm:w-auto ${
+              tradeMsg.ok ? 'bg-green-500/10 text-green-400' : 'bg-red-500/10 text-red-400'
+            }`}>
+              {tradeMsg.ok ? '✅ ' : '⚠ '}{tradeMsg.text}
+            </div>
+          )}
 
           <div className="flex items-center gap-2">
             <button

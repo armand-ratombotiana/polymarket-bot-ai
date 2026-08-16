@@ -23,6 +23,7 @@ from core.data_store import BANKROLL_BASELINE, OrderBook, Side, store
 from core.gamma_client import gamma_client
 from ml.features import extract_features
 from ml.model import ml_model
+from risk.manager import MAX_POSITION_PER_MARKET
 from strategies.base import BaseStrategy
 
 log = logging.getLogger(__name__)
@@ -155,8 +156,9 @@ class SignalTraderStrategy(BaseStrategy):
         kelly_f = max(0.0, (win_prob * payout_ratio - (1.0 - win_prob)) / max(payout_ratio, 0.01))
         kelly_f = min(0.3, kelly_f * KELLY_FRACTION)  # capped at 30% max
 
-        # Scale against the institutional bankroll (not a hardcoded $1,000).
-        size_usdc = max(10.0, min(100.0, BANKROLL_BASELINE * kelly_f))
+        # Scale against the USD 100 operating capital, hard-capped by the
+        # per-market ceiling ($3) so Kelly never overrides dollar limits.
+        size_usdc = max(0.5, min(float(MAX_POSITION_PER_MARKET), BANKROLL_BASELINE * kelly_f))
 
         return MarketSignal(
             token_id=token_id,
@@ -178,7 +180,7 @@ class SignalTraderStrategy(BaseStrategy):
             if oid in store.open_orders:
                 return
 
-        size_shares = max(5.0, sig.size_usdc / sig.target_price)
+        size_shares = max(1.0, sig.size_usdc / sig.target_price)
         args = OrderArgs(
             token_id=sig.token_id,
             price=sig.target_price,

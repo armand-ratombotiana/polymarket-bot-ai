@@ -53,14 +53,21 @@ export default function ArbitrageMatrixView() {
         body: JSON.stringify({
           token_id_yes: opp.token_id_yes,
           token_id_no: opp.token_id_no,
-          size_usdc: Math.min(opp.max_executable_size_usdc, 50.0),
+          size_usdc: Math.min(opp.max_executable_size_usdc, 3.0), // $3 per-market cap
         }),
       })
       if (res.ok) {
-        setLastExecuted(`Successfully routed dual-leg Dutch book on ${opp.slug}`)
+        const data = await res.json()
+        const statuses = (data.legs || []).map((l: { leg: string; status: string }) => `${l.leg}:${l.status}`).join(' · ')
+        setLastExecuted(`Arb routed — ${statuses}`)
         fetchOpportunities()
+      } else {
+        const body = await res.json().catch(() => null)
+        setLastExecuted(`❌ ${body?.detail || `Execution failed (HTTP ${res.status})`}`)
       }
-    } catch {}
+    } catch {
+      setLastExecuted('❌ Execution request failed')
+    }
     setExecuting(null)
   }
 

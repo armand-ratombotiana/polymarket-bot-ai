@@ -55,6 +55,8 @@ export interface BotSnapshot {
   timestamp: number
   mode: 'paper' | 'live'
   kill_switch: boolean
+  observation_only: boolean
+  observation_reason: string
   daily_pnl: number
   paper_balance: number | null
   strategies: string[]
@@ -70,6 +72,8 @@ const DEFAULT_SNAPSHOT: BotSnapshot = {
   timestamp: 0,
   mode: 'paper',
   kill_switch: false,
+  observation_only: false,
+  observation_reason: '',
   daily_pnl: 0,
   paper_balance: null,
   strategies: [],
@@ -127,8 +131,10 @@ export function useBot() {
           timestamp: Date.now() / 1000,
           mode: statusData.mode || 'paper',
           kill_switch: Boolean(statusData.kill_switch),
+          observation_only: Boolean(statusData.observation_only),
+          observation_reason: statusData.observation_reason || '',
           daily_pnl: statusData.daily_pnl || 0,
-          paper_balance: statusData.paper_balance ?? 10000,
+          paper_balance: statusData.paper_balance ?? 100,
           strategies: statusData.strategies || [],
           order_books: booksData.order_books || [],
           open_orders: ordersData.orders || [],

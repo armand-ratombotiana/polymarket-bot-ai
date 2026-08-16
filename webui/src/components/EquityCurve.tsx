@@ -31,15 +31,17 @@ export default function EquityCurve() {
     return () => clearInterval(timer)
   }, [])
 
-  const currentEquity = points[points.length - 1]?.equity || 10000.0
-  const currentPnl = points[points.length - 1]?.pnl || 0.0
+  const currentEquity = points.length > 0 ? points[points.length - 1].equity : null
+  const currentPnl = points.length > 0 ? points[points.length - 1].pnl : 0.0
 
   if (points.length < 2) {
     return (
       <div className="card p-3 flex flex-col justify-between h-full min-h-[140px]">
         <div className="card-header pb-1">
           <span className="card-title">📈 Equity Curve</span>
-          <span className="mono text-xs text-green-400 font-semibold">${currentEquity.toFixed(2)}</span>
+          <span className="mono text-xs text-green-400 font-semibold">
+            {currentEquity !== null ? `$${currentEquity.toFixed(2)}` : '—'}
+          </span>
         </div>
         <div className="flex-1 flex items-center justify-center text-xs text-[#4a5068]">
           Accumulating equity points…
@@ -75,7 +77,9 @@ export default function EquityCurve() {
       <div className="card-header pb-1 flex justify-between items-center">
         <span className="card-title">📈 Portfolio Equity</span>
         <div className="flex items-center gap-2">
-          <span className="mono text-xs font-semibold text-[#e8eaf0]">${currentEquity.toFixed(2)}</span>
+          <span className="mono text-xs font-semibold text-[#e8eaf0]">
+            {currentEquity !== null ? `$${currentEquity.toFixed(2)}` : '—'}
+          </span>
           <span className={`badge ${isProfit ? 'badge-green' : 'badge-red'} text-[10px]`}>
             {isProfit ? '+' : ''}${currentPnl.toFixed(2)}
           </span>

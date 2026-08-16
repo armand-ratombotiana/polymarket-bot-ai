@@ -115,7 +115,7 @@ export default function DeepAnalysisView() {
   const info = formatHierarchicalMarket(analysis?.slug)
 
   return (
-    <div className="flex flex-col h-full bg-[#111318] border border-[#252836] rounded-lg overflow-hidden p-4 space-y-4 overflow-y-auto scrollbar-thin select-none">
+    <div className="flex flex-col h-full bg-[#111318] border border-[#252836] rounded-lg overflow-hidden p-4 space-y-4 overflow-y-auto scrollbar-thin">
       {/* 1. Header & Executive Summary Bar */}
       <div className="flex flex-wrap justify-between items-center pb-3 border-b border-[#252836] gap-3">
         <div>
@@ -248,36 +248,38 @@ export default function DeepAnalysisView() {
                 <div className="flex justify-between items-center bg-[#111318] p-2.5 rounded border border-[#252836]">
                   <span className="text-xs text-[#8b91a8]">Market-Implied Probability:</span>
                   <span className="mono text-sm font-bold text-[#e8eaf0]">
-                    {((analysis.market_implied_prob || 0) * 100).toFixed(1)}%
+                    {analysis.market_implied_prob != null ? `${(analysis.market_implied_prob * 100).toFixed(1)}%` : '—'}
                   </span>
                 </div>
 
                 <div className="flex justify-between items-center bg-[#111318] p-2.5 rounded border border-[#252836]">
-                  <span className="text-xs text-[#8b91a8]">AI/ML Forecast (v{analysis.model_metadata?.version || '1.0'}):</span>
+                  <span className="text-xs text-[#8b91a8]">AI/ML Forecast (v{analysis.model_metadata?.version || '—'}):</span>
                   <span className="mono text-sm font-bold text-cyan-400">
-                    {((analysis.ml_forecast_prob || 0) * 100).toFixed(1)}%
+                    {analysis.ml_forecast_prob != null ? `${(analysis.ml_forecast_prob * 100).toFixed(1)}%` : '—'}
                   </span>
                 </div>
 
                 <div className="flex justify-between items-center bg-[#111318] p-2.5 rounded border border-[#252836]">
                   <span className="text-xs text-[#8b91a8]">95% Uncertainty Bounds:</span>
                   <span className="mono text-xs text-amber-400">
-                    [{((analysis.uncertainty_interval?.[0] || 0) * 100).toFixed(1)}% — {((analysis.uncertainty_interval?.[1] || 0) * 100).toFixed(1)}%]
+                    {analysis.uncertainty_interval?.[0] != null && analysis.uncertainty_interval?.[1] != null
+                      ? `[${(analysis.uncertainty_interval[0] * 100).toFixed(1)}% — ${(analysis.uncertainty_interval[1] * 100).toFixed(1)}%]`
+                      : '—'}
                   </span>
                 </div>
 
                 <div className="flex justify-between items-center bg-green-500/10 p-2.5 rounded border border-green-500/30">
                   <span className="text-xs font-semibold text-green-300">Net Expected Alpha Edge:</span>
                   <span className="mono text-sm font-black text-green-400">
-                    {analysis.net_edge ? `${analysis.net_edge >= 0 ? '+' : ''}${(analysis.net_edge * 100).toFixed(1)}%` : '0.0%'}
+                    {analysis.net_edge ? `${analysis.net_edge >= 0 ? '+' : ''}${(analysis.net_edge * 100).toFixed(1)}%` : '—'}
                   </span>
                 </div>
               </div>
             </div>
 
             <div className="mt-3 pt-2 border-t border-[#252836] text-[10px] text-[#8b91a8] flex justify-between">
-              <span>Model Brier Score: {analysis.model_metadata?.brier_score || 0.175}</span>
-              <span>Model Confidence: {((analysis.confidence_score || 0) * 100).toFixed(0)}%</span>
+              <span>Model Brier Score: {analysis.model_metadata?.brier_score ?? '—'}</span>
+              <span>Model Confidence: {analysis.confidence_score != null ? `${(analysis.confidence_score * 100).toFixed(0)}%` : '—'}</span>
             </div>
           </div>
 
@@ -295,36 +297,36 @@ export default function DeepAnalysisView() {
                 <div className="flex justify-between items-center bg-[#111318] p-2.5 rounded border border-[#252836]">
                   <span className="text-xs text-[#8b91a8]">Top of Book Spread:</span>
                   <span className="mono text-xs font-bold text-[#e8eaf0]">
-                    ${analysis.best_bid?.toFixed(3) || '—'} / ${analysis.best_ask?.toFixed(3) || '—'} ({(analysis.spread_dollars ? analysis.spread_dollars * 100 : 0).toFixed(1)}¢)
+                    ${analysis.best_bid?.toFixed(3) || '—'} / ${analysis.best_ask?.toFixed(3) || '—'} ({analysis.spread_dollars ? `${(analysis.spread_dollars * 100).toFixed(1)}¢` : '—'})
                   </span>
                 </div>
 
                 <div className="flex justify-between items-center bg-[#111318] p-2.5 rounded border border-[#252836]">
                   <span className="text-xs text-[#8b91a8]">Order Flow Imbalance (OFI):</span>
                   <span className={`mono text-xs font-bold ${(analysis.order_flow_imbalance || 0) >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-                    {analysis.order_flow_imbalance ? `${analysis.order_flow_imbalance >= 0 ? '+' : ''}${analysis.order_flow_imbalance}` : '0.00'}
+                    {analysis.order_flow_imbalance != null ? `${analysis.order_flow_imbalance >= 0 ? '+' : ''}${analysis.order_flow_imbalance}` : '—'}
                   </span>
                 </div>
 
                 <div className="flex justify-between items-center bg-[#111318] p-2.5 rounded border border-[#252836]">
                   <span className="text-xs text-[#8b91a8]">5-Level Depth Liquidity:</span>
                   <span className="mono text-xs font-bold text-cyan-400">
-                    ${analysis.total_liquidity_usdc?.toLocaleString() || '0'} USDC
+                    {analysis.total_liquidity_usdc != null ? `$${analysis.total_liquidity_usdc.toLocaleString()} USDC` : '—'}
                   </span>
                 </div>
 
                 <div className="flex justify-between items-center bg-[#111318] p-2.5 rounded border border-[#252836]">
                   <span className="text-xs text-[#8b91a8]">Estimated Slippage ($100 block):</span>
                   <span className="mono text-xs text-[#e8eaf0]">
-                    {analysis.slippage_bps || 0} BPS
+                    {analysis.slippage_bps ?? '—'} BPS
                   </span>
                 </div>
               </div>
             </div>
 
             <div className="mt-3 pt-2 border-t border-[#252836] text-[10px] text-[#8b91a8] flex justify-between">
-              <span>Data Freshness: {analysis.data_freshness_seconds || 0}s ago</span>
-              <span>Compute Time: {analysis.generation_time_ms || 1.2}ms</span>
+              <span>Data Freshness: {analysis.data_freshness_seconds != null ? `${analysis.data_freshness_seconds}s ago` : '—'}</span>
+              <span>Compute Time: {analysis.generation_time_ms != null ? `${analysis.generation_time_ms}ms` : '—'}</span>
             </div>
           </div>
 

@@ -13,6 +13,8 @@ import EventLog from '@/components/EventLog'
 import MLPanel from '@/components/MLPanel'
 import AnalyticsPanel from '@/components/AnalyticsPanel'
 import EquityCurve from '@/components/EquityCurve'
+import RiskStatusPanel from '@/components/RiskStatusPanel'
+import LeaderboardPanel from '@/components/LeaderboardPanel'
 import StrategyMatrix from '@/components/StrategyMatrix'
 import AIMLCommandCenter from '@/components/AIMLCommandCenter'
 import DeepAnalysisView from '@/components/DeepAnalysisView'
@@ -79,6 +81,7 @@ export default function Dashboard() {
   }, [snapshot.kill_switch])
 
   const isKilled = snapshot.kill_switch
+  const isObserving = snapshot.observation_only
 
   return (
     <div className="flex flex-col h-screen overflow-hidden relative bg-[#0b0c10]">
@@ -87,7 +90,12 @@ export default function Dashboard() {
           🛑 KILL SWITCH ACTIVE — All trading halted. Click Resume to re-enable.
         </div>
       )}
-
+      {isObserving && (
+        <div className="bg-amber-500/90 text-black text-center text-xs font-semibold py-1.5 tracking-wide z-50">
+          👁 OBSERVATION-ONLY MODE — New live orders disabled until exposure is reconciled
+          {snapshot.observation_reason ? ` (${snapshot.observation_reason})` : ''}
+        </div>
+      )}
       <Header
         activeTab={activeTab}
         onTabChange={setActiveTab}
@@ -148,8 +156,9 @@ export default function Dashboard() {
               <EventLog events={snapshot.events} />
             </div>
 
-            {/* Right sidebar: Equity Curve + Analytics + ML Panel */}
+            {/* Right sidebar: Risk Status + Equity Curve + Analytics + ML Panel */}
             <div style={{ gridArea: 'sidebar' }} className="min-h-0 overflow-auto scrollbar-thin flex flex-col gap-3">
+              <RiskStatusPanel />
               <EquityCurve />
               <AnalyticsPanel />
               <MLPanel />
@@ -164,8 +173,13 @@ export default function Dashboard() {
         )}
 
         {activeTab === 'strategies' && (
-          <div className="h-full">
-            <StrategyMatrix />
+          <div className="h-full grid grid-cols-1 md:grid-cols-3 gap-3">
+            <div className="md:col-span-2 h-full min-h-0">
+              <StrategyMatrix />
+            </div>
+            <div className="h-full min-h-0 overflow-auto scrollbar-thin flex flex-col gap-3">
+              <LeaderboardPanel />
+            </div>
           </div>
         )}
 
@@ -209,6 +223,7 @@ export default function Dashboard() {
           <div className="h-full">
             <MarketScreener
               onSelectMarket={(tokenId, slug) => setChartMarket({ tokenId, slug })}
+              onQuickTrade={(tokenId, slug) => setSelectedMarket({ tokenId, slug })}
             />
           </div>
         )}

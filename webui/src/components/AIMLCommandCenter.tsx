@@ -117,7 +117,7 @@ export default function AIMLCommandCenter() {
 
         <div className="flex items-center gap-2">
           <span className="badge badge-blue text-xs font-mono">
-            Active: {registry?.active_version || 'v1.0.0'}
+            Active: {registry?.active_version || '—'}
           </span>
           <button
             onClick={handleRetrain}
@@ -150,10 +150,10 @@ export default function AIMLCommandCenter() {
         <div className="bg-[#161822] p-3 rounded-lg border border-[#252836]">
           <span className="text-[11px] text-[#4a5068] block font-medium">Concept Drift PSI Index</span>
           <span className="mono text-lg font-bold text-blue-400">
-            {drift ? drift.psi.toFixed(4) : '0.042'}
+            {drift ? drift.psi.toFixed(4) : '—'}
           </span>
           <span className="text-[10px] text-green-400 block mt-0.5">
-            Status: {drift?.status || 'HEALTHY'}
+            Status: {drift?.status || '—'}
           </span>
         </div>
 

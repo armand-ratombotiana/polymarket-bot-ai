@@ -7,12 +7,9 @@ interface Props {
 }
 
 const SHORTCUTS = [
-  { key: '1 – 8', action: 'Switch workstation tabs (Trading, Strategies, AI/ML, Deep Analysis, Backtest, Copilot, Screener, Health)' },
-  { key: '/', action: 'Focus search input in active panel' },
+  { key: '1 – 8', action: 'Switch workstation tabs (Trading Desk, Arb Matrix, Strategies, AI/ML, Deep Analysis, Timescale DB, Backtest, Copilot)' },
   { key: 'K', action: 'Toggle Kill Switch / Emergency halt' },
   { key: 'C', action: 'Open Strategy & Risk Configuration drawer' },
-  { key: 'B', action: 'Quick-trade BUY YES limit order' },
-  { key: 'S', action: 'Quick-trade SELL YES / BUY NO limit order' },
   { key: 'Esc', action: 'Close any active modal or drawer' },
   { key: '?', action: 'Open this keyboard shortcuts cheatsheet' },
 ]

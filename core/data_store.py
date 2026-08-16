@@ -18,9 +18,11 @@ log = logging.getLogger(__name__)
 
 STATE_FILE = Path(os.environ.get("STORE_STATE_PATH", "/app/data/store_state.json"))
 
-# Single source of truth for the bankroll/equity baseline so accounting,
-# risk limits, and paper simulation all reference the same starting capital.
-BANKROLL_BASELINE = 10000.0
+# Single source of truth for the operating bankroll/equity baseline so
+# accounting, risk limits, and paper simulation all reference the same
+# starting capital. Operating capital: USD 100.00; hard ceiling: USD 200.00
+# (never auto-increased). Automated sizing operates from USD 100 only.
+BANKROLL_BASELINE = 100.0
 
 
 class Side(str, Enum):
@@ -100,11 +102,22 @@ class Position:
     avg_entry_price: float = 0.0
     total_invested: float = 0.0
     realised_pnl: float = 0.0
+    strategy: str = ""
+    opened_at: float = field(default_factory=time.time)
+    last_updated: float = field(default_factory=time.time)
 
     @property
     def current_exposure(self) -> float:
         """Capital at risk = cost basis of remaining shares."""
         return self.yes_shares * self.avg_entry_price
+
+    @property
+    def exposure_duration_hours(self) -> float:
+        return max(0.0, (self.last_updated - self.opened_at) / 3600.0)
+
+    @property
+    def exposure_dollar_days(self) -> float:
+        return self.current_exposure * (self.exposure_duration_hours / 24.0)
 
 
 @dataclass
@@ -224,6 +237,9 @@ class DataStore:
                 trade.token_id,
                 Position(token_id=trade.token_id),
             )
+            if not pos.strategy and trade.strategy:
+                pos.strategy = trade.strategy
+            pos.last_updated = time.time()
             if trade.side == Side.BUY:
                 cost = trade.price * trade.size
                 total_shares = pos.yes_shares + trade.size
@@ -272,6 +288,7 @@ class DataStore:
         tmp_file = STATE_FILE.with_suffix(".tmp")
         try:
             data = {
+                "bankroll_baseline": BANKROLL_BASELINE,
                 "daily_pnl": self.daily_pnl,
                 "paper_balance": self.paper_balance,
                 "peak_equity": self.peak_equity,
@@ -284,6 +301,9 @@ class DataStore:
                         "avg_entry_price": p.avg_entry_price,
                         "total_invested": p.total_invested,
                         "realised_pnl": p.realised_pnl,
+                        "strategy": p.strategy,
+                        "opened_at": p.opened_at,
+                        "last_updated": p.last_updated,
                     }
                     for tid, p in self.positions.items()
                 },
@@ -319,11 +339,23 @@ class DataStore:
             self.daily_pnl = float(data.get("daily_pnl", 0.0))
             self.paper_balance = float(data.get("paper_balance", BANKROLL_BASELINE))
             raw_peak = float(data.get("peak_equity", 0.0))
-            self.peak_equity = (
-                max(raw_peak, BANKROLL_BASELINE + self.daily_pnl)
-                if raw_peak > 0.0
-                else BANKROLL_BASELINE + self.daily_pnl
-            )
+            persisted_baseline = float(data.get("bankroll_baseline", BANKROLL_BASELINE))
+            # If the bankroll baseline scale changed (operating capital re-approval),
+            # the high-water mark must be re-based to the current equity; otherwise
+            # the legacy $10k/$200-era peak would fabricate a false drawdown.
+            if persisted_baseline != BANKROLL_BASELINE:
+                self.peak_equity = BANKROLL_BASELINE + self.daily_pnl
+                log.warning(
+                    "[data_store] Bankroll baseline changed $%.2f -> $%.2f — high-water mark "
+                    "re-based to current equity $%.2f (no fabricated drawdown).",
+                    persisted_baseline, BANKROLL_BASELINE, self.peak_equity,
+                )
+            else:
+                self.peak_equity = (
+                    max(raw_peak, BANKROLL_BASELINE + self.daily_pnl)
+                    if raw_peak > 0.0
+                    else BANKROLL_BASELINE + self.daily_pnl
+                )
             self.equity_history = data.get("equity_history", self.equity_history)
 
             raw_pos = data.get("positions", {})
@@ -335,6 +367,9 @@ class DataStore:
                     avg_entry_price=float(pdict.get("avg_entry_price", 0.0)),
                     total_invested=float(pdict.get("total_invested", 0.0)),
                     realised_pnl=float(pdict.get("realised_pnl", 0.0)),
+                    strategy=pdict.get("strategy", ""),
+                    opened_at=float(pdict.get("opened_at", time.time())),
+                    last_updated=float(pdict.get("last_updated", time.time())),
                 )
 
             raw_trades = data.get("trades", [])
@@ -351,17 +386,25 @@ class DataStore:
                     timestamp=float(tdict.get("timestamp", time.time())),
                 ))
 
-            # Recompute ledger-derived figures from the trade log so the persisted
-            # state is always self-consistent (daily_pnl == sum(pnl), balance ==
-            # baseline - buys + sells). This also heals state written by older
-            # versions that pruned trades but kept cumulative P&L.
-            if self.trades:
-                self.daily_pnl = sum(t.pnl for t in self.trades)
+            # Recompute ledger-derived figures from the trade log only when the
+            # persisted cumulative values are absent (e.g. brand-new state). The
+            # persisted daily_pnl / paper_balance are the authoritative cumulative
+            # figures; if the in-memory trade log no longer sums to them (legacy
+            # truncation), we keep the authoritative values and flag divergence
+            # for the reconciliation report instead of silently rewriting P&L.
+            sum_trade_pnl = sum(t.pnl for t in self.trades)
+            if self.trades and abs(self.daily_pnl) < 1e-9 and abs(sum_trade_pnl) > 1e-9:
+                self.daily_pnl = sum_trade_pnl
                 self.paper_balance = BANKROLL_BASELINE + sum(
                     t.price * t.size * (1.0 if t.side == Side.SELL else -1.0)
                     for t in self.trades
                 )
-                self.peak_equity = max(self.peak_equity, BANKROLL_BASELINE + self.daily_pnl)
+            if self.trades and abs(sum_trade_pnl - self.daily_pnl) > 0.01:
+                log.warning(
+                    "[data_store] Trade log pnl ($%.2f) diverges from persisted daily_pnl ($%.2f) — legacy "
+                    "truncated history; authoritative cumulative P&L retained.",
+                    sum_trade_pnl, self.daily_pnl,
+                )
 
             log.info("Loaded DataStore state from disk: daily_pnl=$%.2f, %d positions, %d trades",
                      self.daily_pnl, len(self.positions), len(self.trades))

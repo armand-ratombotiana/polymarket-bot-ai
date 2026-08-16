@@ -32,7 +32,7 @@ export default function DepthChartModal({ tokenId, slug, onClose, onOrderPlaced 
   const [data, setData] = useState<DepthData | null>(null)
   const [side, setSide] = useState<'BUY' | 'SELL'>('BUY')
   const [price, setPrice] = useState<string>('0.50')
-  const [sizeUsdc, setSizeUsdc] = useState<string>('10.0')
+  const [sizeUsdc, setSizeUsdc] = useState<string>('1.5')
   const [loading, setLoading] = useState(false)
   const [feedback, setFeedback] = useState<string | null>(null)
 
@@ -203,12 +203,12 @@ export default function DepthChartModal({ tokenId, slug, onClose, onOrderPlaced 
                 />
               </div>
               <div>
-                <label className="text-[10px] text-[#4a5068] block mb-1">Order Size (USDC)</label>
+                <label className="text-[10px] text-[#4a5068] block mb-1">Order Size (USDC) — Max $3/market</label>
                 <input
                   type="number"
-                  step="5"
-                  min="1"
-                  max="500"
+                  step="0.5"
+                  min="0.5"
+                  max="3"
                   value={sizeUsdc}
                   onChange={(e) => setSizeUsdc(e.target.value)}
                   className="w-full bg-[#111318] border border-[#252836] rounded px-2.5 py-1.5 mono text-[#e8eaf0] focus:outline-none focus:border-blue-500"

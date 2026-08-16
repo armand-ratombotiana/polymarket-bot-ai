@@ -134,7 +134,7 @@ class ArbScannerStrategy(BaseStrategy):
         profit: float,
     ) -> None:
         slug = self._market_slugs.get(yes_token, yes_token[:12])
-        size = max(5.0, self._order_size / max(yes_price, 0.05))
+        size = max(1.0, self._order_size / max(yes_price, 0.05))
 
         await store.log_event(
             f"⚡ ARB Opportunity on {slug}: YES@{yes_price:.4f} + NO@{no_price:.4f} | +{profit*100:.2f}% profit"

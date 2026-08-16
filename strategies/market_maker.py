@@ -171,7 +171,7 @@ class MarketMakerStrategy(BaseStrategy):
         can_sell = (q > 0.0) and (invested > 0.0)  # never sell shares we don't hold
 
         if can_buy and bid_price > 0:
-            bid_size = max(5.0, self._quote_size / bid_price)
+            bid_size = max(1.0, self._quote_size / bid_price)
             bid_args = OrderArgs(
                 token_id=token_id,
                 price=bid_price,
@@ -183,7 +183,7 @@ class MarketMakerStrategy(BaseStrategy):
                 self._quotes.setdefault(token_id, {})["BUY"] = order.order_id
 
         if can_sell and ask_price > 0:
-            ask_size = max(5.0, self._quote_size / ask_price)
+            ask_size = max(1.0, self._quote_size / ask_price)
             ask_args = OrderArgs(
                 token_id=token_id,
                 price=ask_price,

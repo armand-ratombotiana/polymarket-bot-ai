@@ -18,12 +18,12 @@ interface MarketItem {
 
 interface Props {
   onSelectMarket?: (tokenId: string, slug: string) => void
+  onQuickTrade?: (tokenId: string, slug: string) => void
 }
 
-export default function MarketScreener({ onSelectMarket }: Props) {
+export default function MarketScreener({ onSelectMarket, onQuickTrade }: Props) {
   const [markets, setMarkets] = useState<MarketItem[]>([])
   const [search, setSearch] = useState('')
-  const [sortBy, setSortBy] = useState<'volume' | 'liquidity'>('volume')
   const [loading, setLoading] = useState(false)
 
   const fetchMarkets = async (q: string = '') => {
@@ -44,6 +44,8 @@ export default function MarketScreener({ onSelectMarket }: Props) {
 
   useEffect(() => {
     fetchMarkets()
+    const timer = setInterval(() => fetchMarkets(search), 30000)
+    return () => clearInterval(timer)
   }, [])
 
   const handleSearch = (e: React.FormEvent) => {
@@ -94,42 +96,50 @@ export default function MarketScreener({ onSelectMarket }: Props) {
               </tr>
             </thead>
             <tbody>
-              {markets.map((m, i) => {
-                const title = m.groupItemTitle || m.slug
-                const vol = parseFloat(String(m.volume24hr || 0))
-                const liq = parseFloat(String(m.liquidity || 0))
-                const tokenId = m.tokens?.[0]?.token_id || m.conditionId || m.slug
+              {markets.length === 0 ? (
+                <tr>
+                  <td colSpan={5} className="text-center py-10 text-[#4a5068] text-xs">
+                    No markets found{search ? ` for "${search}"` : ''}. Try a different search or refresh.
+                  </td>
+                </tr>
+              ) : (
+                markets.map((m, i) => {
+                  const title = m.groupItemTitle || m.slug
+                  const vol = parseFloat(String(m.volume24hr || 0))
+                  const liq = parseFloat(String(m.liquidity || 0))
+                  const tokenId = m.tokens?.[0]?.token_id || m.conditionId || m.slug
 
-                return (
-                  <tr key={i} className="hover:bg-blue-500/10 transition-colors">
-                    <td className="max-w-[280px]">
-                      <span className="text-[#e8eaf0] font-medium block truncate" title={title}>
-                        {title}
-                      </span>
-                      <span className="text-[10px] text-[#4a5068] mono">{m.slug}</span>
-                    </td>
-                    <td>
-                      <span className="badge badge-blue text-[10px] uppercase">
-                        {m.category || 'general'}
-                      </span>
-                    </td>
-                    <td className="mono text-cyan-400 font-medium">
-                      ${vol.toLocaleString('en', { maximumFractionDigits: 0 })}
-                    </td>
-                    <td className="mono text-[#8b91a8]">
-                      ${liq.toLocaleString('en', { maximumFractionDigits: 0 })}
-                    </td>
-                    <td>
-                      <button
-                        onClick={() => onSelectMarket && onSelectMarket(tokenId, m.slug)}
-                        className="btn btn-ghost text-blue-400 hover:text-white border-blue-900/40 text-[11px] px-2.5 py-1"
-                      >
-                        Trade / Depth
-                      </button>
-                    </td>
-                  </tr>
-                )
-              })}
+                  return (
+                    <tr key={i} className="hover:bg-blue-500/10 transition-colors">
+                      <td className="max-w-[280px]">
+                        <span className="text-[#e8eaf0] font-medium block truncate" title={title}>
+                          {title}
+                        </span>
+                        <span className="text-[10px] text-[#4a5068] mono">{m.slug}</span>
+                      </td>
+                      <td>
+                        <span className="badge badge-blue text-[10px] uppercase">
+                          {m.category || 'general'}
+                        </span>
+                      </td>
+                      <td className="mono text-cyan-400 font-medium">
+                        ${vol.toLocaleString('en', { maximumFractionDigits: 0 })}
+                      </td>
+                      <td className="mono text-[#8b91a8]">
+                        ${liq.toLocaleString('en', { maximumFractionDigits: 0 })}
+                      </td>
+<td>
+                        <button
+                          onClick={() => onQuickTrade ? onQuickTrade(tokenId, m.slug) : onSelectMarket && onSelectMarket(tokenId, m.slug)}
+                          className="btn btn-ghost text-blue-400 hover:text-white border-blue-900/40 text-[11px] px-2.5 py-1"
+                        >
+                          Trade / Depth
+                        </button>
+                      </td>
+                    </tr>
+                  )
+                })
+              )}
             </tbody>
           </table>
         )}
