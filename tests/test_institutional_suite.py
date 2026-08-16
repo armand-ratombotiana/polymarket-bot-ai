@@ -219,6 +219,28 @@ class TestInstitutionalSuite(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(report["coverage_percentage"], 66.67, places=1)
         self.assertIsInstance(discovery.get_full_catalog(), list)
 
+    async def test_10_global_fundamental_news_100k_sources(self):
+        """Test 100,000+ source directory, deduplication, NLP sentiment, and stats."""
+        from core.fundamental_ingest import fundamental_engine
+        catalog = fundamental_engine.get_source_catalog()
+        self.assertGreater(catalog["total_sources_supported"], 100000)
+        self.assertIn("gdelt_global_network", catalog["source_tiers"])
+        self.assertGreater(catalog["curated_wires_count"], 20)
+
+        # Test ingestion with SHA-256 deduplication
+        item1 = await fundamental_engine.ingest_news_item("Treasury yields fall as inflation cools", "Reuters Global", "Macro")
+        self.assertIsNotNone(item1)
+        self.assertGreaterEqual(item1.sentiment, -1.0)
+        self.assertLessEqual(item1.sentiment, 1.0)
+
+        # Duplicate should be ignored
+        item2 = await fundamental_engine.ingest_news_item("Treasury yields fall as inflation cools", "Reuters Global", "Macro")
+        self.assertIsNone(item2)
+
+        stats = fundamental_engine.get_news_stats()
+        self.assertGreater(stats["sources_indexed"], 100000)
+        self.assertIn("bullish", stats["sentiment_distribution"])
+
 
 if __name__ == "__main__":
     unittest.main()

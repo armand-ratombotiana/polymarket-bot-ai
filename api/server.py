@@ -820,9 +820,24 @@ async def analyze_specific_market(token_id: str):
 
 
 @app.get("/api/analysis/news", tags=["analysis"])
-async def get_fundamental_news():
-    """Return real-time news headlines, macro events, and sentiment scores."""
-    return {"news": [n.to_dict() for n in fundamental_engine.news_feed], "count": len(fundamental_engine.news_feed)}
+async def get_fundamental_news(limit: int = 50, category: Optional[str] = None):
+    """Return real-time news headlines, macro events, and sentiment scores from 100,000+ sources."""
+    items = fundamental_engine.news_feed
+    if category and category.lower() != "all":
+        items = [n for n in items if n.category.lower() == category.lower()]
+    return {"news": [n.to_dict() for n in items[:limit]], "count": len(items)}
+
+
+@app.get("/api/analysis/news/sources", tags=["analysis"])
+async def get_fundamental_news_sources():
+    """Return catalog of 100,000+ indexed news sources, GDELT network, and wire feeds."""
+    return fundamental_engine.get_source_catalog()
+
+
+@app.get("/api/analysis/news/stats", tags=["analysis"])
+async def get_fundamental_news_stats():
+    """Return live NLP sentiment breakdown and global ingestion rate telemetry."""
+    return fundamental_engine.get_news_stats()
 
 
 # ── Model Registry & Drift Detection ──────────────────────────────────────────
