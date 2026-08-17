@@ -242,6 +242,14 @@ async def lifespan(app: FastAPI):
     token_sync_task = asyncio.create_task(_token_sync_loop(), name="token-sync")
     persist_task = asyncio.create_task(_state_persistence_loop(), name="state-persist")
 
+    # 9. Reconciliation job (P0-DAT-03): initial pass at startup + daily artifact
+    from core.reconciliation import run_reconciliation
+    try:
+        run_reconciliation()
+    except Exception as e:
+        log.error("[reconciliation] startup pass failed: %s", e)
+    recon_task = asyncio.create_task(_reconciliation_loop(), name="reconciliation-daily")
+
     log.info("API server ready — 50+ Strategy Hub, Vector DB, and ML ensemble online")
     await store.log_event("✅ Polymarket Pro v3.0 Workstation Online 24/7")
 
@@ -253,6 +261,7 @@ async def lifespan(app: FastAPI):
     reseed_task.cancel()
     token_sync_task.cancel()
     persist_task.cancel()
+    recon_task.cancel()
     store.save_to_disk()
 
     await settlement_engine.stop()
@@ -267,6 +276,16 @@ async def lifespan(app: FastAPI):
         await paper_sim.stop()
     await gamma_client.close()
     log.info("API server stopped cleanly")
+
+
+async def _reconciliation_loop() -> None:
+    from core.reconciliation import run_reconciliation
+    while True:
+        await asyncio.sleep(24 * 60 * 60)
+        try:
+            run_reconciliation()
+        except Exception as e:
+            log.error("[reconciliation] daily pass failed: %s", e)
 
 
 # ── Broadcast Loop ────────────────────────────────────────────────────────────
@@ -1191,23 +1210,26 @@ async def execute_arbitrage(req: ArbitrageExecuteRequest):
 
 @app.get("/api/database/records", tags=["database"])
 async def get_database_records(table: str = "market_snapshots", limit: int = 25):
-    """Query latest time-series records from TimescaleDB / PostgreSQL database."""
-    import sqlite3
+    """Query latest time-series records from the ACTIVE backend (KD-29).
 
-    from core.timescale_db import SQLITE_FALLBACK_PATH
-    valid_tables = {"market_snapshots", "orderbook_ticks", "fundamental_news", "ml_feature_store"}
-    if table not in valid_tables:
+    Reads through the engine so results always match the backend that is
+    actually accepting writes; errors are surfaced, never swallowed.
+    """
+    from core.timescale_db import _TABLES, timescale_db
+    if table not in _TABLES:
         raise HTTPException(status_code=400, detail=f"Invalid table {table}")
+    limit = max(1, min(int(limit), 500))
+    return timescale_db.fetch_records(table=table, limit=limit)
 
-    try:
-        with sqlite3.connect(SQLITE_FALLBACK_PATH) as conn:
-            conn.row_factory = sqlite3.Row
-            cursor = conn.cursor()
-            cursor.execute(f"SELECT * FROM {table} ORDER BY id DESC LIMIT ?", (limit,))
-            rows = [dict(r) for r in cursor.fetchall()]
-        return {"table": table, "records": rows, "count": len(rows)}
-    except Exception as e:
-        return {"table": table, "records": [], "count": 0, "error": str(e)}
+
+@app.get("/api/database/reconciliation", tags=["database"])
+async def get_reconciliation_report():
+    """Most recent storage-vs-engine reconciliation artifact (P0-DAT-03)."""
+    from core.reconciliation import last_reconciliation, run_reconciliation
+    report = last_reconciliation()
+    if report is None:
+        report = run_reconciliation()
+    return report
 
 
 # ── System Health, Mode & Pipeline Ingestion Monitor ──────────────────────────
@@ -1251,11 +1273,24 @@ async def get_system_health():
     }
 
     db_reachable = db_stats.get("db_backend") not in (None, "")
+    write_failures = sum(db_stats.get("inserts_failed", {}).values())
     checks["timescale_db"] = {
-        "status": "UP" if db_reachable else "DEGRADED",
+        "status": "UP" if (db_reachable and write_failures == 0) else ("DEGRADED" if db_reachable else "UNHEALTHY"),
         "detail": f"{db_stats.get('db_backend', 'unavailable')} — "
                   f"{db_stats.get('snapshots_recorded', 0)} snaps / "
-                  f"{db_stats.get('ticks_recorded', 0)} ticks",
+                  f"{db_stats.get('ticks_recorded', 0)} ticks / "
+                  f"{write_failures} failed writes",
+    }
+
+    from core.reconciliation import last_reconciliation
+    recon = last_reconciliation()
+    recon_ok = recon is not None and recon.get("is_clean", False) is True
+    checks["reconciliation"] = {
+        "status": "UP" if recon_ok else ("DEGRADED" if recon is not None else "NOT_RUN"),
+        "detail": (f"clean at {recon.get('generated_at', '?')}"
+                   if recon_ok else
+                   (f"{len(recon.get('breaches', []))} breach(es): {recon.get('breaches', [])[:1]}"
+                    if recon is not None else "no reconciliation artifact yet — run at startup")),
     }
 
     success = poller_stats.get("success_count", 0)

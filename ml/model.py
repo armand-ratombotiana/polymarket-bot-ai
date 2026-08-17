@@ -226,15 +226,16 @@ class MarketMLModel:
     def is_fitted(self) -> bool:
         return self.rf is not None
 
-    def predict_proba(self, features: np.ndarray) -> float:
-        p, _ = self.predict(features)
+    def predict_proba(self, features: np.ndarray, token_id: str = "") -> float:
+        p, _ = self.predict(features, token_id=token_id)
         return p
 
-    def predict_confidence(self, features: np.ndarray) -> float:
-        _, conf = self.predict(features)
+    def predict_confidence(self, features: np.ndarray, token_id: str = "") -> float:
+        _, conf = self.predict(features, token_id=token_id)
+        return conf
         return conf
 
-    def predict(self, features: np.ndarray) -> tuple[float, float]:
+    def predict(self, features: np.ndarray, token_id: str = "") -> tuple[float, float]:
         if self.rf is None or self.gb is None:
             return float(features[0]), 0.5
 
@@ -254,6 +255,14 @@ class MarketMLModel:
 
             # Record in drift detector
             drift_detector.record_prediction(p_yes)
+
+            # Record feature vector to the durable feature store (KD-27);
+            # settlement backfills the real outcome later (KD-25).
+            try:
+                from core.timescale_db import timescale_db
+                timescale_db.record_prediction(features, p_yes, confidence, token_id=token_id)
+            except Exception:
+                log.debug("[ml_model] feature-vector record skipped", exc_info=True)
 
             return p_yes, confidence
         except Exception as e:

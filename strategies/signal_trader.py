@@ -132,7 +132,7 @@ class SignalTraderStrategy(BaseStrategy):
     def _ml_signal(
         self, token_id: str, slug: str, mkt: dict, book: OrderBook, features
     ) -> MarketSignal | None:
-        p_yes, confidence = ml_model.predict(features)
+        p_yes, confidence = ml_model.predict(features, token_id=token_id)
 
         if confidence < self._min_confidence:
             return None

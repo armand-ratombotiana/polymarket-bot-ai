@@ -32,3 +32,9 @@ Legend: [F] fabricated claim in code/API/UI · [B] broken behavior (no-op/dead p
 | KD-22 | [T] | `tests/test_institutional_suite.py` `test_02` | Docstring says "$4.00 daily loss stop"; code asserts $2.00 behavior — stale doc | M2 |
 | KD-23 | [B] | `core/data_store.py:259` | Equity curve uses `BANKROLL_BASELINE + daily_pnl` while `paper_balance` is the accounting balance — two equity definitions visible to analytics (`/api/analytics` uses `store.paper_balance`) | M5 |
 | KD-24 | [B] | `main.py:93`, `api/server.py:164` | WS client started unconditionally though it subscribes to nothing | M4 |
+| KD-25 | [B] | `core/timescale_db.py:371` | `fetch_training_samples` fabricates labels via `np.random.uniform` draw — unverifiable training rows | M3 |
+| KD-26 | [F] | `core/timescale_db.py:379-414` | `get_stats` always reads the SQLite file even when Timescale is the active backend — misleading telemetry | M3 |
+| KD-27 | [B] | `core/timescale_db.py:313`, `ml/model.py` | `record_feature_vector` has no caller — `ml_feature_store` never accumulates rows | M3 (D6) |
+| KD-28 | [B] | `core/timescale_db.py:27` | SQLite path hardcoded to `/app/data/market_intelligence.db`; ignores `MARKET_DB_PATH` | M3 |
+| KD-29 | [B] | `api/server.py:1192-1210` | `/api/database/records` hardcodes SQLite reads + swallows errors, even when Timescale active | M3 |
+| KD-30 | [B] | persistence layer (all) | No reconciliation job or daily report artifact comparing engine writes vs storage rows | M3 (P0-DAT-03) |

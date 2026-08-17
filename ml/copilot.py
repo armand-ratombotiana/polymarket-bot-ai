@@ -52,7 +52,7 @@ class AICopilotEngine:
         if market_dict:
             feats = extract_features(market_dict, book)
             if feats is not None:
-                p_yes, conf = ml_model.predict(feats)
+                p_yes, conf = ml_model.predict(feats, token_id=token_id)
 
         # Microstructure heuristics
         best_bid_sz = book.bids[0].size if book.bids else 0.0

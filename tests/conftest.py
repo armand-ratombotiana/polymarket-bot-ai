@@ -16,6 +16,7 @@ os.environ["AUDIT_DB_PATH"] = str(_TMP / "audit_trail.db")
 os.environ["STORE_STATE_PATH"] = str(_TMP / "store_state.json")
 os.environ["MARKET_DB_PATH"] = str(_TMP / "market_intelligence.db")
 os.environ["MODEL_PATH"] = str(_TMP / "model.pkl")
+os.environ["RECON_REPORT_DIR"] = str(_TMP / "reports")
 os.environ["TRADING_MODE"] = "paper"
 # API security env must be present before Settings() is first constructed.
 os.environ["API_TOKEN"] = "test-token-123"

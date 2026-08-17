@@ -52,8 +52,8 @@ class DeepMarketAnalysisEngine:
         # 1. Feature Extraction & AI/ML Inference
         features = extract_features({"slug": slug, "volume24hr": 25000, "volume": 100000}, book)
         if features is not None and ml_model.is_fitted:
-            p_ml = float(ml_model.predict_proba(features))
-            confidence = float(ml_model.predict_confidence(features))
+            p_ml = float(ml_model.predict_proba(features, token_id=token_id))
+            confidence = float(ml_model.predict_confidence(features, token_id=token_id))
         else:
             p_ml = mid_p
             confidence = 0.50

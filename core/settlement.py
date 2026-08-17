@@ -136,6 +136,17 @@ class SettlementEngine:
         self._settled_tokens.add(yes_token)
         ml_model.save()
 
+        # Backfill verified outcome labels into the feature store (KD-27/KD-25):
+        # rows recorded at predict-time for this token get the REAL Gamma outcome.
+        try:
+            from core.timescale_db import timescale_db
+            updated = timescale_db.mark_resolved_outcomes(yes_token, resolved_yes=resolved_yes)
+            if updated:
+                log.info("[settlement] Backfilled %d feature-store outcome labels for %s (YES=%s)",
+                         updated, yes_token, resolved_yes)
+        except Exception as e:
+            log.error("[settlement] Outcome backfill failed for %s: %s", yes_token, e)
+
 
 # Module-level singleton
 settlement_engine = SettlementEngine()
