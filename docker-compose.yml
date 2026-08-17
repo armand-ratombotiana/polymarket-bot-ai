@@ -1,0 +1,139 @@
+networks:
+  bot-net:
+    driver: bridge
+
+volumes:
+  bot-logs:
+  bot-data:       # persists ML models & fallback state
+  timescale-data: # persists TimescaleDB / PostgreSQL time-series
+
+services:
+
+  # ── TimescaleDB & PostgreSQL (Time-Series & Relational Engine) ────────────
+  timescaledb:
+    image: timescale/timescaledb:latest-pg16
+    container_name: polymarket-timescaledb
+    restart: always
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: polymarket_secret
+      POSTGRES_DB: polymarket
+      TIMESCALEDB_TELEMETRY: "off"
+    # DB is internal-only on the docker network — no host publish (avoids
+    # conflicts with other postgres instances; never expose a DB port publicly).
+    ports:
+      - "127.0.0.1:${PG_PORT:-5432}:5432"
+    volumes:
+      - timescale-data:/var/lib/postgresql/data
+    networks:
+      - bot-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d polymarket"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+  # ── Polymarket Bot (PAPER MODE) — FastAPI + Supervisord + ML + Ingestion ───
+  # Started with: docker compose --profile paper up -d   (or `make up`)
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: polymarket-bot:latest
+    container_name: polymarket-bot
+    restart: always                  # 24/7 — always restart on any failure
+    profiles: ["paper"]
+    env_file: .env
+    environment:
+      PAPER_TRADE: "true"            # safe default — override in .env
+      DATABASE_URL: postgresql://postgres:polymarket_secret@timescaledb:5432/polymarket
+      MODEL_PATH: /app/data/model.pkl
+      LOG_LEVEL: INFO
+    ports:
+      - "${BOT_API_PORT:-8080}:8000"            # host:${BOT_API_PORT} → container:8000
+    volumes:
+      - bot-logs:/app/logs           # persisted logs
+      - bot-data:/app/data           # persisted ML model & SQLite fallback
+    networks:
+      - bot-net
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health', timeout=4)"]
+      interval: 20s
+      timeout: 6s
+      retries: 5
+      start_period: 60s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+  # ── Polymarket Bot (LIVE MODE) — real money! ────────────────────────────────
+  # Started with: docker compose --profile live up -d   (or `make live`)
+  # Mutually exclusive with `bot` (same host port 8080 — only one runs at a time).
+  bot-live:
+    image: polymarket-bot:latest
+    container_name: polymarket-bot-live
+    restart: always
+    profiles: ["live"]
+    env_file: .env
+    environment:
+      PAPER_TRADE: "false"           # ⚠️ LIVE — real funds at risk!
+      DATABASE_URL: postgresql://postgres:polymarket_secret@timescaledb:5432/polymarket
+      MODEL_PATH: /app/data/model.pkl
+      LOG_LEVEL: INFO
+    ports:
+      - "${BOT_API_PORT:-8080}:8000"            # host:${BOT_API_PORT} → container:8000
+    volumes:
+      - bot-logs:/app/logs
+      - bot-data:/app/data
+    networks:
+      - bot-net
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health', timeout=4)"]
+      interval: 20s
+      timeout: 6s
+      retries: 5
+      start_period: 60s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+  # ── Web UI (Next.js) ──────────────────────────────────────────────────────
+  # Served on :${UI_PORT}; the browser reaches the bot API on the host.
+  # BOT_API_HOST is the address the *browser* uses to reach the API —
+  # set it to the server's hostname/IP (e.g. http://10.0.0.5:8087).
+  webui:
+    build:
+      context: ./webui
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: "http://${BOT_API_HOST:-localhost}:${BOT_API_PORT:-8080}"
+        NEXT_PUBLIC_WS_URL:  "ws://${BOT_API_HOST:-localhost}:${BOT_API_PORT:-8080}/ws"
+    image: polymarket-webui:latest
+    container_name: polymarket-webui
+    restart: always                  # 24/7
+    ports:
+      - "${UI_PORT:-3010}:3000"      # host:${UI_PORT} → container:3000
+    networks:
+      - bot-net
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
