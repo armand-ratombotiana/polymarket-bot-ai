@@ -1,4 +1,4 @@
-// components/AICopilotPanel.tsx — GenAI Market Intelligence & Copilot Workspace
+// components/AICopilotPanel.tsx — Market Intelligence & Copilot Workspace
 'use client'
 
 import { useState } from 'react'
@@ -15,7 +15,7 @@ export default function AICopilotPanel() {
     {
       role: 'assistant',
       content:
-        '👋 Welcome to the **Polymarket AI Copilot**! I analyze order books, calculate win probabilities with our calibrated ML ensemble, and identify multi-market arbitrage dislocations. What market would you like to analyze?',
+        '👋 Welcome to the **Polymarket Copilot**. I use rule-based heuristics and TF-IDF semantic matching to explore order books, strategy rules, and market probabilities. Ask about any active market slug or quant topic.',
     },
   ])
   const [input, setInput] = useState('')
@@ -63,20 +63,28 @@ export default function AICopilotPanel() {
   }
 
   return (
-    <div className="card flex flex-col h-full bg-[#111318] border border-[#252836] overflow-hidden">
+    <div className="card flex flex-col h-full bg-[#13161e] border border-[#1f2335] overflow-hidden">
       {/* Header */}
-      <div className="card-header flex justify-between items-center px-4 py-3 border-b border-[#252836]">
+      <div className="card-header flex justify-between items-center px-4 py-3 border-b border-[#1f2335]">
         <div className="flex items-center gap-2">
-          <span className="text-base">🤖</span>
-          <span className="card-title text-sm font-bold text-[#e8eaf0]">
-            AI Trading Copilot &amp; Market Intelligence
+          <span className="text-base" aria-hidden="true">💡</span>
+          <span className="card-title text-sm font-bold text-[#dde1ed]">
+            Market Intelligence Copilot
           </span>
         </div>
-        <span className="badge badge-blue text-[10px]">RAG Vector Search Active</span>
+        <span className="badge badge-purple text-[9.5px]">Heuristic &amp; Template Assistant</span>
+      </div>
+
+      {/* Experimental Notice */}
+      <div className="banner-experimental text-[11px] mx-4 mt-2 py-1.5 px-3" role="note">
+        <span aria-hidden="true">ℹ️</span>
+        <span>
+          <strong>TEMPLATE-BASED:</strong> Copilot answers are generated from structured heuristics and in-memory TF-IDF index. Not validated financial advice.
+        </span>
       </div>
 
       {/* Messages */}
-      <div className="flex-1 overflow-y-auto p-4 space-y-3.5 scrollbar-thin text-xs leading-relaxed">
+      <div className="flex-1 overflow-y-auto p-4 space-y-3 scrollbar-thin text-xs leading-relaxed">
         {messages.map((m, i) => (
           <div
             key={i}
@@ -88,21 +96,21 @@ export default function AICopilotPanel() {
               className={`max-w-[85%] rounded-lg p-3 ${
                 m.role === 'user'
                   ? 'bg-blue-600 text-white rounded-br-none'
-                  : 'bg-[#161822] text-[#e8eaf0] border border-[#252836] rounded-bl-none'
+                  : 'bg-[#0e1015] text-[#dde1ed] border border-[#1f2335] rounded-bl-none'
               }`}
             >
               <div className="whitespace-pre-line">{m.content}</div>
 
               {/* Matched semantic markets pills */}
               {m.matched_markets && m.matched_markets.length > 0 && (
-                <div className="mt-2.5 pt-2 border-t border-[#252836] flex flex-wrap gap-1.5">
-                  <span className="text-[10px] text-[#8b91a8] block w-full">
-                    Semantic Market Matches:
+                <div className="mt-2.5 pt-2 border-t border-[#1f2335] flex flex-wrap gap-1.5">
+                  <span className="text-[10px] text-[#7e8aaa] block w-full">
+                    Matched Markets (Lexical TF-IDF):
                   </span>
                   {m.matched_markets.map((mkt) => (
                     <span
                       key={mkt.token_id}
-                      className="text-[10px] bg-[#111318] text-cyan-400 border border-[#252836] px-2 py-0.5 rounded mono"
+                      className="text-[10px] bg-[#13161e] text-cyan-400 border border-[#1f2335] px-2 py-0.5 rounded mono"
                     >
                       {mkt.slug} ({(mkt.similarity * 100).toFixed(0)}%)
                     </span>
@@ -113,26 +121,27 @@ export default function AICopilotPanel() {
           </div>
         ))}
         {loading && (
-          <div className="flex items-center gap-2 text-xs text-blue-400 bg-[#161822] p-2.5 rounded-lg border border-[#252836] w-fit">
-            <span className="status-dot bg-blue-400 animate-pulse" />
-            Analyzing order books &amp; semantic index…
+          <div className="flex items-center gap-2 text-xs text-blue-400 bg-[#0e1015] p-2.5 rounded-lg border border-[#1f2335] w-fit">
+            <span className="spinner mr-1" aria-hidden="true" />
+            Scanning market index…
           </div>
         )}
       </div>
 
       {/* Input Form */}
-      <form onSubmit={handleSend} className="p-3 border-t border-[#252836] bg-[#0e1015] flex gap-2">
+      <form onSubmit={handleSend} className="p-3 border-t border-[#1f2335] bg-[#0e1015] flex gap-2">
         <input
           type="text"
-          placeholder="Ask Copilot about any market, probability shift, or strategy idea…"
+          placeholder="Ask about an active market, strategy logic, or probability..."
           value={input}
           onChange={(e) => setInput(e.target.value)}
-          className="flex-1 bg-[#161822] border border-[#252836] rounded-md px-3.5 py-2 text-xs text-[#e8eaf0] placeholder-[#4a5068] focus:outline-none focus:border-blue-500"
+          className="input flex-1 text-xs"
+          aria-label="Ask copilot message"
         />
         <button
           type="submit"
           disabled={loading || !input.trim()}
-          className="btn btn-primary px-4 py-2 text-xs font-semibold"
+          className="btn btn-primary btn-sm"
         >
           Send
         </button>

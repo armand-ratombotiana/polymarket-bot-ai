@@ -1,67 +1,75 @@
-// components/OrdersPanel.tsx — Live Working Orders Panel with Redesigned Institutional Table UX
+// components/OrdersPanel.tsx — Live Working Orders Panel
 'use client'
 
 import { Order } from '@/hooks/useBot'
 import { formatHierarchicalMarket } from '@/lib/formatters'
+import { fmtAge, fmtPrice } from '@/lib/design-tokens'
 
 interface Props {
   orders: Order[]
   onCancel: (orderId: string) => void
+  onCancelAll?: () => void
 }
 
-function age(ts: number) {
-  const s = Math.floor(Date.now() / 1000 - ts)
-  if (s < 60) return `${s}s`
-  if (s < 3600) return `${Math.floor(s / 60)}m`
-  return `${Math.floor(s / 3600)}h`
-}
-
-export default function OrdersPanel({ orders, onCancel }: Props) {
+export default function OrdersPanel({ orders, onCancel, onCancelAll }: Props) {
   return (
-    <div className="card h-full flex flex-col p-3.5 bg-[#161822] border border-[#252836]">
+    <div className="card h-full flex flex-col p-3 bg-[#13161e] border border-[#1f2335]">
       {/* Header */}
-      <div className="card-header pb-2 mb-2 border-b border-[#252836]/60 flex items-center justify-between">
+      <div className="card-header pb-2 mb-1 border-b border-[#1f2335] flex items-center justify-between">
         <div className="flex items-center gap-2">
-          <span className="card-title text-xs font-bold text-[#e8eaf0]">
+          <span className="card-title text-xs font-bold text-[#dde1ed]">
             📋 Open Orders ({orders.length})
           </span>
-          <span className="badge badge-dim text-[10px]">Queue Active</span>
+          <span className="badge badge-dim text-[9.5px]">Working Book Queue</span>
         </div>
-        <span className="text-[10px] text-[#8b91a8] mono">
-          {orders.length} active in book
-        </span>
+        <div className="flex items-center gap-2">
+          {orders.length > 0 && onCancelAll && (
+            <button
+              onClick={onCancelAll}
+              className="btn btn-danger btn-xs"
+              aria-label="Cancel all open orders"
+            >
+              Cancel All ({orders.length})
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Orders Table */}
-      <div className="overflow-auto scrollbar-thin flex-1">
+      <div className="overflow-auto scrollbar-thin flex-1 table-container">
         {orders.length === 0 ? (
-          <div className="flex items-center justify-center h-28 text-[#4a5068] text-xs">
-            No working limit orders in queue
+          <div className="empty-state">
+            <span className="empty-state-icon" aria-hidden="true">📋</span>
+            <span className="empty-state-title">No working limit orders</span>
+            <span className="empty-state-desc">
+              Active strategy quote loops will place limit orders in the CLOB matching engine.
+            </span>
           </div>
         ) : (
-          <table className="data-table text-xs">
+          <table className="data-table text-xs" role="table" aria-label="Working limit orders">
             <thead>
               <tr>
-                <th className="min-w-[180px]">Market Contract</th>
-                <th>Side</th>
-                <th className="text-right">Price</th>
-                <th className="text-right">Size</th>
-                <th>Strategy</th>
-                <th>Age</th>
-                <th className="text-right">Action</th>
+                <th scope="col" className="min-w-[180px]">Market Contract</th>
+                <th scope="col">Side</th>
+                <th scope="col" className="text-right">Price</th>
+                <th scope="col" className="text-right">Size (Filled)</th>
+                <th scope="col">Strategy</th>
+                <th scope="col">Age</th>
+                <th scope="col" className="text-right">Action</th>
               </tr>
             </thead>
             <tbody>
               {orders.map((o) => {
                 const info = formatHierarchicalMarket(o.slug)
+                const matched = o.size_matched ?? 0
                 return (
                   <tr key={o.order_id} className="hover:bg-blue-500/10 transition-colors">
                     <td className="py-2 max-w-[200px]">
                       <div className="flex flex-col gap-0.5">
-                        <span className="text-[9px] text-[#8b91a8] uppercase font-bold tracking-wider truncate">
+                        <span className="text-[9px] text-[#7e8aaa] uppercase font-bold tracking-wider truncate">
                           {info.category.icon} {info.eventTitle}
                         </span>
-                        <span className="text-[#e8eaf0] font-medium leading-tight text-xs block whitespace-normal" title={info.fullLabel}>
+                        <span className="text-[#dde1ed] font-medium leading-tight text-xs block whitespace-normal" title={info.fullLabel}>
                           {info.question}
                         </span>
                       </div>
@@ -76,21 +84,22 @@ export default function OrdersPanel({ orders, onCancel }: Props) {
                       </span>
                     </td>
                     <td className="mono text-right font-bold text-cyan-400">
-                      ${o.price.toFixed(3)}
+                      {fmtPrice(o.price)}
                     </td>
-                    <td className="mono text-right font-medium text-[#e8eaf0]">
-                      {o.size.toFixed(1)}
+                    <td className="mono text-right font-medium text-[#dde1ed]">
+                      {o.size.toFixed(1)} {matched > 0 && <span className="text-[10px] text-green-400">({matched.toFixed(1)})</span>}
                     </td>
                     <td>
-                      <span className="text-[10px] text-[#8b91a8] mono bg-[#111318] px-2 py-0.5 rounded border border-[#252836]">
+                      <span className="text-[10px] text-[#7e8aaa] mono bg-[#0e1015] px-1.5 py-0.5 rounded border border-[#1f2335]">
                         {o.strategy}
                       </span>
                     </td>
-                    <td className="mono text-[#8b91a8] text-[10px]">{age(o.created_at)}</td>
+                    <td className="mono text-[#7e8aaa] text-[10.5px]">{fmtAge(o.created_at)}</td>
                     <td className="text-right">
                       <button
                         onClick={() => onCancel(o.order_id)}
-                        className="btn btn-danger text-[10px] py-0.5 px-2 font-bold"
+                        className="btn btn-danger btn-xs"
+                        aria-label={`Cancel order ${o.order_id}`}
                       >
                         Cancel
                       </button>

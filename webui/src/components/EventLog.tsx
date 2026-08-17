@@ -54,27 +54,36 @@ export default function EventLog({ events }: Props) {
           <span className="text-[10px] text-[#8b91a8] mono">({events.length})</span>
         </div>
 
-        {/* Filter Pills */}
-        <div className="flex items-center gap-1 bg-[#161822] p-0.5 rounded border border-[#252836]">
-          {(['all', 'fill', 'order', 'risk', 'ml'] as EventFilter[]).map((f) => (
-            <button
-              key={f}
-              onClick={() => setFilter(f)}
-              className={`px-2 py-0.5 rounded text-[10px] uppercase font-semibold transition-all ${
-                filter === f ? 'bg-blue-500 text-black' : 'text-[#8b91a8] hover:text-white'
-              }`}
-            >
-              {f}
-            </button>
-          ))}
+        {/* Search & Filter Controls */}
+        <div className="flex items-center gap-1.5">
+          <input
+            type="text"
+            placeholder="Search events…"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            className="input input-sm w-28 text-[10px] py-0.5"
+            aria-label="Filter events"
+          />
+          <div className="flex items-center gap-1 bg-[#161822] p-0.5 rounded border border-[#252836]">
+            {(['all', 'fill', 'order', 'risk', 'ml'] as EventFilter[]).map((f) => (
+              <button
+                key={f}
+                onClick={() => setFilter(f)}
+                className={`px-2 py-0.5 rounded text-[10px] uppercase font-semibold transition-all ${
+                  filter === f ? 'bg-blue-500 text-black' : 'text-[#8b91a8] hover:text-white'
+                }`}
+              >
+                {f}
+              </button>
+            ))}
+          </div>
+          <button
+            onClick={handleCopy}
+            className="text-[10px] text-[#8b91a8] hover:text-white mono bg-[#161822] px-2 py-0.5 rounded border border-[#252836]"
+          >
+            {copied ? '✓' : 'Copy'}
+          </button>
         </div>
-
-        <button
-          onClick={handleCopy}
-          className="text-[10px] text-[#8b91a8] hover:text-white mono bg-[#161822] px-2 py-0.5 rounded border border-[#252836]"
-        >
-          {copied ? '✓ Copied' : 'Copy'}
-        </button>
       </div>
 
       {/* Event Stream */}

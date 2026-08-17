@@ -1,7 +1,7 @@
 // components/StrategyConfigModal.tsx — Live Strategy Configuration & Risk Tuning
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useRef } from 'react'
 import { getApiUrl, apiFetch } from '@/lib/api'
 
 interface Props {
@@ -23,27 +23,50 @@ interface ConfigState {
 
 export default function StrategyConfigModal({ isOpen, onClose }: Props) {
   const [config, setConfig] = useState<ConfigState | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
-  const [msg, setMsg] = useState<string | null>(null)
+  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null)
+  
+  const modalRef = useRef<HTMLDivElement>(null)
+
+  // Escape key handler
+  useEffect(() => {
+    if (!isOpen) return
+    const handleKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', handleKey)
+    return () => window.removeEventListener('keydown', handleKey)
+  }, [isOpen, onClose])
 
   useEffect(() => {
     if (!isOpen) return
     const fetchConfig = async () => {
+      setLoading(true)
+      setError(null)
       try {
         const apiUrl = getApiUrl()
         const res = await apiFetch(`${apiUrl}/api/config`)
         if (res.ok) {
           setConfig(await res.json())
+        } else {
+          setError(`Failed to load configuration (HTTP ${res.status})`)
         }
-      } catch {}
+      } catch {
+        setError('Network error fetching configuration')
+      } finally {
+        setLoading(false)
+      }
     }
     fetchConfig()
   }, [isOpen])
 
-  if (!isOpen || !config) return null
+  if (!isOpen) return null
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault()
+    if (!config) return
     setSaving(true)
     setMsg(null)
     try {
@@ -54,160 +77,203 @@ export default function StrategyConfigModal({ isOpen, onClose }: Props) {
         body: JSON.stringify(config),
       })
       if (res.ok) {
-        setMsg('✅ Configuration updated live!')
+        setMsg({ ok: true, text: 'Configuration updated live in memory!' })
         setTimeout(() => onClose(), 1200)
       } else {
-        setMsg('❌ Failed to update configuration')
+        const err = await res.json().catch(() => null)
+        setMsg({ ok: false, text: err?.detail || 'Failed to update configuration' })
       }
     } catch {
-      setMsg('❌ Error reaching API server')
+      setMsg({ ok: false, text: 'Error reaching bot API server' })
     }
     setSaving(false)
   }
 
   return (
-    <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50 backdrop-blur-sm p-4">
-      <div className="card w-full max-w-lg bg-[#111318] border border-[#252836] shadow-2xl rounded-lg overflow-hidden flex flex-col">
-        <div className="card-header flex justify-between items-center px-4 py-3 border-b border-[#252836]">
-          <span className="card-title text-sm font-semibold text-[#e8eaf0]">
-            ⚙️ Strategy &amp; Risk Configuration
-          </span>
-          <button onClick={onClose} className="text-[#8b91a8] hover:text-white text-lg px-2">
+    <div
+      className="modal-backdrop"
+      onClick={(e) => { if (e.target === e.currentTarget) onClose() }}
+      role="presentation"
+    >
+      <div
+        ref={modalRef}
+        className="modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="config-modal-title"
+      >
+        <div className="modal-header">
+          <div>
+            <h2 id="config-modal-title" className="text-sm font-bold text-[#dde1ed]">
+              ⚙️ Strategy &amp; Risk Configuration
+            </h2>
+            <span className="text-[10px] text-[#7e8aaa]">
+              Runtime parameters for $100 operating capital regime
+            </span>
+          </div>
+          <button onClick={onClose} className="modal-close" aria-label="Close configuration modal">
             ✕
           </button>
         </div>
 
-        <form onSubmit={handleSave} className="p-4 space-y-4 text-xs">
-          {/* Market Maker Settings */}
-          <div className="space-y-2">
-            <div className="text-[11px] font-semibold text-blue-400 uppercase tracking-wider">
-              Market Maker Strategy
-            </div>
-            <div className="grid grid-cols-3 gap-2">
-              <div>
-                <label className="text-[10px] text-[#4a5068] block mb-1">Spread (BPS)</label>
-                <input
-                  type="number"
-                  min="20"
-                  max="1000"
-                  step="10"
-                  value={config.mm_spread_bps}
-                  onChange={(e) => setConfig({ ...config, mm_spread_bps: parseInt(e.target.value) || 200 })}
-                  className="w-full bg-[#161822] border border-[#252836] rounded px-2 py-1 mono text-[#e8eaf0]"
-                />
-              </div>
-              <div>
-                <label className="text-[10px] text-[#4a5068] block mb-1">Quote Size ($)</label>
-                <input
-                  type="number"
-                  min="1"
-                  max="500"
-                  step="5"
-                  value={config.mm_quote_size_usdc}
-                  onChange={(e) => setConfig({ ...config, mm_quote_size_usdc: parseFloat(e.target.value) || 10 })}
-                  className="w-full bg-[#161822] border border-[#252836] rounded px-2 py-1 mono text-[#e8eaf0]"
-                />
-              </div>
-              <div>
-                <label className="text-[10px] text-[#4a5068] block mb-1">Max Inv ($)</label>
-                <input
-                  type="number"
-                  min="10"
-                  max="2000"
-                  step="20"
-                  value={config.mm_max_inventory_usdc}
-                  onChange={(e) => setConfig({ ...config, mm_max_inventory_usdc: parseFloat(e.target.value) || 100 })}
-                  className="w-full bg-[#161822] border border-[#252836] rounded px-2 py-1 mono text-[#e8eaf0]"
-                />
-              </div>
-            </div>
+        {loading ? (
+          <div className="modal-body flex flex-col items-center justify-center py-12 text-[#7e8aaa] text-xs">
+            <span className="spinner mb-2" aria-hidden="true" />
+            Loading current parameters…
           </div>
-
-          {/* Arbitrage Scanner Settings */}
-          <div className="space-y-2">
-            <div className="text-[11px] font-semibold text-amber-400 uppercase tracking-wider">
-              Arb Scanner Strategy
+        ) : error ? (
+          <div className="modal-body py-8 text-center">
+            <div className="banner-danger text-xs py-2 px-3 mb-3">
+              ⚠️ {error}
             </div>
-            <div className="grid grid-cols-2 gap-2">
-              <div>
-                <label className="text-[10px] text-[#4a5068] block mb-1">Min Profit (BPS)</label>
-                <input
-                  type="number"
-                  min="10"
-                  max="500"
-                  step="5"
-                  value={config.arb_min_profit_bps}
-                  onChange={(e) => setConfig({ ...config, arb_min_profit_bps: parseInt(e.target.value) || 50 })}
-                  className="w-full bg-[#161822] border border-[#252836] rounded px-2 py-1 mono text-[#e8eaf0]"
-                />
-              </div>
-              <div>
-                <label className="text-[10px] text-[#4a5068] block mb-1">Arb Leg Size ($)</label>
-                <input
-                  type="number"
-                  min="1"
-                  max="500"
-                  step="5"
-                  value={config.arb_order_size_usdc}
-                  onChange={(e) => setConfig({ ...config, arb_order_size_usdc: parseFloat(e.target.value) || 20 })}
-                  className="w-full bg-[#161822] border border-[#252836] rounded px-2 py-1 mono text-[#e8eaf0]"
-                />
-              </div>
-            </div>
+            <button onClick={onClose} className="btn btn-ghost btn-sm">Close</button>
           </div>
-
-          {/* ML & Risk Settings */}
-          <div className="space-y-2">
-            <div className="text-[11px] font-semibold text-green-400 uppercase tracking-wider">
-              ML &amp; Risk Parameters
-            </div>
-            <div className="grid grid-cols-2 gap-2">
-              <div>
-                <label className="text-[10px] text-[#4a5068] block mb-1">ML Min Confidence</label>
-                <input
-                  type="number"
-                  min="0.50"
-                  max="0.95"
-                  step="0.05"
-                  value={config.signal_min_confidence}
-                  onChange={(e) => setConfig({ ...config, signal_min_confidence: parseFloat(e.target.value) || 0.65 })}
-                  className="w-full bg-[#161822] border border-[#252836] rounded px-2 py-1 mono text-[#e8eaf0]"
-                />
+        ) : config ? (
+          <form onSubmit={handleSave} className="modal-body space-y-4 text-xs">
+            {/* Market Maker Settings */}
+            <div className="space-y-2 bg-[#0e1015] p-3 rounded border border-[#1f2335]">
+              <div className="text-[11px] font-bold text-blue-400 uppercase tracking-wider">
+                Avellaneda-Stoikov Market Maker
               </div>
-              <div>
-                <label className="text-[10px] text-[#4a5068] block mb-1">Daily Loss Cap ($)</label>
-                <input
-                  type="number"
-                  min="10"
-                  max="1000"
-                  step="10"
-                  value={config.daily_loss_limit_usdc}
-                  onChange={(e) => setConfig({ ...config, daily_loss_limit_usdc: parseFloat(e.target.value) || 50 })}
-                  className="w-full bg-[#161822] border border-[#252836] rounded px-2 py-1 mono text-[#e8eaf0]"
-                />
+              <div className="grid grid-cols-3 gap-2">
+                <div>
+                  <label className="form-label text-[10px]">Spread (BPS)</label>
+                  <input
+                    type="number"
+                    min="10"
+                    max="2000"
+                    step="10"
+                    value={config.mm_spread_bps}
+                    onChange={(e) => setConfig({ ...config, mm_spread_bps: parseInt(e.target.value) || 200 })}
+                    className="input input-sm mono"
+                  />
+                  <span className="form-hint">10–2000 bps</span>
+                </div>
+                <div>
+                  <label className="form-label text-[10px]">Quote Size ($)</label>
+                  <input
+                    type="number"
+                    min="0.5"
+                    max="5.0"
+                    step="0.5"
+                    value={config.mm_quote_size_usdc}
+                    onChange={(e) => setConfig({ ...config, mm_quote_size_usdc: parseFloat(e.target.value) || 1.5 })}
+                    className="input input-sm mono"
+                  />
+                  <span className="form-hint">$0.50–$5.00</span>
+                </div>
+                <div>
+                  <label className="form-label text-[10px]">Max Inv ($)</label>
+                  <input
+                    type="number"
+                    min="1.0"
+                    max="15.0"
+                    step="1.0"
+                    value={config.mm_max_inventory_usdc}
+                    onChange={(e) => setConfig({ ...config, mm_max_inventory_usdc: parseFloat(e.target.value) || 15 })}
+                    className="input input-sm mono"
+                  />
+                  <span className="form-hint">$1.00–$15.00</span>
+                </div>
               </div>
             </div>
-          </div>
 
-          {msg && <div className="text-center font-medium py-1">{msg}</div>}
+            {/* Arbitrage Scanner Settings */}
+            <div className="space-y-2 bg-[#0e1015] p-3 rounded border border-[#1f2335]">
+              <div className="text-[11px] font-bold text-amber-400 uppercase tracking-wider">
+                Dutch-Book Arbitrage Scanner
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="form-label text-[10px]">Min Profit (BPS)</label>
+                  <input
+                    type="number"
+                    min="5"
+                    max="1000"
+                    step="5"
+                    value={config.arb_min_profit_bps}
+                    onChange={(e) => setConfig({ ...config, arb_min_profit_bps: parseInt(e.target.value) || 50 })}
+                    className="input input-sm mono"
+                  />
+                  <span className="form-hint">5–1000 bps</span>
+                </div>
+                <div>
+                  <label className="form-label text-[10px]">Arb Leg Size ($)</label>
+                  <input
+                    type="number"
+                    min="0.5"
+                    max="5.0"
+                    step="0.5"
+                    value={config.arb_order_size_usdc}
+                    onChange={(e) => setConfig({ ...config, arb_order_size_usdc: parseFloat(e.target.value) || 1.5 })}
+                    className="input input-sm mono"
+                  />
+                  <span className="form-hint">$0.50–$5.00</span>
+                </div>
+              </div>
+            </div>
 
-          <div className="flex justify-end gap-2 pt-2 border-t border-[#252836]">
-            <button
-              type="button"
-              onClick={onClose}
-              className="btn btn-ghost px-4 py-1.5 text-xs text-[#8b91a8]"
-            >
-              Cancel
-            </button>
-            <button
-              type="submit"
-              disabled={saving}
-              className="btn btn-primary px-5 py-1.5 text-xs font-semibold"
-            >
-              {saving ? 'Applying…' : 'Apply Live'}
-            </button>
-          </div>
-        </form>
+            {/* ML & Risk Settings */}
+            <div className="space-y-2 bg-[#0e1015] p-3 rounded border border-[#1f2335]">
+              <div className="text-[11px] font-bold text-green-400 uppercase tracking-wider">
+                ML Signal &amp; Risk Engine
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="form-label text-[10px]">ML Min Confidence</label>
+                  <input
+                    type="number"
+                    min="0.50"
+                    max="0.99"
+                    step="0.01"
+                    value={config.signal_min_confidence}
+                    onChange={(e) => setConfig({ ...config, signal_min_confidence: parseFloat(e.target.value) || 0.52 })}
+                    className="input input-sm mono"
+                  />
+                  <span className="form-hint">0.50–0.99</span>
+                </div>
+                <div>
+                  <label className="form-label text-[10px]">Daily Loss Stop ($)</label>
+                  <input
+                    type="number"
+                    min="0.25"
+                    max="2.0"
+                    step="0.25"
+                    value={config.daily_loss_limit_usdc}
+                    onChange={(e) => setConfig({ ...config, daily_loss_limit_usdc: parseFloat(e.target.value) || 2.0 })}
+                    className="input input-sm mono"
+                  />
+                  <span className="form-hint">$0.25–$2.00 hard stop</span>
+                </div>
+              </div>
+            </div>
+
+            {msg && (
+              <div className={`p-2 rounded text-center text-xs ${
+                msg.ok ? 'bg-green-500/10 text-green-400' : 'bg-red-500/10 text-red-400'
+              }`} role="status">
+                {msg.ok ? '✅ ' : '⚠️ '}{msg.text}
+              </div>
+            )}
+
+            <div className="modal-footer px-0 pb-0">
+              <button
+                type="button"
+                onClick={onClose}
+                className="btn btn-ghost btn-sm"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={saving}
+                className="btn btn-primary btn-sm"
+              >
+                {saving ? 'Applying…' : 'Apply Live'}
+              </button>
+            </div>
+          </form>
+        ) : null}
       </div>
     </div>
   )

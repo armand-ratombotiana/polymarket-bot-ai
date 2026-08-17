@@ -1,241 +1,392 @@
-// app/page.tsx — Polymarket Pro Enterprise Workstation
+// app/page.tsx — Polymarket Pro Trading Workstation
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useCallback } from 'react'
 import { useBot } from '@/hooks/useBot'
 import { useAudio } from '@/hooks/useAudio'
-import Header, { ActiveTab } from '@/components/Header'
+import Sidebar, { NavSection } from '@/components/Sidebar'
+import TopStatusBar from '@/components/TopStatusBar'
+import ConfirmationDialog from '@/components/ConfirmationDialog'
+
+// Command Center
+import RiskStatusPanel from '@/components/RiskStatusPanel'
+import EquityCurve from '@/components/EquityCurve'
+import AnalyticsPanel from '@/components/AnalyticsPanel'
+import MLPanel from '@/components/MLPanel'
+import EventLog from '@/components/EventLog'
+
+// Markets
 import MarketsPanel from '@/components/MarketsPanel'
+import MarketScreener from '@/components/MarketScreener'
+
+// Portfolio
 import PositionsPanel from '@/components/PositionsPanel'
 import OrdersPanel from '@/components/OrdersPanel'
 import TradesPanel from '@/components/TradesPanel'
-import EventLog from '@/components/EventLog'
-import MLPanel from '@/components/MLPanel'
-import AnalyticsPanel from '@/components/AnalyticsPanel'
-import EquityCurve from '@/components/EquityCurve'
-import RiskStatusPanel from '@/components/RiskStatusPanel'
-import LeaderboardPanel from '@/components/LeaderboardPanel'
+
+// Strategies
 import StrategyMatrix from '@/components/StrategyMatrix'
-import AIMLCommandCenter from '@/components/AIMLCommandCenter'
-import DeepAnalysisView from '@/components/DeepAnalysisView'
 import ArbitrageMatrixView from '@/components/ArbitrageMatrixView'
-import DatabaseExplorerView from '@/components/DatabaseExplorerView'
-import BacktestLabView from '@/components/BacktestLabView'
-import SystemHealthView from '@/components/SystemHealthView'
+
+// Intelligence
+import DeepAnalysisView from '@/components/DeepAnalysisView'
+import AIMLCommandCenter from '@/components/AIMLCommandCenter'
 import AICopilotPanel from '@/components/AICopilotPanel'
-import MarketScreener from '@/components/MarketScreener'
+
+// Analytics
+import LeaderboardPanel from '@/components/LeaderboardPanel'
+import BacktestLabView from '@/components/BacktestLabView'
+
+// System
+import SystemHealthView from '@/components/SystemHealthView'
+import DatabaseExplorerView from '@/components/DatabaseExplorerView'
+
+// Modals
 import DepthChartModal from '@/components/DepthChartModal'
 import MarketChartModal from '@/components/MarketChartModal'
 import StrategyConfigModal from '@/components/StrategyConfigModal'
 import ShortcutsModal from '@/components/ShortcutsModal'
 
-const TABS: ActiveTab[] = ['terminal', 'arbitrage', 'strategies', 'aiml', 'analysis', 'database', 'backtest', 'copilot', 'screener', 'health']
+// Keyboard shortcut → nav section mapping
+const KB_MAP: Record<string, NavSection> = {
+  '1': 'command',
+  '2': 'markets-books',
+  '3': 'markets-screener',
+  '4': 'portfolio-positions',
+  '5': 'strategies-registry',
+  '6': 'strategies-arbitrage',
+  '7': 'intelligence-analysis',
+  '8': 'analytics-performance',
+}
 
 export default function Dashboard() {
   const { snapshot, status, activateKillSwitch, deactivateKillSwitch, cancelAllOrders, cancelOrder } = useBot()
   const audio = useAudio()
-  const [uptime, setUptime] = useState(0)
-  const [startTime] = useState(Date.now())
-  const [activeTab, setActiveTab] = useState<ActiveTab>('terminal')
 
-  // Modal States
+  const [uptime, setUptime] = useState(0)
+  const [startTime] = useState(() => Date.now())
+  const [activeSection, setActiveSection] = useState<NavSection>('command')
+  const [mobileNavOpen, setMobileNavOpen] = useState(false)
+
+  // Modal states
   const [selectedMarket, setSelectedMarket] = useState<{ tokenId: string; slug: string } | null>(null)
   const [chartMarket, setChartMarket] = useState<{ tokenId: string; slug: string } | null>(null)
   const [configOpen, setConfigOpen] = useState(false)
   const [shortcutsOpen, setShortcutsOpen] = useState(false)
 
+  // Confirmation dialog state
+  const [confirmKill, setConfirmKill] = useState(false)
+  const [confirmCancelAll, setConfirmCancelAll] = useState(false)
+  const [actionLoading, setActionLoading] = useState(false)
+
+  // Uptime counter
   useEffect(() => {
     const t = setInterval(() => setUptime(Math.floor((Date.now() - startTime) / 1000)), 1000)
     return () => clearInterval(t)
   }, [startTime])
 
-  // Global Keyboard Shortcuts
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return
+  const handleKillSwitch = useCallback(async () => {
+    setActionLoading(true)
+    await activateKillSwitch()
+    audio.playKillSwitch()
+    setActionLoading(false)
+    setConfirmKill(false)
+  }, [activateKillSwitch, audio])
 
-      if (e.key >= '1' && e.key <= '8') {
-        const idx = parseInt(e.key) - 1
-        if (TABS[idx]) setActiveTab(TABS[idx])
+  const handleResumeSwitch = useCallback(async () => {
+    await deactivateKillSwitch()
+  }, [deactivateKillSwitch])
+
+  // Global keyboard shortcuts
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return
+      if (e.metaKey || e.ctrlKey || e.altKey) return
+
+      if (KB_MAP[e.key]) {
+        setActiveSection(KB_MAP[e.key])
       } else if (e.key === '?') {
-        setShortcutsOpen((prev) => !prev)
+        setShortcutsOpen(p => !p)
       } else if (e.key === 'c' || e.key === 'C') {
-        setConfigOpen((prev) => !prev)
+        setConfigOpen(p => !p)
       } else if (e.key === 'k' || e.key === 'K') {
         if (snapshot.kill_switch) {
-          deactivateKillSwitch()
+          handleResumeSwitch()
         } else {
-          activateKillSwitch()
-          audio.playKillSwitch()
+          setConfirmKill(true)
         }
       } else if (e.key === 'Escape') {
         setSelectedMarket(null)
         setChartMarket(null)
         setConfigOpen(false)
         setShortcutsOpen(false)
+        setConfirmKill(false)
+        setConfirmCancelAll(false)
+        setMobileNavOpen(false)
       }
     }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [snapshot.kill_switch, handleResumeSwitch])
 
-    window.addEventListener('keydown', handleKeyDown)
-    return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [snapshot.kill_switch])
+  const handleCancelAll = useCallback(async () => {
+    setActionLoading(true)
+    await cancelAllOrders()
+    setActionLoading(false)
+    setConfirmCancelAll(false)
+  }, [cancelAllOrders])
 
   const isKilled = snapshot.kill_switch
   const isObserving = snapshot.observation_only
+  const openOrderCount = snapshot.open_orders?.length ?? 0
 
   return (
-    <div className="flex flex-col h-screen overflow-hidden relative bg-[#0b0c10]">
+    <div className="app-shell" style={{ flexDirection: 'column' }}>
+      {/* ── Kill switch / Observation banners ────────────────────────── */}
       {isKilled && (
-        <div className="bg-red-600/90 text-white text-center text-xs font-semibold py-1.5 tracking-wide animate-pulse z-50">
-          🛑 KILL SWITCH ACTIVE — All trading halted. Click Resume to re-enable.
-        </div>
-      )}
-      {isObserving && (
-        <div className="bg-amber-500/90 text-black text-center text-xs font-semibold py-1.5 tracking-wide z-50">
-          👁 OBSERVATION-ONLY MODE — New live orders disabled until exposure is reconciled
-          {snapshot.observation_reason ? ` (${snapshot.observation_reason})` : ''}
-        </div>
-      )}
-      <Header
-        activeTab={activeTab}
-        onTabChange={setActiveTab}
-        mode={snapshot.mode}
-        killSwitch={isKilled}
-        dailyPnl={snapshot.daily_pnl}
-        paperBalance={snapshot.paper_balance}
-        strategies={snapshot.strategies}
-        status={status}
-        onKillSwitch={() => {
-          activateKillSwitch()
-          audio.playKillSwitch()
-        }}
-        onDeactivate={deactivateKillSwitch}
-        onCancelAll={cancelAllOrders}
-        onOpenConfig={() => setConfigOpen(true)}
-        onOpenShortcuts={() => setShortcutsOpen(true)}
-        muted={audio.muted}
-        onToggleMute={audio.toggleMute}
-        uptime={uptime}
-      />
-
-      {/* Main View Area */}
-      <div className="flex-1 overflow-hidden p-3">
-        {activeTab === 'terminal' && (
-          <div
-            className="h-full grid gap-3"
-            style={{
-              gridTemplateColumns: '1fr 1fr 320px',
-              gridTemplateRows: '1fr 1fr',
-              gridTemplateAreas: `
-                "markets  positions  sidebar"
-                "orders   events     sidebar"
-              `,
-            }}
+        <div
+          className="kill-switch-banner"
+          role="alert"
+          aria-live="assertive"
+        >
+          <span aria-hidden="true">🛑</span>
+          KILL SWITCH ACTIVE — All trading halted.
+          <button
+            onClick={handleResumeSwitch}
+            className="btn btn-resume btn-sm"
+            style={{ marginLeft: '12px' }}
+            aria-label="Resume trading — deactivate kill switch"
           >
-            <div style={{ gridArea: 'markets' }} className="min-h-0">
-              <MarketsPanel
-                books={snapshot.order_books}
-                onSelectMarket={(tokenId, slug) => setChartMarket({ tokenId, slug })}
-              />
-            </div>
+            ▶ Resume
+          </button>
+        </div>
+      )}
+      {isObserving && !isKilled && (
+        <div
+          className="observation-banner"
+          role="status"
+          aria-live="polite"
+        >
+          <span aria-hidden="true">👁</span>
+          OBSERVATION-ONLY MODE — New live orders disabled
+          {snapshot.observation_reason ? ` (${snapshot.observation_reason})` : ' — exposure not reconciled'}
+        </div>
+      )}
 
-            <div style={{ gridArea: 'positions' }} className="min-h-0 flex flex-col gap-3">
-              <div className="flex-1 min-h-0">
+      {/* ── App shell: sidebar + main ─────────────────────────────────── */}
+      <div className="app-shell" style={{ flex: 1, minHeight: 0 }}>
+        <Sidebar
+          active={activeSection}
+          onChange={setActiveSection}
+          mobileOpen={mobileNavOpen}
+          onMobileClose={() => setMobileNavOpen(false)}
+        />
+
+        <main className="main-content" role="main">
+          {/* Top status bar */}
+          <TopStatusBar
+            snapshot={snapshot}
+            status={status}
+            uptime={uptime}
+            onKillSwitch={() => setConfirmKill(true)}
+            onResumeSwitch={handleResumeSwitch}
+            onCancelAll={() => setConfirmCancelAll(true)}
+            onOpenShortcuts={() => setShortcutsOpen(true)}
+            onToggleMute={audio.toggleMute}
+            muted={audio.muted}
+            onOpenConfig={() => setConfigOpen(true)}
+            onMobileNav={() => setMobileNavOpen(true)}
+          />
+
+          {/* ── Page content ─────────────────────────────────────────── */}
+          <div className="page-area">
+
+            {/* ── 1. Command Center ──────────────────────────────────── */}
+            {activeSection === 'command' && (
+              <div
+                style={{
+                  display: 'grid',
+                  gridTemplateColumns: '1fr 1fr 300px',
+                  gridTemplateRows: 'auto 1fr 1fr',
+                  gridTemplateAreas: `
+                    "risk   risk    risk"
+                    "market pos     sidebar"
+                    "orders events  sidebar"
+                  `,
+                  gap: '10px',
+                  height: '100%',
+                  minHeight: 0,
+                }}
+              >
+                <div style={{ gridArea: 'risk', minHeight: 0 }}>
+                  <RiskStatusPanel />
+                </div>
+                <div style={{ gridArea: 'market', minHeight: 0, overflow: 'hidden' }}>
+                  <MarketsPanel
+                    books={snapshot.order_books}
+                    onSelectMarket={(tokenId, slug) => setChartMarket({ tokenId, slug })}
+                  />
+                </div>
+                <div style={{ gridArea: 'pos', minHeight: 0, overflow: 'hidden' }}>
+                  <PositionsPanel positions={snapshot.positions} dailyPnl={snapshot.daily_pnl} />
+                </div>
+                <div style={{ gridArea: 'orders', minHeight: 0, overflow: 'hidden' }}>
+                  <OrdersPanel
+                    orders={snapshot.open_orders}
+                    onCancel={cancelOrder}
+                    onCancelAll={() => setConfirmCancelAll(true)}
+                  />
+                </div>
+                <div style={{ gridArea: 'events', minHeight: 0, overflow: 'hidden' }}>
+                  <EventLog events={snapshot.events} />
+                </div>
+                <div
+                  style={{
+                    gridArea: 'sidebar',
+                    minHeight: 0,
+                    overflow: 'auto',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: '10px',
+                  }}
+                  className="scrollbar-thin"
+                >
+                  <EquityCurve />
+                  <AnalyticsPanel />
+                  <MLPanel />
+                </div>
+              </div>
+            )}
+
+            {/* ── 2. Markets — Live Books ─────────────────────────────── */}
+            {activeSection === 'markets-books' && (
+              <div style={{ height: '100%', overflow: 'hidden' }}>
+                <MarketsPanel
+                  books={snapshot.order_books}
+                  onSelectMarket={(tokenId, slug) => setChartMarket({ tokenId, slug })}
+                />
+              </div>
+            )}
+
+            {/* ── 3. Markets — Screener ──────────────────────────────── */}
+            {activeSection === 'markets-screener' && (
+              <div style={{ height: '100%', overflow: 'hidden' }}>
+                <MarketScreener
+                  onSelectMarket={(tokenId, slug) => setChartMarket({ tokenId, slug })}
+                  onQuickTrade={(tokenId, slug) => setSelectedMarket({ tokenId, slug })}
+                />
+              </div>
+            )}
+
+            {/* ── 4. Portfolio — Positions ───────────────────────────── */}
+            {activeSection === 'portfolio-positions' && (
+              <div style={{ height: '100%', overflow: 'hidden' }}>
                 <PositionsPanel positions={snapshot.positions} dailyPnl={snapshot.daily_pnl} />
               </div>
-              <div style={{ flex: '0 0 auto', maxHeight: '42%' }} className="min-h-0">
+            )}
+
+            {/* ── Portfolio — Orders ─────────────────────────────────── */}
+            {activeSection === 'portfolio-orders' && (
+              <div style={{ height: '100%', overflow: 'hidden' }}>
+                <OrdersPanel
+                  orders={snapshot.open_orders}
+                  onCancel={cancelOrder}
+                  onCancelAll={() => setConfirmCancelAll(true)}
+                />
+              </div>
+            )}
+
+            {/* ── Portfolio — Trades ─────────────────────────────────── */}
+            {activeSection === 'portfolio-trades' && (
+              <div style={{ height: '100%', overflow: 'hidden' }}>
                 <TradesPanel trades={snapshot.recent_trades} />
               </div>
-            </div>
+            )}
 
-            <div style={{ gridArea: 'orders' }} className="min-h-0">
-              <OrdersPanel orders={snapshot.open_orders} onCancel={cancelOrder} />
-            </div>
+            {/* ── 5. Strategies — Registry ──────────────────────────── */}
+            {activeSection === 'strategies-registry' && (
+              <div style={{ height: '100%', display: 'grid', gridTemplateColumns: '1fr 300px', gap: '10px' }}>
+                <div style={{ overflow: 'hidden' }}>
+                  <StrategyMatrix />
+                </div>
+                <div style={{ overflow: 'auto' }} className="scrollbar-thin">
+                  <LeaderboardPanel />
+                </div>
+              </div>
+            )}
 
-            <div style={{ gridArea: 'events' }} className="min-h-0">
-              <EventLog events={snapshot.events} />
-            </div>
+            {/* ── 6. Strategies — Arbitrage ─────────────────────────── */}
+            {activeSection === 'strategies-arbitrage' && (
+              <div style={{ height: '100%', overflow: 'hidden' }}>
+                <ArbitrageMatrixView />
+              </div>
+            )}
 
-            {/* Right sidebar: Risk Status + Equity Curve + Analytics + ML Panel */}
-            <div style={{ gridArea: 'sidebar' }} className="min-h-0 overflow-auto scrollbar-thin flex flex-col gap-3">
-              <RiskStatusPanel />
-              <EquityCurve />
-              <AnalyticsPanel />
-              <MLPanel />
-            </div>
+            {/* ── 7. Intelligence — Deep Analysis ───────────────────── */}
+            {activeSection === 'intelligence-analysis' && (
+              <div style={{ height: '100%', overflow: 'hidden' }}>
+                <DeepAnalysisView />
+              </div>
+            )}
+
+            {/* ── Intelligence — AI/ML Engine ────────────────────────── */}
+            {activeSection === 'intelligence-aiml' && (
+              <div style={{ height: '100%', overflow: 'hidden' }}>
+                <AIMLCommandCenter />
+              </div>
+            )}
+
+            {/* ── Intelligence — Copilot ─────────────────────────────── */}
+            {activeSection === 'intelligence-copilot' && (
+              <div style={{ height: '100%', display: 'grid', gridTemplateColumns: '1fr 300px', gap: '10px' }}>
+                <div style={{ overflow: 'hidden' }}>
+                  <AICopilotPanel />
+                </div>
+                <div style={{ overflow: 'auto', display: 'flex', flexDirection: 'column', gap: '10px' }} className="scrollbar-thin">
+                  <EquityCurve />
+                  <MLPanel />
+                </div>
+              </div>
+            )}
+
+            {/* ── 8. Analytics — Performance ────────────────────────── */}
+            {activeSection === 'analytics-performance' && (
+              <div style={{ height: '100%', display: 'grid', gridTemplateColumns: '1fr 300px', gap: '10px' }}>
+                <div style={{ overflow: 'hidden', display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                  <EquityCurve />
+                  <AnalyticsPanel />
+                </div>
+                <div style={{ overflow: 'auto' }} className="scrollbar-thin">
+                  <LeaderboardPanel />
+                </div>
+              </div>
+            )}
+
+            {/* ── Analytics — Backtest Lab ───────────────────────────── */}
+            {activeSection === 'analytics-backtest' && (
+              <div style={{ height: '100%', overflow: 'hidden' }}>
+                <BacktestLabView />
+              </div>
+            )}
+
+            {/* ── System — Health ────────────────────────────────────── */}
+            {activeSection === 'system-health' && (
+              <div style={{ height: '100%', overflow: 'auto' }} className="scrollbar-thin">
+                <SystemHealthView />
+              </div>
+            )}
+
+            {/* ── System — Data Explorer ─────────────────────────────── */}
+            {activeSection === 'system-database' && (
+              <div style={{ height: '100%', overflow: 'hidden' }}>
+                <DatabaseExplorerView />
+              </div>
+            )}
           </div>
-        )}
-
-        {activeTab === 'arbitrage' && (
-          <div className="h-full">
-            <ArbitrageMatrixView />
-          </div>
-        )}
-
-        {activeTab === 'strategies' && (
-          <div className="h-full grid grid-cols-1 md:grid-cols-3 gap-3">
-            <div className="md:col-span-2 h-full min-h-0">
-              <StrategyMatrix />
-            </div>
-            <div className="h-full min-h-0 overflow-auto scrollbar-thin flex flex-col gap-3">
-              <LeaderboardPanel />
-            </div>
-          </div>
-        )}
-
-        {activeTab === 'aiml' && (
-          <div className="h-full">
-            <AIMLCommandCenter />
-          </div>
-        )}
-
-        {activeTab === 'analysis' && (
-          <div className="h-full">
-            <DeepAnalysisView />
-          </div>
-        )}
-
-        {activeTab === 'database' && (
-          <div className="h-full">
-            <DatabaseExplorerView />
-          </div>
-        )}
-
-        {activeTab === 'backtest' && (
-          <div className="h-full">
-            <BacktestLabView />
-          </div>
-        )}
-
-        {activeTab === 'copilot' && (
-          <div className="h-full grid grid-cols-1 md:grid-cols-3 gap-3">
-            <div className="md:col-span-2 h-full min-h-0">
-              <AICopilotPanel />
-            </div>
-            <div className="h-full min-h-0 flex flex-col gap-3">
-              <EquityCurve />
-              <MLPanel />
-            </div>
-          </div>
-        )}
-
-        {activeTab === 'screener' && (
-          <div className="h-full">
-            <MarketScreener
-              onSelectMarket={(tokenId, slug) => setChartMarket({ tokenId, slug })}
-              onQuickTrade={(tokenId, slug) => setSelectedMarket({ tokenId, slug })}
-            />
-          </div>
-        )}
-
-        {activeTab === 'health' && (
-          <div className="h-full">
-            <SystemHealthView />
-          </div>
-        )}
+        </main>
       </div>
 
-      {/* Candlestick & Price History Modal */}
+      {/* ── Modals ──────────────────────────────────────────────────────── */}
       {chartMarket && (
         <MarketChartModal
           tokenId={chartMarket.tokenId}
@@ -244,8 +395,6 @@ export default function Dashboard() {
           onOrderPlaced={() => audio.playOrderPlaced()}
         />
       )}
-
-      {/* Depth Chart & Quick Trade Modal */}
       {selectedMarket && (
         <DepthChartModal
           tokenId={selectedMarket.tokenId}
@@ -254,35 +403,67 @@ export default function Dashboard() {
           onOrderPlaced={() => audio.playOrderPlaced()}
         />
       )}
+      <StrategyConfigModal isOpen={configOpen} onClose={() => setConfigOpen(false)} />
+      <ShortcutsModal isOpen={shortcutsOpen} onClose={() => setShortcutsOpen(false)} />
 
-      {/* Strategy Configuration Modal */}
-      <StrategyConfigModal
-        isOpen={configOpen}
-        onClose={() => setConfigOpen(false)}
+      {/* ── Confirmation dialogs ─────────────────────────────────────────── */}
+      <ConfirmationDialog
+        open={confirmKill}
+        severity="danger"
+        title="Activate Kill Switch"
+        description="This will immediately halt all strategy execution and prevent any new orders from being placed in paper mode."
+        impact="All running strategies will stop. Existing open orders will remain until manually cancelled."
+        confirmLabel="🛑 Halt All Trading"
+        cancelLabel="Cancel"
+        onConfirm={handleKillSwitch}
+        onCancel={() => setConfirmKill(false)}
+        loading={actionLoading}
+      />
+      <ConfirmationDialog
+        open={confirmCancelAll}
+        severity="warning"
+        title="Cancel All Open Orders"
+        description={`This will cancel all ${openOrderCount} currently open order${openOrderCount !== 1 ? 's' : ''}. This action cannot be undone.`}
+        impact={openOrderCount > 0
+          ? `${openOrderCount} open order${openOrderCount !== 1 ? 's' : ''} will be cancelled immediately.`
+          : 'No open orders to cancel.'}
+        confirmLabel={`Cancel ${openOrderCount} Order${openOrderCount !== 1 ? 's' : ''}`}
+        cancelLabel="Go Back"
+        onConfirm={handleCancelAll}
+        onCancel={() => setConfirmCancelAll(false)}
+        loading={actionLoading}
       />
 
-      {/* Keyboard Shortcuts Modal */}
-      <ShortcutsModal
-        isOpen={shortcutsOpen}
-        onClose={() => setShortcutsOpen(false)}
-      />
-
-      {/* Disconnected overlay */}
+      {/* ── Disconnected overlay ─────────────────────────────────────────── */}
       {(status === 'disconnected' || status === 'error') && snapshot.order_books.length === 0 && (
-        <div className="absolute inset-0 bg-black/70 flex items-center justify-center z-40 backdrop-blur-sm">
-          <div className="card p-8 flex flex-col items-center gap-4 max-w-xs text-center">
-            <div className="w-12 h-12 rounded-full border-2 border-[#252836] flex items-center justify-center text-2xl">
-              {status === 'error' ? '⚠' : '⏳'}
-            </div>
-            <h2 className="text-[15px] font-semibold text-[#e8eaf0]">
-              {status === 'error' ? 'Connection Error' : 'Connecting'}
-            </h2>
-            <p className="text-[12px] text-[#8b91a8] leading-relaxed">
-              Connecting to Polymarket Pro Bot API on port 8080…
-            </p>
-            <div className="flex items-center gap-1.5 text-[11px] text-amber-400">
-              <span className="status-dot bg-amber-400 animate-pulse" />
-              Fetching live markets…
+        <div
+          className="modal-backdrop"
+          role="alertdialog"
+          aria-labelledby="disconnect-title"
+          aria-describedby="disconnect-desc"
+        >
+          <div className="modal" style={{ maxWidth: '360px', textAlign: 'center' }}>
+            <div className="modal-body" style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '16px', padding: '32px 24px' }}>
+              <div style={{
+                width: '48px', height: '48px', borderRadius: '50%',
+                border: '2px solid var(--border)',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                fontSize: '22px',
+              }}>
+                {status === 'error' ? '⚠' : '⏳'}
+              </div>
+              <h2 id="disconnect-title" style={{ fontSize: '15px', fontWeight: 700, color: 'var(--text-primary)' }}>
+                {status === 'error' ? 'Connection Error' : 'Connecting to API'}
+              </h2>
+              <p id="disconnect-desc" style={{ fontSize: '12.5px', color: 'var(--text-secondary)', lineHeight: 1.6 }}>
+                {status === 'error'
+                  ? 'Could not reach the bot API. Check that the backend container is running on port 8087.'
+                  : 'Establishing connection to the Polymarket bot API…'}
+              </p>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '11.5px', color: 'var(--color-amber-fg)' }}>
+                <span className="status-dot connecting" aria-hidden="true" />
+                {status === 'error' ? 'Retrying…' : 'Fetching live markets…'}
+              </div>
             </div>
           </div>
         </div>

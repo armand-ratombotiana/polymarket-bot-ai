@@ -3,6 +3,7 @@
 
 import { useEffect, useState } from 'react'
 import { getApiUrl, apiFetch } from '@/lib/api'
+import { fmtUsd, fmtPnl } from '@/lib/design-tokens'
 
 interface EquityPoint {
   timestamp: number
@@ -12,6 +13,8 @@ interface EquityPoint {
 
 export default function EquityCurve() {
   const [points, setPoints] = useState<EquityPoint[]>([])
+  const [loading, setLoading] = useState(true)
+  const [lastUpdated, setLastUpdated] = useState<number | null>(null)
 
   useEffect(() => {
     const fetchEquity = async () => {
@@ -20,11 +23,15 @@ export default function EquityCurve() {
         const res = await apiFetch(`${apiUrl}/api/history/equity`)
         if (res.ok) {
           const json = await res.json()
-          if (json.points && json.points.length > 0) {
+          if (json.points && Array.isArray(json.points)) {
             setPoints(json.points)
+            setLastUpdated(Date.now())
           }
         }
-      } catch {}
+      } catch {
+      } finally {
+        setLoading(false)
+      }
     }
     fetchEquity()
     const timer = setInterval(fetchEquity, 3000)
@@ -34,30 +41,52 @@ export default function EquityCurve() {
   const currentEquity = points.length > 0 ? points[points.length - 1].equity : null
   const currentPnl = points.length > 0 ? points[points.length - 1].pnl : 0.0
 
-  if (points.length < 2) {
+  if (loading && points.length === 0) {
     return (
-      <div className="card p-3 flex flex-col justify-between h-full min-h-[140px]">
+      <div className="card p-3 flex flex-col justify-between min-h-[160px]">
         <div className="card-header pb-1">
           <span className="card-title">📈 Equity Curve</span>
-          <span className="mono text-xs text-green-400 font-semibold">
-            {currentEquity !== null ? `$${currentEquity.toFixed(2)}` : '—'}
-          </span>
+          <span className="badge badge-dim text-[10px]">USDC · Paper</span>
         </div>
         <div className="flex-1 flex items-center justify-center text-xs text-[#4a5068]">
-          Accumulating equity points…
+          <span className="spinner mr-2" aria-hidden="true" />
+          Loading equity timeline…
         </div>
       </div>
     )
   }
 
-  // Calculate SVG path
-  const minEq = Math.min(...points.map((p) => p.equity)) * 0.999
-  const maxEq = Math.max(...points.map((p) => p.equity)) * 1.001
+  if (points.length < 2) {
+    return (
+      <div className="card p-3 flex flex-col justify-between min-h-[160px]">
+        <div className="card-header pb-1 flex justify-between items-center">
+          <span className="card-title">📈 Equity Curve</span>
+          <div className="flex items-center gap-1.5">
+            <span className="badge badge-amber text-[10px]">Paper</span>
+            <span className="mono text-xs text-green-400 font-semibold">
+              {currentEquity !== null ? fmtUsd(currentEquity) : '—'}
+            </span>
+          </div>
+        </div>
+        <div className="flex-1 flex flex-col items-center justify-center text-xs text-[#7e8aaa] text-center p-3">
+          <span className="text-base mb-1" aria-hidden="true">⏱️</span>
+          <span>Accumulating paper execution points…</span>
+          <span className="text-[10px] text-[#4a5068] mt-1">Baseline: $100.00 Operating Capital</span>
+        </div>
+      </div>
+    )
+  }
+
+  // Calculate SVG path with $100 baseline reference
+  const baseline = 100.0
+  const allValues = [...points.map((p) => p.equity), baseline]
+  const minEq = Math.min(...allValues) * 0.998
+  const maxEq = Math.max(...allValues) * 1.002
   const range = maxEq - minEq || 1
 
-  const width = 280
-  const height = 75
-  const padding = 5
+  const width = 300
+  const height = 85
+  const padding = 6
 
   const coords = points.map((p, i) => {
     const x = padding + (i / (points.length - 1)) * (width - 2 * padding)
@@ -65,52 +94,70 @@ export default function EquityCurve() {
     return { x, y }
   })
 
+  const baselineY = height - padding - ((baseline - minEq) / range) * (height - 2 * padding)
+
   const pathD = coords.reduce((acc, pt, i) => (i === 0 ? `M ${pt.x},${pt.y}` : `${acc} L ${pt.x},${pt.y}`), '')
   const areaD = `${pathD} L ${coords[coords.length - 1].x},${height} L ${coords[0].x},${height} Z`
 
   const isProfit = currentPnl >= 0
   const strokeColor = isProfit ? '#22c55e' : '#ef4444'
-  const fillColor = isProfit ? 'rgba(34, 197, 94, 0.15)' : 'rgba(239, 68, 68, 0.15)'
 
   return (
-    <div className="card p-3 flex flex-col justify-between h-full min-h-[140px]">
+    <div className="card p-3 flex flex-col justify-between min-h-[160px]">
       <div className="card-header pb-1 flex justify-between items-center">
-        <span className="card-title">📈 Portfolio Equity</span>
+        <div className="flex items-center gap-1.5">
+          <span className="card-title">📈 Portfolio Equity</span>
+          <span className="badge badge-amber text-[9.5px]">Paper</span>
+        </div>
         <div className="flex items-center gap-2">
           <span className="mono text-xs font-semibold text-[#e8eaf0]">
-            {currentEquity !== null ? `$${currentEquity.toFixed(2)}` : '—'}
+            {currentEquity !== null ? fmtUsd(currentEquity) : '—'}
           </span>
           <span className={`badge ${isProfit ? 'badge-green' : 'badge-red'} text-[10px]`}>
-            {isProfit ? '+' : ''}${currentPnl.toFixed(2)}
+            {fmtPnl(currentPnl)}
           </span>
         </div>
       </div>
 
       {/* SVG Chart */}
-      <div className="flex-1 flex items-center justify-center py-1">
-        <svg viewBox={`0 0 ${width} ${height}`} className="w-full h-full overflow-visible">
+      <div className="flex-1 flex items-center justify-center py-1 relative">
+        <svg viewBox={`0 0 ${width} ${height}`} className="w-full h-full overflow-visible" role="img" aria-label="Portfolio equity curve chart">
           <defs>
             <linearGradient id="eqGrad" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor={strokeColor} stopOpacity="0.3" />
+              <stop offset="0%" stopColor={strokeColor} stopOpacity="0.25" />
               <stop offset="100%" stopColor={strokeColor} stopOpacity="0.0" />
             </linearGradient>
           </defs>
+          
+          {/* Baseline reference line ($100) */}
+          <line
+            x1={padding}
+            y1={baselineY}
+            x2={width - padding}
+            y2={baselineY}
+            stroke="#3e4560"
+            strokeDasharray="3 3"
+            strokeWidth="1"
+          />
+          
           <path d={areaD} fill="url(#eqGrad)" />
-          <path d={pathD} fill="none" stroke={strokeColor} strokeWidth="2" strokeLinecap="round" />
+          <path d={pathD} fill="none" stroke={strokeColor} strokeWidth="1.75" strokeLinecap="round" />
           {coords.length > 0 && (
             <circle
               cx={coords[coords.length - 1].x}
               cy={coords[coords.length - 1].y}
-              r="3.5"
+              r="3"
               fill={strokeColor}
             />
           )}
         </svg>
       </div>
 
-      <div className="flex justify-between text-[10px] text-[#4a5068] pt-1 mono">
-        <span>Min: ${minEq.toFixed(1)}</span>
-        <span>Peak: ${maxEq.toFixed(1)}</span>
+      <div className="flex justify-between items-center text-[10px] text-[#7e8aaa] pt-1 mono border-t border-[#1f2335]">
+        <span>Base: $100.00</span>
+        <span>Min: {fmtUsd(minEq)}</span>
+        <span>Peak: {fmtUsd(maxEq)}</span>
+        {lastUpdated && <span>{new Date(lastUpdated).toISOString().slice(14, 19)}</span>}
       </div>
     </div>
   )

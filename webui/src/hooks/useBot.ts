@@ -53,7 +53,7 @@ export interface Trade {
 export interface BotSnapshot {
   type: string
   timestamp: number
-  mode: 'paper' | 'live'
+  mode: 'paper' | 'live' | 'shadow' | 'backtest' | string
   kill_switch: boolean
   observation_only: boolean
   observation_reason: string
@@ -146,7 +146,7 @@ export function useBot() {
           setStatus('connected')
         }
         return true
-      } catch (err) {
+      } catch {
         if (!isWsConnectedRef.current) {
           setStatus('disconnected')
         }
@@ -154,6 +154,8 @@ export function useBot() {
     }
     return false
   }, [])
+
+  const connectRef = useRef<() => void>(() => {})
 
   const connect = useCallback(() => {
     if (wsRef.current && (wsRef.current.readyState === WebSocket.OPEN || wsRef.current.readyState === WebSocket.CONNECTING)) {
@@ -188,13 +190,15 @@ export function useBot() {
         isWsConnectedRef.current = false
         if (retryRef.current) clearTimeout(retryRef.current)
         retryRef.current = setTimeout(() => {
-          connect()
+          connectRef.current()
         }, 3000)
       }
     } catch {
       isWsConnectedRef.current = false
     }
   }, [])
+
+  connectRef.current = connect
 
   useEffect(() => {
     // 1. Fetch data immediately on mount via REST

@@ -1,17 +1,22 @@
-import type { Metadata } from 'next'
+// app/layout.tsx
+import type { Metadata, Viewport } from 'next'
 import './globals.css'
 
 export const metadata: Metadata = {
-  title: 'Polymarket Bot — Dashboard',
-  description: 'Live trading dashboard for the Polymarket automated bot',
+  title: 'Polymarket Pro — Algorithmic Trading Workstation',
+  description: 'Institutional-grade prediction-market trading workstation. Paper trading mode — real Polymarket data.',
+  robots: 'noindex, nofollow',
+}
+
+export const viewport: Viewport = {
+  width: 'device-width',
+  initialScale: 1,
 }
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en" className="dark">
-      <body className="min-h-screen bg-[#0a0b0e] text-[#e8eaf0] antialiased">
-        {children}
-      </body>
+    <html lang="en">
+      <body>{children}</body>
     </html>
   )
 }

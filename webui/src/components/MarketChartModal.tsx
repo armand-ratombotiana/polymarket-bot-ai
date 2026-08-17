@@ -1,7 +1,7 @@
 // components/MarketChartModal.tsx — Interactive Candlestick & Historical Price Modal
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useRef } from 'react'
 import { getApiUrl, apiFetch } from '@/lib/api'
 import { formatMarketTitle, getCategoryBadge } from '@/lib/formatters'
 
@@ -32,26 +32,36 @@ export default function MarketChartModal({ tokenId, slug, onClose, onOrderPlaced
   const [sizeUsdc, setSizeUsdc] = useState('1.5')
   const [placing, setPlacing] = useState(false)
   const [tradeMsg, setTradeMsg] = useState<{ ok: boolean; text: string } | null>(null)
+  
+  const modalRef = useRef<HTMLDivElement>(null)
 
   const title = formatMarketTitle(slug)
   const cat = getCategoryBadge('', slug)
 
-  const fetchOhlcv = async () => {
-    try {
-      const apiUrl = getApiUrl()
-      const res = await apiFetch(`${apiUrl}/api/history/ohlcv/${tokenId}?resolution=${resolution}&count=40`)
-      if (res.ok) {
-        const json = await res.json()
-        setBars(json.bars || [])
-        if (json.bars && json.bars.length > 0) {
-          setPrice(String(json.bars[json.bars.length - 1].close.toFixed(3)))
-        }
-      }
-    } catch {}
-    setLoading(false)
-  }
+  // Escape key handler
+  useEffect(() => {
+    const handleKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', handleKey)
+    return () => window.removeEventListener('keydown', handleKey)
+  }, [onClose])
 
   useEffect(() => {
+    const fetchOhlcv = async () => {
+      try {
+        const apiUrl = getApiUrl()
+        const res = await apiFetch(`${apiUrl}/api/history/ohlcv/${tokenId}?resolution=${resolution}&count=40`)
+        if (res.ok) {
+          const json = await res.json()
+          setBars(json.bars || [])
+          if (json.bars && json.bars.length > 0) {
+            setPrice(String(json.bars[json.bars.length - 1].close.toFixed(3)))
+          }
+        }
+      } catch {}
+      setLoading(false)
+    }
     fetchOhlcv()
   }, [tokenId, resolution])
 
@@ -72,13 +82,13 @@ export default function MarketChartModal({ tokenId, slug, onClose, onOrderPlaced
       })
       const body = await res.json().catch(() => null)
       if (res.ok) {
-        setTradeMsg({ ok: true, text: body?.detail || 'Order placed' })
+        setTradeMsg({ ok: true, text: body?.detail || `Order placed: ${side} $${sizeUsdc} @ ${price}` })
         if (onOrderPlaced) onOrderPlaced()
       } else {
-        setTradeMsg({ ok: false, text: body?.detail || `Order failed (HTTP ${res.status})` })
+        setTradeMsg({ ok: false, text: body?.detail || `Risk gate rejected: HTTP ${res.status}` })
       }
     } catch {
-      setTradeMsg({ ok: false, text: 'Order request failed — check connection' })
+      setTradeMsg({ ok: false, text: 'Order submission failed — check backend connectivity' })
     }
     setPlacing(false)
   }
@@ -88,31 +98,43 @@ export default function MarketChartModal({ tokenId, slug, onClose, onOrderPlaced
   const rangeP = maxP - minP || 0.01
 
   return (
-    <div className="fixed inset-0 bg-black/75 flex items-center justify-center z-50 p-4 backdrop-blur-sm select-none">
-      <div className="bg-[#111318] border border-[#252836] rounded-xl w-full max-w-3xl overflow-hidden shadow-2xl flex flex-col max-h-[90vh]">
+    <div
+      className="modal-backdrop"
+      onClick={(e) => { if (e.target === e.currentTarget) onClose() }}
+      role="presentation"
+    >
+      <div
+        ref={modalRef}
+        className="modal modal-wide"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="chart-modal-title"
+      >
         {/* Header */}
-        <div className="px-5 py-3 border-b border-[#252836] flex justify-between items-center bg-[#161822]">
+        <div className="modal-header">
           <div className="flex items-center gap-3">
-            <span className="text-xl">{cat.icon}</span>
+            <span className="text-xl" aria-hidden="true">{cat.icon}</span>
             <div>
-              <h3 className="text-sm font-bold text-[#e8eaf0] truncate max-w-md">{title}</h3>
+              <h3 id="chart-modal-title" className="text-sm font-bold text-[#dde1ed] truncate max-w-md">{title}</h3>
               <div className="flex items-center gap-2 mt-0.5">
                 <span className={`text-[9px] px-1.5 py-0.2 rounded border ${cat.color}`}>{cat.label}</span>
-                <span className="text-[10px] text-[#4a5068] mono">{tokenId.slice(0, 18)}…</span>
+                <span className="text-[10px] text-[#7e8aaa] mono">{tokenId.slice(0, 18)}…</span>
+                <span className="badge badge-amber text-[9px]">Paper Mode</span>
               </div>
             </div>
           </div>
 
           <div className="flex items-center gap-2">
             {/* Timeframe selector */}
-            <div className="flex bg-[#111318] p-0.5 rounded border border-[#252836]">
+            <div className="flex bg-[#0e1015] p-0.5 rounded border border-[#1f2335]">
               {(['1m', '5m', '1h'] as Array<'1m' | '5m' | '1h'>).map((r) => (
                 <button
                   key={r}
                   onClick={() => setResolution(r)}
                   className={`px-2.5 py-0.5 rounded text-[11px] font-bold uppercase transition-all ${
-                    resolution === r ? 'bg-blue-500 text-black' : 'text-[#8b91a8] hover:text-white'
+                    resolution === r ? 'bg-blue-500 text-black' : 'text-[#7e8aaa] hover:text-white'
                   }`}
+                  aria-label={`Timeframe ${r}`}
                 >
                   {r}
                 </button>
@@ -122,30 +144,41 @@ export default function MarketChartModal({ tokenId, slug, onClose, onOrderPlaced
             <button
               onClick={() => setShowEma(!showEma)}
               className={`px-2 py-0.5 rounded text-[10px] mono border transition-all ${
-                showEma ? 'bg-cyan-500/20 text-cyan-400 border-cyan-500/40' : 'bg-[#111318] text-[#8b91a8] border-[#252836]'
+                showEma ? 'bg-cyan-500/20 text-cyan-400 border-cyan-500/40' : 'bg-[#0e1015] text-[#7e8aaa] border-[#1f2335]'
               }`}
+              aria-label="Toggle EMA 21 indicator"
             >
-              EMA(8/21)
+              EMA(21)
             </button>
 
             <button
               onClick={onClose}
-              className="text-[#8b91a8] hover:text-white text-base px-2 py-0.5 rounded hover:bg-[#252836]"
+              className="modal-close"
+              aria-label="Close market chart modal"
             >
               ✕
             </button>
           </div>
         </div>
 
+        {/* Synthetic Notice Banner */}
+        <div className="banner-experimental text-[11px] mx-4 mt-3 py-1.5 px-3" role="note">
+          <span aria-hidden="true">ℹ️</span>
+          <span>
+            <strong>SYNTHETIC DATA:</strong> Historical candlestick series is simulated by <code>/api/history/ohlcv</code>. Real Polymarket tick history is not yet persisted.
+          </span>
+        </div>
+
         {/* Chart Canvas */}
-        <div className="p-5 flex-1 min-h-[260px] flex flex-col justify-center">
+        <div className="p-4 flex-1 min-h-[240px] flex flex-col justify-center">
           {loading || bars.length === 0 ? (
-            <div className="flex items-center justify-center h-48 text-xs text-[#8b91a8]">
-              Rendering historical price timeline…
+            <div className="flex flex-col items-center justify-center h-48 text-xs text-[#7e8aaa]">
+              <span className="spinner mb-2" aria-hidden="true" />
+              Rendering price timeline…
             </div>
           ) : (
-            <div className="w-full h-56 relative bg-[#0e1015] p-3 rounded-lg border border-[#252836]">
-              <svg viewBox="0 0 440 180" className="w-full h-full">
+            <div className="w-full h-52 relative bg-[#0e1015] p-3 rounded-lg border border-[#1f2335]">
+              <svg viewBox="0 0 440 180" className="w-full h-full" role="img" aria-label={`Price candlestick chart for ${title}`}>
                 {/* Horizontal grid lines */}
                 {[0.25, 0.5, 0.75].map((pct, i) => (
                   <line
@@ -217,10 +250,10 @@ export default function MarketChartModal({ tokenId, slug, onClose, onOrderPlaced
         </div>
 
         {/* Quick Trade Footer Pad */}
-        <div className="p-4 bg-[#161822] border-t border-[#252836] flex flex-wrap items-center justify-between gap-3">
+        <div className="modal-footer bg-[#111420] flex-wrap justify-between gap-3">
           <div className="flex items-center gap-3">
             <div>
-              <label className="text-[10px] text-[#8b91a8] block mb-0.5">Price ($)</label>
+              <label className="form-label mb-0.5 text-[10px]">Price ($)</label>
               <input
                 type="number"
                 step="0.001"
@@ -228,11 +261,12 @@ export default function MarketChartModal({ tokenId, slug, onClose, onOrderPlaced
                 max="0.99"
                 value={price}
                 onChange={(e) => setPrice(e.target.value)}
-                className="w-24 bg-[#111318] border border-[#252836] rounded px-2.5 py-1 text-xs mono text-[#e8eaf0] focus:outline-none focus:border-blue-500"
+                className="input input-sm w-24 mono"
+                aria-label="Order limit price"
               />
             </div>
             <div>
-              <label className="text-[10px] text-[#8b91a8] block mb-0.5">Amount ($ USDC - Max $3/market)</label>
+              <label className="form-label mb-0.5 text-[10px]">Size ($ USDC · Max $3/market)</label>
               <input
                 type="number"
                 step="0.5"
@@ -240,16 +274,17 @@ export default function MarketChartModal({ tokenId, slug, onClose, onOrderPlaced
                 max="3"
                 value={sizeUsdc}
                 onChange={(e) => setSizeUsdc(e.target.value)}
-                className="w-24 bg-[#111318] border border-[#252836] rounded px-2.5 py-1 text-xs mono text-[#e8eaf0] focus:outline-none focus:border-blue-500"
+                className="input input-sm w-24 mono"
+                aria-label="Order size in USDC"
               />
             </div>
           </div>
 
           {tradeMsg && (
-            <div className={`text-[11px] px-3 py-1.5 rounded w-full sm:w-auto ${
+            <div className={`text-[11px] px-3 py-1 rounded w-full sm:w-auto ${
               tradeMsg.ok ? 'bg-green-500/10 text-green-400' : 'bg-red-500/10 text-red-400'
-            }`}>
-              {tradeMsg.ok ? '✅ ' : '⚠ '}{tradeMsg.text}
+            }`} role="status">
+              {tradeMsg.ok ? '✅ ' : '⚠️ '}{tradeMsg.text}
             </div>
           )}
 
@@ -257,16 +292,18 @@ export default function MarketChartModal({ tokenId, slug, onClose, onOrderPlaced
             <button
               onClick={() => handlePlaceOrder('BUY')}
               disabled={placing}
-              className="btn btn-success px-5 py-2 text-xs font-bold"
+              className="btn btn-success btn-sm"
+              aria-label={`Buy YES outcome for ${sizeUsdc} USDC`}
             >
               {placing ? 'Placing…' : 'Buy YES'}
             </button>
             <button
               onClick={() => handlePlaceOrder('SELL')}
               disabled={placing}
-              className="btn btn-danger px-5 py-2 text-xs font-bold"
+              className="btn btn-danger btn-sm"
+              aria-label={`Sell YES outcome for ${sizeUsdc} USDC`}
             >
-              {placing ? 'Placing…' : 'Sell YES / Buy NO'}
+              {placing ? 'Placing…' : 'Sell YES'}
             </button>
           </div>
         </div>

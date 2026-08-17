@@ -1,4 +1,4 @@
-// components/SystemHealthView.tsx — Pipeline Health & 24/7 Supervisor Monitor
+// components/SystemHealthView.tsx — Pipeline Health & Subsystem Telemetry
 'use client'
 
 import { useEffect, useState } from 'react'
@@ -40,6 +40,7 @@ interface HealthData {
 
 export default function SystemHealthView() {
   const [health, setHealth] = useState<HealthData | null>(null)
+  const [loading, setLoading] = useState(true)
 
   const fetchHealth = async () => {
     try {
@@ -49,6 +50,7 @@ export default function SystemHealthView() {
         setHealth(await res.json())
       }
     } catch {}
+    setLoading(false)
   }
 
   useEffect(() => {
@@ -57,128 +59,111 @@ export default function SystemHealthView() {
     return () => clearInterval(timer)
   }, [])
 
-  if (!health) {
+  if (loading && !health) {
     return (
-      <div className="flex items-center justify-center h-full text-xs text-[#8b91a8]">
+      <div className="flex flex-col items-center justify-center h-full text-xs text-[#7e8aaa]">
+        <span className="spinner mb-2" aria-hidden="true" />
         Gathering pipeline health &amp; supervisor telemetry…
       </div>
     )
   }
 
+  if (!health) {
+    return (
+      <div className="flex flex-col items-center justify-center h-full text-xs text-[#7e8aaa]">
+        System health telemetry endpoint unavailable.
+      </div>
+    )
+  }
+
   return (
-    <div className="flex flex-col h-full bg-[#111318] border border-[#252836] rounded-lg overflow-hidden p-4 space-y-4 overflow-y-auto scrollbar-thin">
+    <div className="flex flex-col h-full bg-[#13161e] border border-[#1f2335] rounded-lg overflow-hidden p-4 space-y-3 overflow-y-auto scrollbar-thin">
       {/* Top Header */}
-      <div className="flex flex-wrap justify-between items-center pb-3 border-b border-[#252836] gap-2">
+      <div className="flex flex-wrap justify-between items-center pb-2 border-b border-[#1f2335] gap-2">
         <div>
           <div className="flex items-center gap-2">
-            <span className="text-xl">🩺</span>
-            <span className="text-base font-bold text-[#e8eaf0]">
-              24/7 Platform Pipeline Health &amp; Specialized Market Database
+            <span className="text-lg" aria-hidden="true">🩺</span>
+            <span className="text-sm font-bold text-[#dde1ed]">
+              Platform Subsystem Health &amp; Process Telemetry
             </span>
           </div>
-          <p className="text-xs text-[#8b91a8]">
-            Adaptive Poller Latency, Supervisor Watchdog Status, TimescaleDB Time-Series DB &amp; $100 Operating / $200 Ceiling Risk Sizing
+          <p className="text-xs text-[#7e8aaa]">
+            Order Book Poller, Supervisor Watchdog, TimescaleDB Storage &amp; Risk Sizing ($100 Operating / $200 Ceiling)
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <span className="badge badge-amber text-xs font-semibold">$100 Operating Capital</span>
-          <span className="badge badge-green text-xs font-semibold">All Systems 24/7 Nominal</span>
+          <span className="badge badge-amber text-[9.5px]">$100 Operating Capital</span>
+          <span className="badge badge-green text-[9.5px]">Process Supervisor Active</span>
         </div>
       </div>
 
       {/* KPI Cards */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-        <div className="bg-[#161822] p-3 rounded-lg border border-[#252836]">
-          <span className="text-[11px] text-[#4a5068] block font-medium">Poller Success Rate</span>
-          <span className="mono text-lg font-bold text-green-400">
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-2.5">
+        <div className="bg-[#0e1015] p-3 rounded-lg border border-[#1f2335]">
+          <span className="text-[10px] text-[#7e8aaa] block font-medium uppercase">Poller Success Rate</span>
+          <span className="mono text-base font-bold text-green-400">
             {health.poller.success_rate}%
           </span>
-          <span className="text-[10px] text-[#8b91a8] block mt-0.5">
-            {health.poller.total_tracked} contracts ({health.poller.latency_ms} ms avg)
+          <span className="text-[9.5px] text-[#7e8aaa] block mt-0.5">
+            {health.poller.total_tracked} books ({health.poller.latency_ms}ms avg)
           </span>
         </div>
 
-        <div className="bg-[#161822] p-3 rounded-lg border border-[#252836]">
-          <span className="text-[11px] text-[#4a5068] block font-medium">Specialized Market DB Size</span>
-          <span className="mono text-lg font-bold text-cyan-400">
-            {health.market_db ? `${health.market_db.size_mb} MB` : 'WAL Active'}
+        <div className="bg-[#0e1015] p-3 rounded-lg border border-[#1f2335]">
+          <span className="text-[10px] text-[#7e8aaa] block font-medium uppercase">Market DB Size</span>
+          <span className="mono text-base font-bold text-cyan-400">
+            {health.market_db ? `${health.market_db.size_mb} MB` : 'Buffered'}
           </span>
-          <span className="text-[10px] text-[#8b91a8] block mt-0.5">
-            {health.market_db ? `${health.market_db.snapshots_recorded} snaps, ${health.market_db.ticks_recorded} ticks` : 'Continuous Ingest'}
+          <span className="text-[9.5px] text-[#7e8aaa] block mt-0.5">
+            {health.market_db ? `${health.market_db.snapshots_recorded} snaps, ${health.market_db.ticks_recorded} ticks` : 'In-memory state'}
           </span>
         </div>
 
-        <div className="bg-[#161822] p-3 rounded-lg border border-[#252836]">
-          <span className="text-[11px] text-[#4a5068] block font-medium">Model Concept Drift (PSI)</span>
-          <span className="mono text-lg font-bold text-blue-400">
+        <div className="bg-[#0e1015] p-3 rounded-lg border border-[#1f2335]">
+          <span className="text-[10px] text-[#7e8aaa] block font-medium uppercase">Model Drift PSI</span>
+          <span className="mono text-base font-bold text-blue-400">
             {health.ml_engine.psi_drift.toFixed(4)}
           </span>
-          <span className="text-[10px] text-green-400 block mt-0.5">
+          <span className="text-[9.5px] text-green-400 block mt-0.5">
             Status: {health.ml_engine.drift_status}
           </span>
         </div>
 
-        <div className="bg-[#161822] p-3 rounded-lg border border-[#252836]">
-          <span className="text-[11px] text-[#4a5068] block font-medium">DB-Backed Feature Vectors</span>
-          <span className="mono text-lg font-bold text-amber-400">
-            {health.market_db ? health.market_db.ml_feature_vectors : 0} vectors
+        <div className="bg-[#0e1015] p-3 rounded-lg border border-[#1f2335]">
+          <span className="text-[10px] text-[#7e8aaa] block font-medium uppercase">Feature Store Vectors</span>
+          <span className="mono text-base font-bold text-amber-400">
+            {health.market_db ? health.market_db.ml_feature_vectors : 0}
           </span>
-          <span className="text-[10px] text-[#8b91a8] block mt-0.5">Ground-Truth Training Ready</span>
+          <span className="text-[9.5px] text-[#7e8aaa] block mt-0.5">32-feature shape</span>
         </div>
       </div>
 
-      {/* Specialized Database Telemetry Card */}
-      {health.market_db && (
-        <div className="card p-3.5 bg-[#161822] border border-[#252836]">
-          <div className="card-header pb-2 mb-2 border-b border-[#252836]/60 flex justify-between items-center">
-            <span className="card-title text-xs font-bold text-[#e8eaf0]">
-              🗄️ Specialized Market Intelligence &amp; Feature Database (`market_intelligence.db`)
-            </span>
-            <span className="badge badge-blue text-[10px]">WAL High-Concurrency Mode</span>
-          </div>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
-            <div className="bg-[#111318] p-2.5 rounded border border-[#252836]">
-              <span className="text-[#8b91a8] block text-[11px]">Recorded Snapshots:</span>
-              <span className="mono text-cyan-400 font-bold text-sm">{health.market_db.snapshots_recorded.toLocaleString()}</span>
-            </div>
-            <div className="bg-[#111318] p-2.5 rounded border border-[#252836]">
-              <span className="text-[#8b91a8] block text-[11px]">Micro-Depth Ticks (OFI):</span>
-              <span className="mono text-green-400 font-bold text-sm">{health.market_db.ticks_recorded.toLocaleString()}</span>
-            </div>
-            <div className="bg-[#111318] p-2.5 rounded border border-[#252836]">
-              <span className="text-[#8b91a8] block text-[11px]">Fundamental News Items:</span>
-              <span className="mono text-amber-400 font-bold text-sm">{health.market_db.news_items_recorded.toLocaleString()}</span>
-            </div>
-            <div className="bg-[#111318] p-2.5 rounded border border-[#252836]">
-              <span className="text-[#8b91a8] block text-[11px]">32-Feature ML Vectors:</span>
-              <span className="mono text-purple-400 font-bold text-sm">{health.market_db.ml_feature_vectors.toLocaleString()}</span>
-            </div>
-          </div>
-        </div>
-      )}
-
       {/* Supervised Microservices Grid */}
-      <div className="card p-3.5 bg-[#161822] border border-[#252836]">
-        <div className="card-header pb-2 mb-2 border-b border-[#252836]/60 flex justify-between items-center">
-          <span className="card-title text-xs font-bold text-[#e8eaf0]">
-            ⚙️ Supervised 24/7 Microservices &amp; Subsystems
+      <div className="card p-3 bg-[#0e1015] border border-[#1f2335]">
+        <div className="card-header pb-1.5 mb-1.5 border-b border-[#1f2335] flex justify-between items-center">
+          <span className="card-title text-xs font-bold text-[#dde1ed]">
+            ⚙️ Supervised Processes &amp; Loops
           </span>
-          <span className="badge badge-dim text-[10px]">Supervisord Watchdog Active</span>
+          <span className="badge badge-dim text-[9.5px]">FastAPI Async Tasks</span>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2.5">
           {health.services.map((s, i) => (
-            <div key={i} className="flex justify-between items-center bg-[#111318] p-2.5 rounded border border-[#252836] text-xs">
+            <div key={i} className="flex justify-between items-center bg-[#13161e] p-2.5 rounded border border-[#1f2335] text-xs">
               <div>
-                <span className="font-semibold text-[#e8eaf0] block">{s.name}</span>
+                <span className="font-semibold text-[#dde1ed] block">{s.name}</span>
                 {s.frequency && (
-                  <span className="text-[10px] text-[#4a5068] mono">{s.frequency}</span>
+                  <span className="text-[10px] text-[#7e8aaa] mono">{s.frequency}</span>
                 )}
                 {s.port && (
                   <span className="text-[10px] text-cyan-400 mono">Port: {s.port}</span>
                 )}
               </div>
-              <span className="badge badge-green text-[10px] font-bold">
+              <span className={`badge text-[9.5px] font-bold ${
+                s.status === 'HEALTHY' || s.status === 'UP' || s.status === 'RUNNING'
+                  ? 'badge-green'
+                  : 'badge-amber'
+              }`}>
                 ● {s.status}
               </span>
             </div>
