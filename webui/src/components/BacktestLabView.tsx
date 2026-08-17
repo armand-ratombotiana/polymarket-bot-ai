@@ -2,7 +2,7 @@
 'use client'
 
 import { useState } from 'react'
-import { getApiUrl } from '@/lib/api'
+import { getApiUrl, apiFetch } from '@/lib/api'
 
 interface BacktestData {
   strategy_id: string
@@ -43,7 +43,7 @@ export default function BacktestLabView() {
     setRunning(true)
     try {
       const apiUrl = getApiUrl()
-      const res = await fetch(`${apiUrl}/api/backtest/run`, {
+      const res = await apiFetch(`${apiUrl}/api/backtest/run`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

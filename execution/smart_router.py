@@ -9,14 +9,11 @@ Features:
 """
 from __future__ import annotations
 
-import asyncio
 import logging
 import random
-import time
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
 
-from core.data_store import Order, OrderBook, OrderStatus, Side, store
+from core.data_store import OrderBook, Side
 
 log = logging.getLogger(__name__)
 
@@ -36,9 +33,9 @@ class SmartOrderRouter:
     """
 
     def __init__(self) -> None:
-        self._active_slices: List[ExecutionSlice] = []
+        self._active_slices: list[ExecutionSlice] = []
 
-    def calculate_slippage(self, book: OrderBook, side: Side, size_usdc: float) -> Tuple[float, float]:
+    def calculate_slippage(self, book: OrderBook, side: Side, size_usdc: float) -> tuple[float, float]:
         """
         Estimate effective fill price and slippage in basis points based on book depth.
         """
@@ -78,7 +75,7 @@ class SmartOrderRouter:
         price: float,
         duration_seconds: int = 180,
         num_slices: int = 5,
-    ) -> List[ExecutionSlice]:
+    ) -> list[ExecutionSlice]:
         """
         Divide large order into randomized time-weighted child slices.
         """

@@ -2,7 +2,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { getApiUrl } from '@/lib/api'
+import { getApiUrl, apiFetch } from '@/lib/api'
 
 interface MLStatus {
   model_type: string
@@ -20,7 +20,7 @@ export default function MLPanel() {
     const apiUrl = getApiUrl()
     const fetchML = async () => {
       try {
-        const r = await fetch(`${apiUrl}/api/ml`)
+        const r = await apiFetch(`${apiUrl}/api/ml`)
         if (r.ok) {
           setMl(await r.json())
           setError(false)

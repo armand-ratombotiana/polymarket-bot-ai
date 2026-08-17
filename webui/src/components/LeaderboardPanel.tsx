@@ -3,7 +3,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { getApiUrl } from '@/lib/api'
+import { getApiUrl, apiFetch } from '@/lib/api'
 
 interface StrategyRow {
   strategy: string
@@ -24,7 +24,7 @@ export default function LeaderboardPanel() {
     const fetchLeaderboard = async () => {
       try {
         const apiUrl = getApiUrl()
-        const res = await fetch(`${apiUrl}/api/leaderboard`)
+        const res = await apiFetch(`${apiUrl}/api/leaderboard`)
         if (res.ok) {
           const data = await res.json()
           setRows(data.ranked ?? [])

@@ -15,10 +15,8 @@ import os
 import pickle
 import time
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
 
 import numpy as np
-from sklearn.calibration import CalibratedClassifierCV
 from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
 from sklearn.linear_model import SGDClassifier
 from sklearn.metrics import brier_score_loss, log_loss, roc_auc_score
@@ -34,7 +32,7 @@ MODEL_PATH = Path(os.environ.get("MODEL_PATH", "/app/data/model.pkl"))
 SEED = 42
 
 
-def _synthetic_training_data(n: int = 3000) -> Tuple[np.ndarray, np.ndarray]:
+def _synthetic_training_data(n: int = 3000) -> tuple[np.ndarray, np.ndarray]:
     """Generate calibrated synthetic training dataset for prediction market dynamics (32 features)."""
     rng = np.random.RandomState(SEED)
     X = rng.uniform(-1, 1, (n, N_FEATURES)).astype(np.float32)
@@ -94,8 +92,8 @@ class MarketMLModel:
 
     def __init__(self) -> None:
         self.scaler = StandardScaler()
-        self.rf: Optional[RandomForestClassifier] = None
-        self.gb: Optional[GradientBoostingClassifier] = None
+        self.rf: RandomForestClassifier | None = None
+        self.gb: GradientBoostingClassifier | None = None
         self.sgd = SGDClassifier(
             loss="log_loss",
             learning_rate="optimal",
@@ -115,7 +113,7 @@ class MarketMLModel:
         self.log_loss_score: float = 0.412
         self.ece: float = 0.032
         self.sharpe_ratio: float = 0.0
-        self.reliability_curve: List[Dict[str, float]] = []
+        self.reliability_curve: list[dict[str, float]] = []
 
         # Training-data provenance (the ensemble is blended with synthetic data
         # until enough real resolved-market samples accumulate).
@@ -236,7 +234,7 @@ class MarketMLModel:
         _, conf = self.predict(features)
         return conf
 
-    def predict(self, features: np.ndarray) -> Tuple[float, float]:
+    def predict(self, features: np.ndarray) -> tuple[float, float]:
         if self.rf is None or self.gb is None:
             return float(features[0]), 0.5
 

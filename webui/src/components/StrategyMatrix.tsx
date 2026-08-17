@@ -2,7 +2,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { getApiUrl } from '@/lib/api'
+import { getApiUrl, apiFetch } from '@/lib/api'
 
 interface StrategyMeta {
   strategy_id: string
@@ -32,7 +32,7 @@ export default function StrategyMatrix() {
   const fetchCatalog = async () => {
     try {
       const apiUrl = getApiUrl()
-      const res = await fetch(`${apiUrl}/api/strategies/catalog`)
+      const res = await apiFetch(`${apiUrl}/api/strategies/catalog`)
       if (res.ok) {
         const json = await res.json()
         setCatalog(json.catalog || [])
@@ -50,7 +50,7 @@ export default function StrategyMatrix() {
     setToggling(strategyId)
     try {
       const apiUrl = getApiUrl()
-      await fetch(`${apiUrl}/api/strategies/toggle`, {
+      await apiFetch(`${apiUrl}/api/strategies/toggle`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ strategy_name: strategyId, enabled: !currentStatus }),

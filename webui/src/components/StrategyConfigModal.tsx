@@ -2,7 +2,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { getApiUrl } from '@/lib/api'
+import { getApiUrl, apiFetch } from '@/lib/api'
 
 interface Props {
   isOpen: boolean
@@ -31,7 +31,7 @@ export default function StrategyConfigModal({ isOpen, onClose }: Props) {
     const fetchConfig = async () => {
       try {
         const apiUrl = getApiUrl()
-        const res = await fetch(`${apiUrl}/api/config`)
+        const res = await apiFetch(`${apiUrl}/api/config`)
         if (res.ok) {
           setConfig(await res.json())
         }
@@ -48,7 +48,7 @@ export default function StrategyConfigModal({ isOpen, onClose }: Props) {
     setMsg(null)
     try {
       const apiUrl = getApiUrl()
-      const res = await fetch(`${apiUrl}/api/config`, {
+      const res = await apiFetch(`${apiUrl}/api/config`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(config),

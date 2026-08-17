@@ -13,7 +13,7 @@ import asyncio
 import json
 import logging
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import httpx
 
@@ -33,11 +33,11 @@ class UniversalMarketDiscoveryEngine:
     """
 
     def __init__(self) -> None:
-        self.catalog: Dict[str, dict] = {}           # token_id -> market metadata
-        self.events_catalog: Dict[str, dict] = {}    # event_id -> event metadata
-        self.excluded_markets: List[dict] = []       # audit log of skipped/invalid items
+        self.catalog: dict[str, dict] = {}           # token_id -> market metadata
+        self.events_catalog: dict[str, dict] = {}    # event_id -> event metadata
+        self.excluded_markets: list[dict] = []       # audit log of skipped/invalid items
         self._running = False
-        self._task: Optional[asyncio.Task] = None
+        self._task: asyncio.Task | None = None
         self._last_sync_time: float = 0.0
         self._authoritative_count: int = 0
 
@@ -68,7 +68,7 @@ class UniversalMarketDiscoveryEngine:
     async def sync_full_catalog(self) -> int:
         """Paginate across all Polymarket Gamma market endpoints to ingest 100% of available markets."""
         start_t = time.time()
-        discovered_batch: List[dict] = []
+        discovered_batch: list[dict] = []
         authoritative_total = 0
 
         async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
@@ -98,7 +98,7 @@ class UniversalMarketDiscoveryEngine:
         if not discovered_batch:
             return 0
 
-        valid_tokens: List[str] = []
+        valid_tokens: list[str] = []
         for m in discovered_batch:
             tid = m.get("clobTokenId") or m.get("token_id")
             if not tid:
@@ -170,7 +170,7 @@ class UniversalMarketDiscoveryEngine:
             return 100.0
         return round((len(self.catalog) / self._authoritative_count) * 100.0, 2)
 
-    def get_coverage_report(self) -> Dict[str, Any]:
+    def get_coverage_report(self) -> dict[str, Any]:
         """Generate comprehensive market coverage and exclusion audit report."""
         active_books = len(store.order_books)
         return {
@@ -186,7 +186,7 @@ class UniversalMarketDiscoveryEngine:
             "recent_exclusions_sample": self.excluded_markets[-10:],
         }
 
-    def get_full_catalog(self, limit: int = 200, category: Optional[str] = None) -> List[dict]:
+    def get_full_catalog(self, limit: int = 200, category: str | None = None) -> list[dict]:
         """Return full market catalog with optional category filtering."""
         markets = list(self.catalog.values())
         if category and category.lower() != "all":

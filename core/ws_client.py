@@ -9,10 +9,9 @@ import asyncio
 import json
 import logging
 import time
-from typing import Callable, Dict, List, Optional, Set
+from collections.abc import Callable
 
 import websockets
-from websockets.exceptions import ConnectionClosed
 
 from config import settings
 from core.data_store import OrderBook, PriceLevel, store
@@ -39,17 +38,17 @@ class WebSocketClient:
 
     def __init__(self) -> None:
         self._uri = settings.poly_ws_host
-        self._subscribed_tokens: Set[str] = set()
-        self._handlers: List[Callable] = []
+        self._subscribed_tokens: set[str] = set()
+        self._handlers: list[Callable] = []
         self._running = False
         self._ws = None
-        self._task: Optional[asyncio.Task] = None
+        self._task: asyncio.Task | None = None
 
     def register_handler(self, handler: Callable) -> None:
         """Register an async callable(event_type, data) handler."""
         self._handlers.append(handler)
 
-    def subscribe(self, token_ids: List[str]) -> None:
+    def subscribe(self, token_ids: list[str]) -> None:
         """Add token IDs to the subscription set (live or pending reconnect)."""
         self._subscribed_tokens.update(token_ids)
 
@@ -108,7 +107,7 @@ class WebSocketClient:
                 except Exception as e:
                     log.debug("Message parse error: %s", e)
 
-    async def _send_subscription(self, ws, token_ids: List[str]) -> None:
+    async def _send_subscription(self, ws, token_ids: list[str]) -> None:
         # Polymarket requires this exact format — send in batches of 100
         for i in range(0, len(token_ids), 100):
             batch = token_ids[i:i + 100]
@@ -143,7 +142,7 @@ class WebSocketClient:
             except Exception as e:
                 log.debug("Handler error (%s): %s", event_type, e)
 
-    async def _apply_book_snapshot(self, data: Dict) -> None:
+    async def _apply_book_snapshot(self, data: dict) -> None:
         """Parse a full order book snapshot and update the data store."""
         token_id = data.get("asset_id") or data.get("token_id", "")
         if not token_id:
@@ -160,7 +159,7 @@ class WebSocketClient:
         book = OrderBook(token_id=token_id, bids=bids, asks=asks)
         await store.update_order_book(book)
 
-    async def _apply_price_change(self, data: Dict) -> None:
+    async def _apply_price_change(self, data: dict) -> None:
         """Apply incremental price-level updates to the stored order book."""
         token_id = data.get("asset_id") or data.get("token_id", "")
         if not token_id:
@@ -187,7 +186,7 @@ class WebSocketClient:
         book.updated_at = time.time()
         await store.update_order_book(book)
 
-    async def add_subscription(self, token_ids: List[str]) -> None:
+    async def add_subscription(self, token_ids: list[str]) -> None:
         """Dynamically add more token IDs while already connected."""
         new = set(token_ids) - self._subscribed_tokens
         if not new:

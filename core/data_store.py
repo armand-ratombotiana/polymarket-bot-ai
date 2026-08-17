@@ -9,10 +9,9 @@ import json
 import logging
 import os
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Dict, List, Optional
 
 log = logging.getLogger(__name__)
 
@@ -46,26 +45,26 @@ class PriceLevel:
 @dataclass
 class OrderBook:
     token_id: str
-    bids: List[PriceLevel] = field(default_factory=list)   # best bid first
-    asks: List[PriceLevel] = field(default_factory=list)   # best ask first
+    bids: list[PriceLevel] = field(default_factory=list)   # best bid first
+    asks: list[PriceLevel] = field(default_factory=list)   # best ask first
     updated_at: float = field(default_factory=time.time)
 
     @property
-    def best_bid(self) -> Optional[float]:
+    def best_bid(self) -> float | None:
         return self.bids[0].price if self.bids else None
 
     @property
-    def best_ask(self) -> Optional[float]:
+    def best_ask(self) -> float | None:
         return self.asks[0].price if self.asks else None
 
     @property
-    def mid(self) -> Optional[float]:
+    def mid(self) -> float | None:
         if self.best_bid is not None and self.best_ask is not None:
             return (self.best_bid + self.best_ask) / 2
         return None
 
     @property
-    def spread(self) -> Optional[float]:
+    def spread(self) -> float | None:
         if self.best_bid is not None and self.best_ask is not None:
             return self.best_ask - self.best_bid
         return None
@@ -141,25 +140,27 @@ class DataStore:
         self._lock = asyncio.Lock()
 
         # Market state
-        self.order_books: Dict[str, OrderBook] = {}
-        self.market_slugs: Dict[str, str] = {}  # token_id -> slug
+        self.order_books: dict[str, OrderBook] = {}
+        self.market_slugs: dict[str, str] = {}  # token_id -> slug
 
         # Order management
-        self.open_orders: Dict[str, Order] = {}   # order_id -> Order
-        self.order_history: List[Order] = []
+        self.open_orders: dict[str, Order] = {}   # order_id -> Order
+        self.order_history: list[Order] = []
 
         # Positions
-        self.positions: Dict[str, Position] = {}  # token_id -> Position
+        self.positions: dict[str, Position] = {}  # token_id -> Position
 
         # Trades & P&L ($10,000 USD Institutional Bankroll)
-        self.trades: List[Trade] = []
+        self.trades: list[Trade] = []
         self.daily_pnl: float = 0.0
+        self.weekly_pnl: float = 0.0
+        self.week_window_started_at: float = time.time()
         self.paper_balance: float = BANKROLL_BASELINE
         self.peak_equity: float = BANKROLL_BASELINE
         self.session_start: float = time.time()
 
         # Equity curve time-series (timestamp, equity, pnl)
-        self.equity_history: List[Dict[str, float]] = [
+        self.equity_history: list[dict[str, float]] = [
             {"timestamp": time.time(), "equity": BANKROLL_BASELINE, "pnl": 0.0}
         ]
 
@@ -167,7 +168,7 @@ class DataStore:
         self.kill_switch_active: bool = False
 
         # Events log (max 500 entries)
-        self.event_log: List[str] = []
+        self.event_log: list[str] = []
 
     # ── Order Book ───────────────────────────────────────────────────────
 
@@ -175,7 +176,7 @@ class DataStore:
         async with self._lock:
             self.order_books[book.token_id] = book
 
-    async def get_order_book(self, token_id: str) -> Optional[OrderBook]:
+    async def get_order_book(self, token_id: str) -> OrderBook | None:
         async with self._lock:
             return self.order_books.get(token_id)
 
@@ -185,7 +186,7 @@ class DataStore:
         async with self._lock:
             self.open_orders[order.order_id] = order
 
-    async def update_order(self, order_id: str, **kwargs) -> Optional[Order]:
+    async def update_order(self, order_id: str, **kwargs) -> Order | None:
         async with self._lock:
             order = self.open_orders.get(order_id)
             if order is None:
@@ -197,7 +198,7 @@ class DataStore:
                 del self.open_orders[order_id]
             return order
 
-    async def cancel_all_orders(self) -> List[Order]:
+    async def cancel_all_orders(self) -> list[Order]:
         async with self._lock:
             cancelled = list(self.open_orders.values())
             for o in cancelled:
@@ -206,7 +207,7 @@ class DataStore:
             self.open_orders.clear()
             return cancelled
 
-    async def get_open_orders(self) -> List[Order]:
+    async def get_open_orders(self) -> list[Order]:
         async with self._lock:
             return list(self.open_orders.values())
 
@@ -229,6 +230,7 @@ class DataStore:
         async with self._lock:
             self.trades.append(trade)
             self.daily_pnl += trade.pnl
+            self.weekly_pnl += trade.pnl
             self.paper_balance += (
                 trade.price * trade.size * (1.0 if trade.side == Side.SELL else -1.0)
             )
@@ -266,6 +268,24 @@ class DataStore:
             if len(self.equity_history) > 300:
                 self.equity_history = self.equity_history[-300:]
 
+    # ── Weekly Loss Window (P0-GOV-01) ─────────────────────────────────
+
+    def roll_weekly_window(self) -> None:
+        """Roll the 7-day PnL window; resets weekly_pnl when the window expires."""
+        WEEK_SECONDS = 7 * 24 * 3600
+        now = time.time()
+        if now - self.week_window_started_at >= WEEK_SECONDS:
+            self.weekly_pnl = 0.0
+            self.week_window_started_at = now
+
+    def weekly_pnl_snapshot(self) -> dict:
+        self.roll_weekly_window()
+        return {
+            "weekly_pnl": round(self.weekly_pnl, 2),
+            "window_started_at": self.week_window_started_at,
+            "window_remaining_seconds": max(0.0, 7 * 24 * 3600 - (time.time() - self.week_window_started_at)),
+        }
+
     # ── Event Log ────────────────────────────────────────────────────────
 
     async def log_event(self, msg: str) -> None:
@@ -276,7 +296,7 @@ class DataStore:
             if len(self.event_log) > 500:
                 self.event_log.pop(0)
 
-    async def get_recent_events(self, n: int = 20) -> List[str]:
+    async def get_recent_events(self, n: int = 20) -> list[str]:
         async with self._lock:
             return list(self.event_log[-n:])
 

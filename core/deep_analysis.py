@@ -10,13 +10,11 @@ Provides:
 from __future__ import annotations
 
 import logging
-import math
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from core.data_store import OrderBook, store
 from core.fundamental_ingest import fundamental_engine
-from ml.model import ml_model
 
 log = logging.getLogger(__name__)
 
@@ -55,10 +53,10 @@ class DeepMarketAnalysisEngine:
     """
 
     def __init__(self) -> None:
-        self.whale_alerts: List[WhaleActivity] = []
+        self.whale_alerts: list[WhaleActivity] = []
         self._last_analysis_time = 0.0
 
-    def record_whale_trade(self, token_id: str, side: str, price: float, size_shares: float) -> Optional[WhaleActivity]:
+    def record_whale_trade(self, token_id: str, side: str, price: float, size_shares: float) -> WhaleActivity | None:
         """Check if trade meets whale threshold (> $5,000) and record."""
         size_usdc = price * size_shares
         if size_usdc >= 5000.0:
@@ -78,7 +76,7 @@ class DeepMarketAnalysisEngine:
             return activity
         return None
 
-    def classify_regime(self, book: OrderBook) -> Dict[str, Any]:
+    def classify_regime(self, book: OrderBook) -> dict[str, Any]:
         """
         Classify market regime based on spread, depth imbalance, and mid-price.
         Returns: regime ('trending' | 'mean_reverting' | 'volatile' | 'resolution'), confidence, and metrics.
@@ -124,7 +122,7 @@ class DeepMarketAnalysisEngine:
             "description": "Balanced liquidity and tight spread; oscillations around fair value",
         }
 
-    async def get_top_opportunities(self, limit: int = 10) -> List[Dict[str, Any]]:
+    async def get_top_opportunities(self, limit: int = 10) -> list[dict[str, Any]]:
         """
         Rank top trading opportunities by combining ML probability edge,
         Order Flow Imbalance, Spread, and Fundamental Sentiment.
@@ -171,7 +169,7 @@ class DeepMarketAnalysisEngine:
         opportunities.sort(key=lambda x: x["alpha_score"], reverse=True)
         return opportunities[:limit]
 
-    def get_category_correlation_matrix(self) -> Dict[str, Any]:
+    def get_category_correlation_matrix(self) -> dict[str, Any]:
         """Return cross-category correlation heatmap nodes."""
         categories = ["Crypto", "Macro & Rates", "Politics & Elections", "Sports", "Tech & AI"]
         # Empirical correlation matrix

@@ -2,7 +2,7 @@
 'use client'
 
 import { useState } from 'react'
-import { getApiUrl } from '@/lib/api'
+import { getApiUrl, apiFetch } from '@/lib/api'
 
 interface Message {
   role: 'user' | 'assistant'
@@ -32,7 +32,7 @@ export default function AICopilotPanel() {
 
     try {
       const apiUrl = getApiUrl()
-      const res = await fetch(`${apiUrl}/api/ai/copilot`, {
+      const res = await apiFetch(`${apiUrl}/api/ai/copilot`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ query: userText }),

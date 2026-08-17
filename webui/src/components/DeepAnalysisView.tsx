@@ -2,7 +2,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { getApiUrl } from '@/lib/api'
+import { getApiUrl, apiFetch } from '@/lib/api'
 import { formatHierarchicalMarket, formatMarketTitle, getCategoryBadge } from '@/lib/formatters'
 
 interface MarketAnalysis {
@@ -52,7 +52,7 @@ export default function DeepAnalysisView() {
   const fetchData = async () => {
     try {
       const apiUrl = getApiUrl()
-      const res = await fetch(`${apiUrl}/api/analysis/deep`)
+      const res = await apiFetch(`${apiUrl}/api/analysis/deep`)
       if (res.ok) {
         const json = await res.json()
         setData(json)
@@ -75,7 +75,7 @@ export default function DeepAnalysisView() {
     setSelectedToken(tokenId)
     try {
       const apiUrl = getApiUrl()
-      const res = await fetch(`${apiUrl}/api/analysis/market/${tokenId}`)
+      const res = await apiFetch(`${apiUrl}/api/analysis/market/${tokenId}`)
       if (res.ok) {
         const json = await res.json()
         setSingleAnalysis(json)

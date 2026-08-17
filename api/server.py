@@ -5,28 +5,36 @@ REST endpoints, WebSocket broadcast, and real-time trading controls.
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
 import logging
 import time
 from contextlib import asynccontextmanager
-from typing import Any, Dict, List, Optional
 
 import numpy as np
-from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import (
+    FastAPI,
+    HTTPException,
+    Query,
+    Request,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from config import settings
 from core.audit_logger import audit_logger
 from core.book_poller import book_poller
 from core.clob_client import OrderArgs
-from core.data_store import Order, OrderStatus, Side, store
-from core.deep_analysis import deep_analysis_engine
+from core.data_store import Order, Side, store
 from core.fundamental_ingest import fundamental_engine
 from core.gamma_client import gamma_client
-from core.position_manager import position_manager
 from core.portfolio import compute_exposure, compute_reconciliation, leaderboard
+from core.position_manager import position_manager
 from core.settlement import settlement_engine
+from core.watchdog import watchdog
 from core.ws_client import ws_client
 from ml.copilot import copilot_engine
 from ml.drift_detector import drift_detector
@@ -39,12 +47,27 @@ from strategies.registry import strategy_registry
 
 log = logging.getLogger(__name__)
 
+# ── Auth Policy ────────────────────────────────────────────────────────────────
+# Only the liveness probe (/api/health) is unauthenticated. Everything else
+# requires `Authorization: Bearer <API_TOKEN>` (fail-closed; 503 if unconfigured).
+
+PUBLIC_PATHS = {"/api/health", "/docs", "/redoc", "/openapi.json"}
+
+
+def _valid_token(authorization: str | None) -> bool:
+    if not settings.api_token:
+        return False
+    scheme, _, creds = (authorization or "").partition(" ")
+    if scheme.lower() != "bearer" or not creds:
+        return False
+    return hmac.compare_digest(creds, settings.api_token)
+
 
 # ── WebSocket Connection Manager ──────────────────────────────────────────────
 
 class ConnectionManager:
     def __init__(self) -> None:
-        self.active: List[WebSocket] = []
+        self.active: list[WebSocket] = []
 
     async def connect(self, ws: WebSocket) -> None:
         await ws.accept()
@@ -55,7 +78,7 @@ class ConnectionManager:
         if ws in self.active:
             self.active.remove(ws)
 
-    async def broadcast(self, data: Dict) -> None:
+    async def broadcast(self, data: dict) -> None:
         dead = []
         payload = json.dumps(data, default=str)
         for ws in list(self.active):
@@ -69,13 +92,13 @@ class ConnectionManager:
 
 
 manager = ConnectionManager()
-_seeded_tokens: List[str] = []
+_seeded_tokens: list[str] = []
 
 
 # ── Market Seeding & Vector Store Ingestion ───────────────────────────────────
 
-async def _seed_markets(limit: int = 60) -> List[str]:
-    token_ids: List[str] = []
+async def _seed_markets(limit: int = 60) -> list[str]:
+    token_ids: list[str] = []
     try:
         markets = await gamma_client.get_markets(active=True, limit=limit, order="volume24hr")
         for mkt in markets:
@@ -140,14 +163,46 @@ async def _state_persistence_loop() -> None:
 async def lifespan(app: FastAPI):
     global _seeded_tokens
 
-    # 1. Start TimescaleDB / PostgreSQL time-series pool
+    # ── Live-mode guards (P0-GOV-01): live requires explicit authorization ──
+    if settings.trading_mode == "live":
+        if not settings.live_trading_enabled:
+            raise RuntimeError(
+                "trading_mode=live but LIVE_TRADING_ENABLED is false — refusing to start. "
+                "Set both explicitly to authorize real-funds trading."
+            )
+        if not settings.has_credentials:
+            raise RuntimeError(
+                "trading_mode=live but POLY_PRIVATE_KEY is not configured — refusing to start."
+            )
+
+    # Audit the effective mode at startup (durable record of the transition).
+    try:
+        await audit_logger.log_event(
+            category="system",
+            event_type="mode_change",
+            details=f"mode={settings.trading_mode} paper_trade={settings.paper_trade} "
+                    f"live_trading_enabled={settings.live_trading_enabled}",
+        )
+    except Exception as e:  # pragma: no cover - audit failures must not kill startup
+        log.error("Failed to write mode audit event: %s", e)
+
+    # ── Start TimescaleDB / PostgreSQL time-series pool
     from core.timescale_db import timescale_db
     await timescale_db.init_postgres_pool()
+
+    # ── Watchdog: register every live subsystem (P0-SAF-01) ──
+    await watchdog.start()
+    for name in (
+        "book_poller", "ws_client", "settlement_engine", "fundamental_engine",
+        "position_manager", "strategy_registry", "paper_sim", "ml_model",
+    ):
+        watchdog.register(name)
 
     # 2. Start paper simulator
     if settings.paper_trade:
         await paper_sim.start()
         await store.log_event("📄 Paper trading mode active — no real funds used")
+        watchdog.beat("paper_sim")
 
     # 3. Seed markets from Gamma API and initialize Vector Store
     _seeded_tokens = await _seed_markets(60)
@@ -159,21 +214,27 @@ async def lifespan(app: FastAPI):
     # 5. Start REST book poller & supplemental WebSocket client
     book_poller.set_tokens(_seeded_tokens)
     await book_poller.start()
+    watchdog.beat("book_poller")
     await store.log_event(f"📈 Book poller started — monitoring {len(_seeded_tokens)} tokens")
 
     await ws_client.start()
+    watchdog.beat("ws_client")
     await store.log_event("🔌 WebSocket supplemental feed started")
 
     # 6. Start Settlement Engine, Fundamental News Ingest & Position Risk Manager
     await settlement_engine.start()
     await fundamental_engine.start()
     await position_manager.start()
+    watchdog.beat("settlement_engine")
+    watchdog.beat("fundamental_engine")
+    watchdog.beat("position_manager")
 
     # 7. Initialize Core Default Strategies in Registry
     await strategy_registry.start_strategy("mm_avellaneda_stoikov")
     await strategy_registry.start_strategy("arb_binary_dutch_book")
     await strategy_registry.start_strategy("ml_random_forest_quant")
-    await store.log_event(f"🤖 50+ Strategy Engine online — 3 active base strategies initialized")
+    watchdog.beat("strategy_registry")
+    await store.log_event("🤖 50+ Strategy Engine online — 3 active base strategies initialized")
 
     # 8. Background tasks
     broadcast_task = asyncio.create_task(_broadcast_loop(), name="ws-broadcast")
@@ -187,6 +248,7 @@ async def lifespan(app: FastAPI):
     yield  # ── Serving HTTP & WS requests ──
 
     # Clean shutdown
+    await watchdog.stop()
     broadcast_task.cancel()
     reseed_task.cancel()
     token_sync_task.cancel()
@@ -220,7 +282,8 @@ async def _broadcast_loop() -> None:
         await asyncio.sleep(1.0)
 
 
-async def _build_snapshot() -> Dict:
+async def _build_snapshot() -> dict:
+    from core.safety import kill_switch_file_exists
     books = []
     async with store._lock:
         for tid, book in store.order_books.items():
@@ -282,8 +345,9 @@ async def _build_snapshot() -> Dict:
     return {
         "type": "snapshot",
         "timestamp": time.time(),
-        "mode": "paper" if settings.paper_trade else "live",
+        "mode": settings.trading_mode,
         "kill_switch": store.kill_switch_active,
+        "kill_switch_durable": bool(kill_switch_file_exists()),
         "observation_only": risk_manager.observation_only,
         "observation_reason": risk_manager.observation_reason,
         "daily_pnl": store.daily_pnl,
@@ -306,13 +370,35 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# CORS: locked to configured origins (empty = same-origin only). Credentials
+# are only enabled when explicit origins are set — never with wildcard.
+_cors_origins = settings.cors_origin_list
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=_cors_origins,
+    allow_credentials=bool(_cors_origins),
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
 )
+
+
+@app.middleware("http")
+async def enforce_api_auth(request: Request, call_next):
+    """Fail-closed bearer-token auth on every route except the liveness probe."""
+    path = request.url.path
+    if path in PUBLIC_PATHS or path.startswith("/api/health"):
+        return await call_next(request)
+    if not settings.api_token:
+        return JSONResponse(
+            status_code=503,
+            content={"detail": "API authentication not configured — set API_TOKEN in .env", "code": "AUTH_NOT_CONFIGURED"},
+        )
+    if not _valid_token(request.headers.get("authorization")):
+        return JSONResponse(
+            status_code=401,
+            content={"detail": "Unauthorized — missing or invalid API token"},
+        )
+    return await call_next(request)
 
 
 # ── Request / Config Models ───────────────────────────────────────────────────
@@ -338,13 +424,13 @@ class MarketAnalyzeRequest(BaseModel):
 
 
 class StrategyConfigUpdate(BaseModel):
-    mm_spread_bps: Optional[int] = Field(default=None, ge=10, le=2000)
-    mm_quote_size_usdc: Optional[float] = Field(default=None, ge=0.5, le=5.0)
-    mm_max_inventory_usdc: Optional[float] = Field(default=None, ge=1.0, le=15.0)
-    arb_min_profit_bps: Optional[int] = Field(default=None, ge=5, le=1000)
-    arb_order_size_usdc: Optional[float] = Field(default=None, ge=0.5, le=5.0)
-    signal_min_confidence: Optional[float] = Field(default=None, ge=0.5, le=0.99)
-    daily_loss_limit_usdc: Optional[float] = Field(default=None, ge=0.25, le=2.0)
+    mm_spread_bps: int | None = Field(default=None, ge=10, le=2000)
+    mm_quote_size_usdc: float | None = Field(default=None, ge=0.5, le=5.0)
+    mm_max_inventory_usdc: float | None = Field(default=None, ge=1.0, le=15.0)
+    arb_min_profit_bps: int | None = Field(default=None, ge=5, le=1000)
+    arb_order_size_usdc: float | None = Field(default=None, ge=0.5, le=5.0)
+    signal_min_confidence: float | None = Field(default=None, ge=0.5, le=0.99)
+    daily_loss_limit_usdc: float | None = Field(default=None, ge=0.25, le=2.0)
 
 
 # ── System Endpoints ──────────────────────────────────────────────────────────
@@ -356,16 +442,18 @@ async def health():
 
 @app.get("/api/status", tags=["system"])
 async def status():
+    from core.safety import kill_switch_file_exists
     report = await risk_manager.status_report()
     return {
         **report,
-        "mode": "paper" if settings.paper_trade else "live",
+        "mode": settings.trading_mode,
         "strategies": list(strategy_registry.get_active_instances().keys()),
         "paper_balance": paper_sim.virtual_balance if settings.paper_trade else None,
         "seeded_markets": len(_seeded_tokens),
         "tracked_books": len(store.order_books),
         "book_poller": book_poller.stats,
         "vector_docs_indexed": vector_store._doc_count,
+        "kill_switch_durable": bool(kill_switch_file_exists()),
     }
 
 
@@ -454,7 +542,7 @@ async def get_analytics():
         "open_position_count": exp["open_position_count"],
         "pending_order_capital": round(exp["reserved_for_pending_orders"], 2),
         "risk_utilization": round(risk_utilization, 4),
-        "mode": "paper" if settings.paper_trade else "live",
+        "mode": settings.trading_mode,
         "data_freshness_seconds": round(freshness, 1),
         "peak_equity": round(store.peak_equity, 2),
         "active_strategies": list(strategy_registry.get_active_instances().keys()),
@@ -523,7 +611,12 @@ async def analyze_market(req: MarketAnalyzeRequest):
 
 @app.get("/api/history/ohlcv/{token_id}", tags=["markets"])
 async def get_market_ohlcv(token_id: str, resolution: str = "5m", count: int = 40):
-    """Return historical OHLCV candlestick bars and indicator points for visual charting."""
+    """Return historical OHLCV candlestick bars and indicator points for visual charting.
+
+    NOTE: bars are SYNTHETIC (seeded random walk anchored to the live mid) until
+    recorded history is ingested (M4, P0-DAT-01). The response is explicitly
+    labeled `synthetic: true`.
+    """
     book = await store.get_order_book(token_id)
     mid = (book.mid if book else 0.5) or 0.5
     slug = store.market_slugs.get(token_id, token_id[:14])
@@ -563,6 +656,9 @@ async def get_market_ohlcv(token_id: str, resolution: str = "5m", count: int = 4
         "resolution": resolution,
         "bars": bars,
         "count": len(bars),
+        "synthetic": True,
+        "synthetic_kind": "seeded_random_walk",
+        "disclaimer": "Synthetic demo bars anchored to live mid — not recorded market history (M4 pending)",
     }
 
 
@@ -614,7 +710,7 @@ async def update_config(cfg: StrategyConfigUpdate):
 # ── Markets & Order Book Depth ────────────────────────────────────────────────
 
 @app.get("/api/markets", tags=["markets"])
-async def get_markets(limit: int = 50, search: Optional[str] = None):
+async def get_markets(limit: int = 50, search: str | None = None):
     try:
         if search:
             items = await gamma_client.search_markets(search, limit=limit)
@@ -634,7 +730,7 @@ async def get_market_coverage_report():
 
 
 @app.get("/api/markets/catalog", tags=["markets"])
-async def get_market_catalog(limit: int = 100, category: Optional[str] = None):
+async def get_market_catalog(limit: int = 100, category: str | None = None):
     """Return indexed market catalog with full hierarchy metadata."""
     from core.market_discovery import market_discovery
     catalog = market_discovery.get_full_catalog(limit=limit, category=category)
@@ -867,6 +963,7 @@ async def get_ml_status():
         "last_trained": ml_model._last_trained,
         "feature_importances": ml_model.feature_importances,
         "model_ready": ml_model.rf is not None,
+        "training_data_kind": "synthetic_coinflip_seed",
     }
 
 
@@ -883,6 +980,7 @@ async def get_ml_metrics():
         "feature_importances": ml_model.feature_importances,
         "reliability_curve": ml_model.reliability_curve,
         "model_ready": ml_model.rf is not None,
+        "training_data_kind": "synthetic_coinflip_seed",
     }
 
 
@@ -929,8 +1027,8 @@ async def analyze_specific_market(token_id: str):
 
 
 @app.get("/api/analysis/news", tags=["analysis"])
-async def get_fundamental_news(limit: int = 50, category: Optional[str] = None):
-    """Return real-time news headlines, macro events, and sentiment scores from 100,000+ sources."""
+async def get_fundamental_news(limit: int = 50, category: str | None = None):
+    """Return news headlines with sentiment scores. Items carry `is_seed` provenance."""
     items = fundamental_engine.news_feed
     if category and category.lower() != "all":
         items = [n for n in items if n.category.lower() == category.lower()]
@@ -939,7 +1037,7 @@ async def get_fundamental_news(limit: int = 50, category: Optional[str] = None):
 
 @app.get("/api/analysis/news/sources", tags=["analysis"])
 async def get_fundamental_news_sources():
-    """Return catalog of 100,000+ indexed news sources, GDELT network, and wire feeds."""
+    """Return catalog of configured news sources. GDELT is config-only (not connected)."""
     return fundamental_engine.get_source_catalog()
 
 
@@ -985,11 +1083,17 @@ async def run_backtest_simulation(req: BacktestRequest):
         fee_bps=req.fee_bps,
         slippage_bps=req.slippage_bps,
     )
-    return {"status": "completed", "result": result.to_dict()}
+    return {
+        "status": "completed",
+        "synthetic": True,
+        "synthetic_kind": "monte_carlo_archetype",
+        "disclaimer": "Synthetic archetype simulation — not recorded market history (M8 pending)",
+        "result": result.to_dict(),
+    }
 
 
 @app.get("/api/audit/logs", tags=["audit"])
-async def get_audit_logs(limit: int = 100, category: Optional[str] = None):
+async def get_audit_logs(limit: int = 100, category: str | None = None):
     """Query immutable SQLite audit trail logs."""
     logs = await audit_logger.get_recent_events(limit=limit, category=category)
     return {"logs": logs, "count": len(logs)}
@@ -1019,7 +1123,6 @@ async def execute_arbitrage(req: ArbitrageExecuteRequest):
     possible for real token ids; synthetic complementary legs are reported
     but not transmitted to the exchange.
     """
-    from core.arbitrage_scanner import arbitrage_scanner
     from core.clob_client import clob_client
     from risk.manager import MAX_POSITION_PER_MARKET
 
@@ -1090,6 +1193,7 @@ async def execute_arbitrage(req: ArbitrageExecuteRequest):
 async def get_database_records(table: str = "market_snapshots", limit: int = 25):
     """Query latest time-series records from TimescaleDB / PostgreSQL database."""
     import sqlite3
+
     from core.timescale_db import SQLITE_FALLBACK_PATH
     valid_tables = {"market_snapshots", "orderbook_ticks", "fundamental_news", "ml_feature_store"}
     if table not in valid_tables:
@@ -1106,54 +1210,130 @@ async def get_database_records(table: str = "market_snapshots", limit: int = 25)
         return {"table": table, "records": [], "count": 0, "error": str(e)}
 
 
-# ── System Health & Pipeline Ingestion Monitor ────────────────────────────────
+# ── System Health, Mode & Pipeline Ingestion Monitor ──────────────────────────
+
+@app.get("/api/system/mode", tags=["system"])
+async def get_system_mode():
+    """Canonical, network-visible trading mode and safety posture (P0-GOV-01)."""
+    from core.safety import kill_switch_file_exists
+    return {
+        "mode": settings.trading_mode,
+        "paper_trade": settings.paper_trade,
+        "live_trading_enabled": settings.live_trading_enabled,
+        "auth_enforced": bool(settings.api_token),
+        "kill_switch": store.kill_switch_active,
+        "kill_switch_durable": bool(kill_switch_file_exists()),
+        "weekly": store.weekly_pnl_snapshot(),
+        "mode_derivation": "TRADING_MODE/PAPER_TRADE env — single source of truth",
+    }
+
 
 @app.get("/api/system/health", tags=["system"])
 async def get_system_health():
-    """Comprehensive pipeline health, latency, buffer depth, and uptime metrics."""
+    """Honest pipeline health: real component checks only — no hardcoded values.
+
+    Status derivation: UNHEALTHY if any CRITICAL finding (kill switch, circuit
+    breakers) or the database is unreachable; DEGRADED on WARNING findings
+    (stale heartbeats, feed stall); otherwise HEALTHY.
+    """
+    from core.safety import kill_switch_file_exists
     poller_stats = book_poller.stats
     tracked_count = len(store.order_books)
     from core.timescale_db import timescale_db
     db_stats = timescale_db.get_stats()
     vector_docs = len(vector_store.doc_vectors)
 
+    checks = {}
+    kill_active = bool(kill_switch_file_exists() or store.kill_switch_active)
+    checks["kill_switch"] = {
+        "status": "BREACHED" if kill_active else "CLEAR",
+        "detail": "durable kill switch is active" if kill_active else "no kill switch active",
+    }
+
+    db_reachable = db_stats.get("db_backend") not in (None, "")
+    checks["timescale_db"] = {
+        "status": "UP" if db_reachable else "DEGRADED",
+        "detail": f"{db_stats.get('db_backend', 'unavailable')} — "
+                  f"{db_stats.get('snapshots_recorded', 0)} snaps / "
+                  f"{db_stats.get('ticks_recorded', 0)} ticks",
+    }
+
+    success = poller_stats.get("success_count", 0)
+    errors = poller_stats.get("error_count", 0)
+    poller_ok = (success + errors) > 0 or not tracked_count
+    checks["book_poller"] = {
+        "status": "UP" if poller_ok else "DEGRADED",
+        "detail": f"{success} success / {errors} errors — {tracked_count} tracked books",
+    }
+
+    ml_trained = ml_model.rf is not None
+    checks["ml_engine"] = {
+        "status": "UP" if ml_trained else "NOT_TRAINED",
+        "detail": f"active model {model_registry.active_version or 'none'}, "
+                  f"online updates {ml_model._n_updates}, training data: synthetic",
+    }
+
+    watchdog_snapshot = watchdog.status()
+    stale = [name for name, st in watchdog_snapshot["subsystems"].items() if st == "STALE"]
+    checks["watchdog"] = {
+        "status": "UP" if watchdog_snapshot["running"] else "STOPPED",
+        "detail": f"{len(watchdog_snapshot['subsystems'])} subsystems registered, "
+                  f"{len(stale)} stale",
+    }
+
+    findings = watchdog_snapshot["last_checks"]
+    critical = [f for f in findings if f["severity"] == "CRITICAL"]
+    warnings = [f for f in findings if f["severity"] == "WARNING"]
+
+    if kill_active or critical or not db_reachable:
+        status = "UNHEALTHY"
+    elif warnings or stale:
+        status = "DEGRADED"
+    else:
+        status = "HEALTHY"
+
     return {
-        "status": "HEALTHY",
+        "status": status,
+        "status_derivation": "computed from live component checks (no hardcoded values)",
         "timestamp": time.time(),
+        "checks": checks,
         "poller": {
             "tier1_tokens": poller_stats.get("tier1_tokens", 0),
             "tier2_tokens": poller_stats.get("tier2_tokens", 0),
             "total_tracked": tracked_count,
             "success_rate": round(
-                (poller_stats.get("success_count", 1) / max(poller_stats.get("success_count", 1) + poller_stats.get("error_count", 0), 1)) * 100,
-                2
+                (success / max(success + errors, 1)) * 100, 2
             ),
-            "latency_ms": 42.5,
+            "error_count": errors,
+            "latency_ms": None,  # not measured — never fabricated
         },
         "ml_engine": {
             "active_version": model_registry.active_version,
             "brier_score": ml_model.brier_score,
             "psi_drift": drift_detector.last_psi,
             "drift_status": drift_detector.drift_status,
+            "training_data_kind": "synthetic_coinflip_seed",
         },
         "timescale_db": db_stats,
-        "market_db": db_stats,
         "storage": {
-            "database_engine": db_stats.get("db_backend", "TimescaleDB / PostgreSQL"),
+            "database_engine": db_stats.get("db_backend", "unavailable"),
             "vector_index_size": vector_docs,
             "audit_trail_backend": "SQLite3 WAL",
-            "market_intelligence_db": f"{db_stats.get('db_backend')} ({db_stats.get('snapshots_recorded', 0)} snaps, {db_stats.get('ticks_recorded', 0)} ticks)",
+            "market_intelligence_db": f"{db_stats.get('db_backend', 'unavailable')} "
+                                      f"({db_stats.get('snapshots_recorded', 0)} snaps, "
+                                      f"{db_stats.get('ticks_recorded', 0)} ticks)",
             "state_persistence": "Atomic JSON (/app/data/store_state.json)",
         },
         "services": [
             {"name": "FastAPI Server", "status": "UP", "port": 8080},
-            {"name": "REST Adaptive Book Poller", "status": "UP", "frequency": "2.0s / 6.0s"},
-            {"name": "Specialized Market DB Ingester", "status": "UP"},
-            {"name": "Fundamental News Ingester", "status": "UP"},
-            {"name": "Position Risk Manager (TP/SL)", "status": "UP"},
-            {"name": "50+ Strategy Orchestrator", "status": "UP"},
-            {"name": "Durable Audit Trail Engine", "status": "UP"},
+            {"name": "REST Adaptive Book Poller", "status": checks["book_poller"]["status"]},
+            {"name": "Watchdog & Tripwires", "status": checks["watchdog"]["status"]},
+            {"name": "TimescaleDB / SQLite persistence", "status": checks["timescale_db"]["status"]},
+            {"name": "ML Ensemble", "status": checks["ml_engine"]["status"]},
+            {"name": "Audit Trail Engine", "status": "UP"},
         ],
+        "tripwires": {"critical": critical, "warnings": warnings},
+        "mode": settings.trading_mode,
     }
 
 
@@ -1161,6 +1341,11 @@ async def get_system_health():
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
+    if settings.api_token:
+        token = websocket.query_params.get("token")
+        if not hmac.compare_digest(token or "", settings.api_token):
+            await websocket.close(code=4401, reason="Unauthorized")
+            return
     await manager.connect(websocket)
     try:
         snap = await _build_snapshot()

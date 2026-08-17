@@ -13,14 +13,14 @@ import time
 import uuid
 from base64 import b64encode
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import httpx
 from eth_account import Account
 from eth_account.messages import encode_defunct
 
 from config import settings
-from core.data_store import Order, OrderStatus, Side
+from core.data_store import Side
 
 log = logging.getLogger(__name__)
 
@@ -64,7 +64,7 @@ def _hmac_signature(secret: str, timestamp: str, method: str, path: str, body: s
     return b64encode(mac.digest()).decode()
 
 
-def _l2_headers(creds: ApiCreds, method: str, path: str, body: str = "") -> Dict[str, str]:
+def _l2_headers(creds: ApiCreds, method: str, path: str, body: str = "") -> dict[str, str]:
     timestamp = str(int(time.time()))
     sig = _hmac_signature(creds.api_secret, timestamp, method, path, body)
     return {
@@ -86,8 +86,8 @@ class ClobClient:
     def __init__(self) -> None:
         self._base = settings.poly_clob_host.rstrip("/")
         self._key = settings.poly_private_key
-        self._creds: Optional[ApiCreds] = None
-        self._http: Optional[httpx.AsyncClient] = None
+        self._creds: ApiCreds | None = None
+        self._http: httpx.AsyncClient | None = None
 
         # Load pre-configured creds if available
         if settings.has_api_keys:
@@ -112,7 +112,7 @@ class ClobClient:
 
     # ── Internal request helpers ──────────────────────────────────────────
 
-    async def _get(self, path: str, params: Optional[Dict] = None, auth: bool = False) -> Any:
+    async def _get(self, path: str, params: dict | None = None, auth: bool = False) -> Any:
         client = await self._ensure_http()
         headers = {}
         if auth and self._creds:
@@ -189,43 +189,43 @@ class ClobClient:
 
     # ── Public endpoints ──────────────────────────────────────────────────
 
-    async def get_markets(self, next_cursor: str = "") -> Dict:
+    async def get_markets(self, next_cursor: str = "") -> dict:
         """Paginated list of markets from the CLOB."""
         params = {}
         if next_cursor:
             params["next_cursor"] = next_cursor
         return await self._get("/markets", params=params)
 
-    async def get_market(self, condition_id: str) -> Dict:
+    async def get_market(self, condition_id: str) -> dict:
         return await self._get(f"/markets/{condition_id}")
 
-    async def get_order_book(self, token_id: str) -> Dict:
+    async def get_order_book(self, token_id: str) -> dict:
         """Fetch the current order book snapshot for a token."""
         return await self._get("/book", params={"token_id": token_id})
 
-    async def get_spread(self, token_id: str) -> Dict:
+    async def get_spread(self, token_id: str) -> dict:
         return await self._get("/spread", params={"token_id": token_id})
 
-    async def get_price(self, token_id: str, side: str) -> Dict:
+    async def get_price(self, token_id: str, side: str) -> dict:
         return await self._get("/price", params={"token_id": token_id, "side": side})
 
-    async def get_last_trade_price(self, token_id: str) -> Dict:
+    async def get_last_trade_price(self, token_id: str) -> dict:
         return await self._get("/last-trade-price", params={"token_id": token_id})
 
     # ── Authenticated endpoints ────────────────────────────────────────────
 
-    async def get_open_orders(self) -> List[Dict]:
+    async def get_open_orders(self) -> list[dict]:
         data = await self._get("/orders", auth=True)
         return data if isinstance(data, list) else data.get("data", [])
 
-    async def get_positions(self) -> List[Dict]:
+    async def get_positions(self) -> list[dict]:
         data = await self._get("/positions", auth=True)
         return data if isinstance(data, list) else data.get("data", [])
 
-    async def get_balance(self) -> Dict:
+    async def get_balance(self) -> dict:
         return await self._get("/balance-allowance", params={"asset_type": "COLLATERAL"}, auth=True)
 
-    async def create_order(self, args: OrderArgs) -> Optional[Dict]:
+    async def create_order(self, args: OrderArgs) -> dict | None:
         """
         Sign an EIP-712 limit order and submit it to the CLOB. Returns the server
         response dict or None on error. Price is in [0.01, 0.99], size in shares.
@@ -334,8 +334,8 @@ class ClobClient:
             log.error("Cancel-all failed: %s", e)
             return False
 
-    async def get_trades(self, maker_address: str = "", limit: int = 50) -> List[Dict]:
-        params: Dict[str, Any] = {"limit": limit}
+    async def get_trades(self, maker_address: str = "", limit: int = 50) -> list[dict]:
+        params: dict[str, Any] = {"limit": limit}
         if maker_address:
             params["maker_address"] = maker_address
         data = await self._get("/data/trades", params=params, auth=True)

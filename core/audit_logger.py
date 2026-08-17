@@ -12,7 +12,7 @@ import os
 import sqlite3
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 log = logging.getLogger(__name__)
 
@@ -55,11 +55,11 @@ class AuditLogger:
         category: str,
         event_type: str,
         details: str,
-        token_id: Optional[str] = None,
-        slug: Optional[str] = None,
+        token_id: str | None = None,
+        slug: str | None = None,
         pnl: float = 0.0,
-        strategy: Optional[str] = None,
-        idempotency_key: Optional[str] = None,
+        strategy: str | None = None,
+        idempotency_key: str | None = None,
     ) -> None:
         """Record an immutable audit event asynchronously."""
         ts = time.time()
@@ -84,7 +84,7 @@ class AuditLogger:
 
         await asyncio.to_thread(_insert)
 
-    async def get_recent_events(self, limit: int = 100, category: Optional[str] = None) -> List[Dict[str, Any]]:
+    async def get_recent_events(self, limit: int = 100, category: str | None = None) -> list[dict[str, Any]]:
         """Fetch recent immutable audit logs."""
         def _fetch():
             with sqlite3.connect(self._db_path) as conn:

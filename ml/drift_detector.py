@@ -7,9 +7,8 @@ and Brier score drift against baseline reference distributions to trigger automa
 from __future__ import annotations
 
 import logging
-import math
 import time
-from typing import Dict, List, Optional
+from typing import Any
 
 import numpy as np
 
@@ -23,8 +22,8 @@ class ModelDriftDetector:
 
     def __init__(self) -> None:
         self.baseline_distribution = np.array([0.10, 0.10, 0.10, 0.10, 0.10, 0.10, 0.10, 0.10, 0.10, 0.10])
-        self.recent_predictions: List[float] = []
-        self.psi_history: List[Dict[str, float]] = []
+        self.recent_predictions: list[float] = []
+        self.psi_history: list[dict[str, float]] = []
         self.drift_status: str = "HEALTHY"
         self.last_psi: float = 0.042
 
@@ -82,7 +81,7 @@ class ModelDriftDetector:
 
         return self.last_psi
 
-    def get_status_report(self) -> Dict[str, Any]:
+    def get_status_report(self) -> dict[str, Any]:
         return {
             "psi": self.last_psi,
             "status": self.drift_status,

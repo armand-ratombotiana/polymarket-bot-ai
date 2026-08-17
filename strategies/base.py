@@ -6,11 +6,10 @@ from __future__ import annotations
 import asyncio
 import logging
 from abc import ABC, abstractmethod
-from typing import Optional
 
 from config import settings
-from core.clob_client import ClobClient, OrderArgs, clob_client
-from core.data_store import Order, Side, store
+from core.clob_client import OrderArgs, clob_client
+from core.data_store import Order, store
 from paper.simulator import paper_sim
 from risk.manager import risk_manager
 
@@ -29,7 +28,7 @@ class BaseStrategy(ABC):
 
     def __init__(self) -> None:
         self._running = False
-        self._task: Optional[asyncio.Task] = None
+        self._task: asyncio.Task | None = None
         self._paper = settings.paper_trade
 
     # ── Lifecycle ─────────────────────────────────────────────────────────
@@ -58,7 +57,7 @@ class BaseStrategy(ABC):
 
     # ── Order helpers ─────────────────────────────────────────────────────
 
-    async def submit_order(self, args: OrderArgs) -> Optional[Order]:
+    async def submit_order(self, args: OrderArgs) -> Order | None:
         """
         Submit an order through the risk manager, then either:
         - Paper mode: record in PaperSimulator

@@ -4,7 +4,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { getApiUrl } from '@/lib/api'
+import { getApiUrl, apiFetch } from '@/lib/api'
 
 interface Reconciliation {
   reconciled: boolean
@@ -44,8 +44,8 @@ export default function RiskStatusPanel() {
       try {
         const apiUrl = getApiUrl()
         const [statusRes, reconRes] = await Promise.all([
-          fetch(`${apiUrl}/api/status`),
-          fetch(`${apiUrl}/api/risk/reconcile`),
+          apiFetch(`${apiUrl}/api/status`),
+          apiFetch(`${apiUrl}/api/risk/reconcile`),
         ])
         if (statusRes.ok) setRisk(await statusRes.json())
         if (reconRes.ok) setRecon(await reconRes.json())

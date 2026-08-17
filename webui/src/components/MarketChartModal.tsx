@@ -2,7 +2,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { getApiUrl } from '@/lib/api'
+import { getApiUrl, apiFetch } from '@/lib/api'
 import { formatMarketTitle, getCategoryBadge } from '@/lib/formatters'
 
 interface Bar {
@@ -39,7 +39,7 @@ export default function MarketChartModal({ tokenId, slug, onClose, onOrderPlaced
   const fetchOhlcv = async () => {
     try {
       const apiUrl = getApiUrl()
-      const res = await fetch(`${apiUrl}/api/history/ohlcv/${tokenId}?resolution=${resolution}&count=40`)
+      const res = await apiFetch(`${apiUrl}/api/history/ohlcv/${tokenId}?resolution=${resolution}&count=40`)
       if (res.ok) {
         const json = await res.json()
         setBars(json.bars || [])
@@ -60,7 +60,7 @@ export default function MarketChartModal({ tokenId, slug, onClose, onOrderPlaced
     setTradeMsg(null)
     try {
       const apiUrl = getApiUrl()
-      const res = await fetch(`${apiUrl}/api/trade`, {
+      const res = await apiFetch(`${apiUrl}/api/trade`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

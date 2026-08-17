@@ -14,7 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import Dict, Set
+import time
 
 from core.data_store import BANKROLL_BASELINE, Side, Trade, store
 from core.gamma_client import gamma_client
@@ -34,7 +34,7 @@ class SettlementEngine:
     def __init__(self) -> None:
         self._running = False
         self._task: asyncio.Task | None = None
-        self._settled_tokens: Set[str] = set()
+        self._settled_tokens: set[str] = set()
 
     async def start(self) -> None:
         self._running = True
@@ -65,7 +65,6 @@ class SettlementEngine:
             await self._process_resolved_market(mkt)
 
     async def _process_resolved_market(self, mkt: dict) -> None:
-        condition_id = mkt.get("conditionId") or mkt.get("id")
         token_ids = gamma_client.extract_token_ids(mkt)
         if not token_ids:
             return

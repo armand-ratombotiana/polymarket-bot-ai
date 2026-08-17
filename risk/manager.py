@@ -29,8 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from decimal import Decimal, ROUND_HALF_UP
-from typing import Dict, Optional, Tuple
+from decimal import Decimal
 
 from config import settings
 from core.data_store import Order, Side, store
@@ -88,11 +87,23 @@ class InstitutionalRiskEngine:
             await store.log_event(f"👁 Observation-only mode {status}: {reason or 'manual'}")
             return {"observation_only": self.observation_only, "reason": self.observation_reason}
 
-    async def check_order(self, order: Order) -> Tuple[bool, str]:
+    async def check_order(self, order: Order) -> tuple[bool, str]:
         """
         Validate order against all institutional risk constraints before submission.
         """
         async with self._lock:
+            # 0. Shadow mode gate: shadow = evaluation only, no orders at all.
+            if settings.trading_mode == "shadow":
+                return False, (
+                    "Shadow trading mode active — evaluation only, no orders "
+                    "(see /api/system/mode)"
+                )
+
+            # 0. Durable kill switch (file-backed, survives restarts) + in-memory flag.
+            from core.safety import kill_switch_file_exists
+            if store.kill_switch_active or kill_switch_file_exists():
+                return False, "Kill switch is active — all trading halted"
+
             # 0. Observation-only gate: no new LIVE orders until exposure is reconciled.
             if self.observation_only and not order.paper:
                 return False, (
@@ -128,6 +139,13 @@ class InstitutionalRiskEngine:
             if daily_pnl_dec <= -DAILY_LOSS_STOP:
                 await self._trigger_kill_switch(f"Daily loss stop breach (${abs(daily_pnl_dec):.2f} >= ${DAILY_LOSS_STOP:.2f})")
                 return False, f"Daily loss stop reached (${DAILY_LOSS_STOP:.2f})"
+
+            # 2b. Weekly Loss Stop (USD 5.00) — enforced per P0-GOV-01.
+            store.roll_weekly_window()
+            weekly_pnl_dec = to_dec(store.weekly_pnl)
+            if weekly_pnl_dec <= -WEEKLY_LOSS_STOP:
+                await self._trigger_kill_switch(f"Weekly loss stop breach (${abs(weekly_pnl_dec):.2f} >= ${WEEKLY_LOSS_STOP:.2f})")
+                return False, f"Weekly loss stop reached (${WEEKLY_LOSS_STOP:.2f})"
 
             # 3. Max Drawdown from High-Water Mark (USD 8.00)
             if peak_equity_dec > Decimal("0.0"):
@@ -212,9 +230,16 @@ class InstitutionalRiskEngine:
     async def _trigger_kill_switch(self, reason: str) -> None:
         if store.kill_switch_active:
             return
+        from core.safety import write_kill_switch
         store.kill_switch_active = True
+        write_kill_switch(reason)
         log.critical("[risk_manager] 🛑 CIRCUIT BREAKER TRIGGERED: %s", reason)
         await store.log_event(f"🛑 RISK BREAKER: {reason}")
+        from core.audit_logger import audit_logger
+        await audit_logger.log_event(
+            category="risk", event_type="kill_switch_activated",
+            details=f"CIRCUIT BREAKER: {reason}",
+        )
         cancelled = await store.cancel_all_orders()
         log.warning("[risk_manager] Cancelled %d open orders across all strategies", len(cancelled))
 
@@ -223,14 +248,22 @@ class InstitutionalRiskEngine:
 
     async def deactivate_kill_switch(self) -> None:
         async with self._lock:
+            from core.safety import clear_kill_switch
             store.kill_switch_active = False
+            clear_kill_switch()
             # Update peak equity to current equity to reset MDD baseline
             current_eq = float(BANKROLL_CEILING) + store.daily_pnl
             store.peak_equity = current_eq
             log.info("[risk_manager] Risk gate reset — trading resumed (peak equity=$%.2f)", current_eq)
             await store.log_event("▶ Risk gate reset — trading resumed")
+            from core.audit_logger import audit_logger
+            await audit_logger.log_event(
+                category="risk", event_type="kill_switch_deactivated",
+                details="Manual risk gate reset — trading resumed",
+            )
 
     async def status_report(self) -> dict:
+        from core.safety import kill_switch_file_exists
         open_count = await store.open_order_count()
         total_exp = await store.total_exposure()
         current_eq = float(BANKROLL_CEILING) + store.daily_pnl
@@ -242,9 +275,11 @@ class InstitutionalRiskEngine:
         # Exposure must stay within the deployable bankroll; if it exceeds the
         # absolute worst-case ceiling, the reconciliation gate is open (non-compliant).
         exposure_reconciled = float(total_exp) <= max_loss
+        store.roll_weekly_window()
 
         return {
             "kill_switch": store.kill_switch_active,
+            "kill_switch_durable": bool(kill_switch_file_exists()),
             "observation_only": self.observation_only,
             "observation_reason": self.observation_reason,
             "operating_capital": float(OPERATING_CAPITAL),
@@ -255,6 +290,7 @@ class InstitutionalRiskEngine:
             "live_trading_enabled": bool(settings.live_trading_enabled),
             "daily_pnl": store.daily_pnl,
             "daily_loss_limit": -float(DAILY_LOSS_STOP),
+            "weekly_pnl": round(store.weekly_pnl, 2),
             "weekly_loss_limit": -float(WEEKLY_LOSS_STOP),
             "drawdown_dollars": round(drawdown_dollars, 2),
             "max_drawdown_limit": float(MAX_DRAWDOWN_LIMIT),

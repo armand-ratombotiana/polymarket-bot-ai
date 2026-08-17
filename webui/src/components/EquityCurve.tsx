@@ -2,7 +2,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { getApiUrl } from '@/lib/api'
+import { getApiUrl, apiFetch } from '@/lib/api'
 
 interface EquityPoint {
   timestamp: number
@@ -17,7 +17,7 @@ export default function EquityCurve() {
     const fetchEquity = async () => {
       try {
         const apiUrl = getApiUrl()
-        const res = await fetch(`${apiUrl}/api/history/equity`)
+        const res = await apiFetch(`${apiUrl}/api/history/equity`)
         if (res.ok) {
           const json = await res.json()
           if (json.points && json.points.length > 0) {

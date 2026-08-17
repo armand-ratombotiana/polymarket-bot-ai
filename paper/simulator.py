@@ -7,12 +7,17 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import time
 import uuid
-from typing import Optional
 
-from core.data_store import BANKROLL_BASELINE, Order, OrderBook, OrderStatus, Side, Trade, store
 from core.clob_client import OrderArgs
+from core.data_store import (
+    Order,
+    OrderBook,
+    OrderStatus,
+    Side,
+    Trade,
+    store,
+)
 
 log = logging.getLogger(__name__)
 
@@ -26,7 +31,7 @@ class PaperSimulator:
 
     def __init__(self) -> None:
         self._running = False
-        self._task: Optional[asyncio.Task] = None
+        self._task: asyncio.Task | None = None
         self._virtual_balance_usdc: float = store.paper_balance  # persists via DataStore
 
     @property
@@ -106,7 +111,7 @@ class PaperSimulator:
             if filled:
                 await self._execute_fill(order, filled)
 
-    def _can_fill(self, order: Order, book: OrderBook) -> Optional[float]:
+    def _can_fill(self, order: Order, book: OrderBook) -> float | None:
         """
         Return the fill price if the order can be matched, else None.
         BUY orders fill if best_ask <= order.price
@@ -122,7 +127,6 @@ class PaperSimulator:
 
     async def _execute_fill(self, order: Order, fill_price: float) -> None:
         fill_size = order.size_remaining
-        revenue_or_cost = fill_price * fill_size
 
         # Compute simple P&L for SELL (revenue - cost basis)
         pos = store.positions.get(order.token_id)

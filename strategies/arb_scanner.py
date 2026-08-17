@@ -14,12 +14,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Dict, List, Optional, Tuple
 
 from config import settings
 from core.book_poller import book_poller
 from core.clob_client import OrderArgs
-from core.data_store import OrderBook, PriceLevel, Side, store
+from core.data_store import Side, store
 from core.gamma_client import gamma_client
 from strategies.base import BaseStrategy
 
@@ -40,8 +39,8 @@ class ArbScannerStrategy(BaseStrategy):
         self._order_size = settings.arb_order_size_usdc
 
         # Track token-pair relationships: YES_token_id -> NO_token_id
-        self._pairs: Dict[str, str] = {}
-        self._market_slugs: Dict[str, str] = {}
+        self._pairs: dict[str, str] = {}
+        self._market_slugs: dict[str, str] = {}
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -87,7 +86,7 @@ class ArbScannerStrategy(BaseStrategy):
     # ── Arbitrage Scan ────────────────────────────────────────────────────────
 
     async def _scan_for_arb(self) -> None:
-        opportunities: List[Tuple[str, str, float, float, float]] = []
+        opportunities: list[tuple[str, str, float, float, float]] = []
 
         for yes_tid, no_tid in list(self._pairs.items()):
             opp = await self._check_pair(yes_tid, no_tid)
@@ -102,7 +101,7 @@ class ArbScannerStrategy(BaseStrategy):
 
     async def _check_pair(
         self, yes_token: str, no_token: str
-    ) -> Optional[Tuple[float, float, float]]:
+    ) -> tuple[float, float, float] | None:
         yes_book = await store.get_order_book(yes_token)
         no_book = await store.get_order_book(no_token)
 

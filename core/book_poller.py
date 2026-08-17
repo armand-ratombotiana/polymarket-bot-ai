@@ -11,7 +11,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import List, Optional, Set
 
 import httpx
 
@@ -33,16 +32,16 @@ class BookPoller:
 
     def __init__(self) -> None:
         self._running = False
-        self._task1: Optional[asyncio.Task] = None
-        self._task2: Optional[asyncio.Task] = None
-        self._tier1_tokens: Set[str] = set()
-        self._tier2_tokens: Set[str] = set()
-        self._client: Optional[httpx.AsyncClient] = None
+        self._task1: asyncio.Task | None = None
+        self._task2: asyncio.Task | None = None
+        self._tier1_tokens: set[str] = set()
+        self._tier2_tokens: set[str] = set()
+        self._client: httpx.AsyncClient | None = None
         self._base = settings.poly_clob_host.rstrip("/")
         self._success_count = 0
         self._error_count = 0
 
-    def set_tokens(self, token_ids: List[str]) -> None:
+    def set_tokens(self, token_ids: list[str]) -> None:
         """Assign first 15 to Tier 1, rest to Tier 2."""
         tokens = list(dict.fromkeys(token_ids))
         self._tier1_tokens = set(tokens[:15])
@@ -50,7 +49,7 @@ class BookPoller:
         log.info("[book_poller] Configured %d Tier-1 and %d Tier-2 tokens",
                  len(self._tier1_tokens), len(self._tier2_tokens))
 
-    def add_tokens(self, token_ids: List[str]) -> None:
+    def add_tokens(self, token_ids: list[str]) -> None:
         for tid in token_ids:
             if tid not in self._tier1_tokens and tid not in self._tier2_tokens:
                 if len(self._tier1_tokens) < 20:
@@ -58,7 +57,7 @@ class BookPoller:
                 else:
                     self._tier2_tokens.add(tid)
 
-    def prioritize_tokens(self, token_ids: List[str]) -> None:
+    def prioritize_tokens(self, token_ids: list[str]) -> None:
         """Promote specific tokens (e.g. quoted markets) to Tier 1."""
         for tid in token_ids:
             self._tier2_tokens.discard(tid)

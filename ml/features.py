@@ -39,7 +39,6 @@ from __future__ import annotations
 
 import datetime
 import math
-from typing import Optional
 
 import numpy as np
 
@@ -84,7 +83,7 @@ FEATURE_NAMES = [
 N_FEATURES = len(FEATURE_NAMES)
 
 
-def extract_features(market: dict, book: OrderBook) -> Optional[np.ndarray]:
+def extract_features(market: dict, book: OrderBook) -> np.ndarray | None:
     """
     Extract 32-dimensional normalized float32 feature array.
     """

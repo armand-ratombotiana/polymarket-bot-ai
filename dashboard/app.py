@@ -16,20 +16,18 @@ from __future__ import annotations
 
 import asyncio
 import time
-from typing import List
 
+from rich import box
 from rich.console import Console
 from rich.layout import Layout
 from rich.live import Live
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
-from rich import box
 
 from config import settings
-from core.data_store import Order, OrderStatus, Position, Side, store
+from core.data_store import Side, store
 from paper.simulator import paper_sim
-from risk.manager import risk_manager
 
 
 def _fmt_pnl(val: float) -> Text:

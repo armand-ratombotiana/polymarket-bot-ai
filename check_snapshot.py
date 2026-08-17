@@ -1,4 +1,5 @@
-import json, urllib.request, sys
+import json
+import urllib.request
 
 BASE = "http://localhost:8087"
 

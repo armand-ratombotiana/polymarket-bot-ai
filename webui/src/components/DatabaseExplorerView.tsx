@@ -2,7 +2,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { getApiUrl } from '@/lib/api'
+import { getApiUrl, apiFetch } from '@/lib/api'
 
 type TableName = 'market_snapshots' | 'orderbook_ticks' | 'fundamental_news' | 'ml_feature_store'
 
@@ -15,7 +15,7 @@ export default function DatabaseExplorerView() {
     setLoading(true)
     try {
       const apiUrl = getApiUrl()
-      const res = await fetch(`${apiUrl}/api/database/records?table=${table}&limit=30`)
+      const res = await apiFetch(`${apiUrl}/api/database/records?table=${table}&limit=30`)
       if (res.ok) {
         const json = await res.json()
         setRecords(json.records || [])

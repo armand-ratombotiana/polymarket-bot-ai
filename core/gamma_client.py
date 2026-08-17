@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 import httpx
 
@@ -20,7 +20,7 @@ class GammaClient:
 
     def __init__(self) -> None:
         self._base = settings.poly_gamma_host.rstrip("/")
-        self._client: Optional[httpx.AsyncClient] = None
+        self._client: httpx.AsyncClient | None = None
 
     async def _ensure_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
@@ -35,7 +35,7 @@ class GammaClient:
         if self._client and not self._client.is_closed:
             await self._client.aclose()
 
-    async def _get(self, path: str, params: Optional[Dict] = None) -> Any:
+    async def _get(self, path: str, params: dict | None = None) -> Any:
         client = await self._ensure_client()
         try:
             resp = await client.get(path, params=params or {})
@@ -56,9 +56,9 @@ class GammaClient:
         offset: int = 0,
         order: str = "volume24hr",
         ascending: bool = False,
-    ) -> List[Dict]:
+    ) -> list[dict]:
         """Fetch markets sorted by volume. Returns list of market dicts."""
-        params: Dict[str, Any] = {
+        params: dict[str, Any] = {
             "limit": limit,
             "offset": offset,
             "order": order,
@@ -74,11 +74,11 @@ class GammaClient:
             return data
         return data.get("data", data) if isinstance(data, dict) else []
 
-    async def get_market(self, condition_id: str) -> Dict:
+    async def get_market(self, condition_id: str) -> dict:
         """Fetch a single market by conditionId."""
         return await self._get(f"/markets/{condition_id}")
 
-    async def get_market_by_slug(self, slug: str) -> Optional[Dict]:
+    async def get_market_by_slug(self, slug: str) -> dict | None:
         """Search for a market by slug."""
         markets = await self.get_markets(limit=200)
         for m in markets:
@@ -86,7 +86,7 @@ class GammaClient:
                 return m
         return None
 
-    async def search_markets(self, query: str, limit: int = 20) -> List[Dict]:
+    async def search_markets(self, query: str, limit: int = 20) -> list[dict]:
         """Full-text search across market questions."""
         params = {"search": query, "limit": limit, "active": "true"}
         data = await self._get("/markets", params=params)
@@ -94,7 +94,7 @@ class GammaClient:
             return data
         return data.get("data", []) if isinstance(data, dict) else []
 
-    async def get_events(self, limit: int = 50) -> List[Dict]:
+    async def get_events(self, limit: int = 50) -> list[dict]:
         """Fetch active events (groups of related markets)."""
         params = {"limit": limit, "active": "true", "closed": "false"}
         data = await self._get("/events", params=params)
@@ -102,14 +102,14 @@ class GammaClient:
             return data
         return data.get("data", []) if isinstance(data, dict) else []
 
-    async def get_resolved_markets(self, limit: int = 30) -> List[Dict]:
+    async def get_resolved_markets(self, limit: int = 30) -> list[dict]:
         """Fetch recently resolved/closed markets."""
         return await self.get_markets(active=False, closed=True, limit=limit, order="updatedAt", ascending=False)
 
     # ── Universal Token & Outcome Parsers ─────────────────────────────────────
 
     @staticmethod
-    def extract_token_ids(market: Dict) -> List[str]:
+    def extract_token_ids(market: dict) -> list[str]:
         """
         Pull all token IDs from a market dict, handling tokens array,
         clobTokenIds JSON string, or clobTokenIds list.
@@ -137,7 +137,7 @@ class GammaClient:
         return []
 
     @staticmethod
-    def extract_binary_pair(market: Dict) -> Optional[Tuple[str, str]]:
+    def extract_binary_pair(market: dict) -> tuple[str, str] | None:
         """
         Extract (YES_token_id, NO_token_id) from a binary market.
         Returns None if market is not binary or tokens cannot be determined.

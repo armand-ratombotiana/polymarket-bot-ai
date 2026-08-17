@@ -8,8 +8,6 @@ from __future__ import annotations
 
 import logging
 import math
-import time
-from typing import Any, Dict, List, Optional
 
 import numpy as np
 
@@ -32,8 +30,8 @@ class BacktestResult:
         total_trades: int,
         winning_trades: int,
         losing_trades: int,
-        equity_curve: List[Dict[str, float]],
-        monthly_returns: Dict[str, float],
+        equity_curve: list[dict[str, float]],
+        monthly_returns: dict[str, float],
     ) -> None:
         self.strategy_id = strategy_id
         self.initial_capital = initial_capital
@@ -68,12 +66,17 @@ class BacktestResult:
             "losing_trades": self.losing_trades,
             "equity_curve": self.equity_curve,
             "monthly_returns": self.monthly_returns,
+            "synthetic": True,
+            "synthetic_kind": "monte_carlo_archetype",
+            "disclaimer": "Synthetic Monte-Carlo archetype simulation — not recorded market history",
         }
 
 
 class BacktestEngine:
     """
-    Simulates quantitative strategies over synthetic and recorded prediction market tick sequences.
+    SYNTHETIC simulation engine: runs archetype Monte-Carlo paths for any
+    strategy id. Results are explicitly labeled synthetic until a recorded
+    history replay harness exists (M8, P2-SIM-01).
     """
 
     def run_backtest(
@@ -92,8 +95,8 @@ class BacktestEngine:
         peak_equity = initial_capital
         max_dd = 0.0
 
-        equity_curve: List[Dict[str, float]] = [{"step": 0, "equity": capital, "drawdown": 0.0}]
-        returns: List[float] = []
+        equity_curve: list[dict[str, float]] = [{"step": 0, "equity": capital, "drawdown": 0.0}]
+        returns: list[float] = []
 
         total_trades = 0
         winning_trades = 0
@@ -151,11 +154,9 @@ class BacktestEngine:
             ret = step_pnl / max(capital, 1.0)
             returns.append(ret)
 
-            if capital > peak_equity:
-                peak_equity = capital
+            peak_equity = max(peak_equity, capital)
             dd = (peak_equity - capital) / peak_equity * 100.0
-            if dd > max_dd:
-                max_dd = dd
+            max_dd = max(max_dd, dd)
 
             if t % 6 == 0 or t == n_steps:
                 equity_curve.append({

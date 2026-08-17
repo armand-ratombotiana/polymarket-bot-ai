@@ -14,7 +14,6 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass
-from typing import Dict, List, Optional
 
 from config import settings
 from core.book_poller import book_poller
@@ -59,9 +58,9 @@ class SignalTraderStrategy(BaseStrategy):
         super().__init__()
         self._min_confidence = max(0.55, settings.signal_min_confidence)
         self._base_order_size = settings.signal_order_size_usdc
-        self._active_signals: Dict[str, str] = {}
-        self._feature_cache: Dict[str, object] = {}
-        self._market_cache: Dict[str, dict] = {}
+        self._active_signals: dict[str, str] = {}
+        self._feature_cache: dict[str, object] = {}
+        self._market_cache: dict[str, dict] = {}
         self._last_model_save = time.time()
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
@@ -88,7 +87,7 @@ class SignalTraderStrategy(BaseStrategy):
     async def _scan_markets(self) -> None:
         await self._recycle_stale_orders()
         markets = await gamma_client.get_markets(active=True, limit=40, order="volume24hr")
-        signals: List[MarketSignal] = []
+        signals: list[MarketSignal] = []
 
         for mkt in markets:
             try:
@@ -106,7 +105,7 @@ class SignalTraderStrategy(BaseStrategy):
         for sig in signals[:2]:
             await self._act_on_signal(sig)
 
-    async def _evaluate_market(self, mkt: dict) -> Optional[MarketSignal]:
+    async def _evaluate_market(self, mkt: dict) -> MarketSignal | None:
         token_ids = gamma_client.extract_token_ids(mkt)
         if not token_ids:
             return None
@@ -132,7 +131,7 @@ class SignalTraderStrategy(BaseStrategy):
 
     def _ml_signal(
         self, token_id: str, slug: str, mkt: dict, book: OrderBook, features
-    ) -> Optional[MarketSignal]:
+    ) -> MarketSignal | None:
         p_yes, confidence = ml_model.predict(features)
 
         if confidence < self._min_confidence:

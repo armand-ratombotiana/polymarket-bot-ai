@@ -1,14 +1,16 @@
 // components/Header.tsx — Polymarket Pro Workstation Navigation Bar
 'use client'
 
+import { useState } from 'react'
 import { ConnectionStatus } from '@/hooks/useBot'
+import { getApiToken } from '@/lib/api'
 
 export type ActiveTab = 'terminal' | 'strategies' | 'aiml' | 'arbitrage' | 'analysis' | 'backtest' | 'database' | 'copilot' | 'screener' | 'health'
 
 interface HeaderProps {
   activeTab: ActiveTab
   onTabChange: (tab: ActiveTab) => void
-  mode: 'paper' | 'live'
+  mode: 'paper' | 'shadow' | 'live'
   killSwitch: boolean
   dailyPnl: number
   paperBalance: number | null
@@ -41,6 +43,20 @@ export default function Header({
   strategies, status, onKillSwitch, onDeactivate, onCancelAll, onOpenConfig, onOpenShortcuts,
   muted, onToggleMute, uptime,
 }: HeaderProps) {
+  const [tokenDraft, setTokenDraft] = useState('')
+  const [tokenSet, setTokenSet] = useState(Boolean(getApiToken()))
+
+  const saveToken = () => {
+    const value = tokenDraft.trim()
+    if (typeof window !== 'undefined') {
+      if (value) window.localStorage.setItem('polymarket_api_token', value)
+      else window.localStorage.removeItem('polymarket_api_token')
+    }
+    setTokenSet(Boolean(value))
+    setTokenDraft('')
+    if (value) window.location.reload()
+  }
+
   const navTabs: Array<{ id: ActiveTab; label: string; icon: string; badge?: string }> = [
     { id: 'terminal', label: 'Trading Desk', icon: '📊' },
     { id: 'arbitrage', label: 'Arb Matrix', icon: '⚡', badge: '1-Click' },
@@ -95,8 +111,8 @@ export default function Header({
       </div>
 
       {/* Mode badge */}
-      <span className={`badge shrink-0 ${mode === 'paper' ? 'badge-amber' : 'badge-red'}`}>
-        {mode === 'paper' ? '📄 Paper' : '⚡ Live'}
+      <span className={`badge shrink-0 ${mode === 'live' ? 'badge-red' : mode === 'shadow' ? 'badge-cyan' : 'badge-amber'}`}>
+        {mode === 'live' ? '⚡ Live' : mode === 'shadow' ? '👁 Shadow' : '📄 Paper'}
       </span>
 
       {/* Connection status */}
@@ -137,6 +153,31 @@ export default function Header({
 
       {/* Audio & Shortcuts Actions */}
       <div className="flex items-center gap-1.5 shrink-0">
+        {tokenSet ? (
+          <button
+            onClick={() => { if (typeof window !== 'undefined') window.localStorage.removeItem('polymarket_api_token'); window.location.reload() }}
+            className="btn btn-ghost text-[#8b91a8] hover:text-white text-xs px-2 py-1"
+            title="API token set — click to clear and reload"
+          >
+            🔑
+          </button>
+        ) : (
+          <form
+            className="hidden lg:flex items-center gap-1 shrink-0"
+            onSubmit={(e) => { e.preventDefault(); saveToken() }}
+          >
+            <input
+              type="password"
+              value={tokenDraft}
+              onChange={(e) => setTokenDraft(e.target.value)}
+              placeholder="API token"
+              className="bg-[#161822] border border-[#252836] rounded px-2 py-1 text-[11px] text-[#e8eaf0] placeholder-[#4a5068] w-28 focus:border-blue-500 outline-none"
+            />
+            <button type="submit" className="btn btn-ghost text-blue-400 text-xs px-2 py-1" title="Save API token">
+              🔑 Set
+            </button>
+          </form>
+        )}
         {onToggleMute && (
           <button
             onClick={onToggleMute}

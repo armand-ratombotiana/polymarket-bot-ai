@@ -14,13 +14,11 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import sys
-from typing import Optional
 
 import typer
+from rich import box
 from rich.console import Console
 from rich.table import Table
-from rich import box
 
 # ── Bootstrap logging before importing project modules ────────────────────────
 logging.basicConfig(
@@ -61,6 +59,16 @@ async def _startup(force_paper: bool = False) -> None:
 
     if force_paper:
         settings.paper_trade = True   # type: ignore[attr-defined]
+        settings.trading_mode = "paper"
+
+    # Live-mode guard (P0-GOV-01): live requires explicit double authorization.
+    if not settings.paper_trade:
+        if not settings.live_trading_enabled:
+            console.print("[red]❌ LIVE trading is not enabled — set LIVE_TRADING_ENABLED=true explicitly to authorize real funds.[/red]")
+            raise typer.Exit(1)
+        if not settings.has_credentials:
+            console.print("[red]❌ No wallet credentials configured (POLY_PRIVATE_KEY). Refusing to run live.[/red]")
+            raise typer.Exit(1)
 
     # Set log level from config
     logging.getLogger().setLevel(settings.log_level)
@@ -100,9 +108,9 @@ async def _startup(force_paper: bool = False) -> None:
 
 async def _shutdown(strategies: list) -> None:
     """Gracefully stop all components."""
+    from config import settings
     from core.ws_client import ws_client
     from paper.simulator import paper_sim
-    from config import settings
 
     for s in strategies:
         await s.stop()
@@ -125,10 +133,10 @@ def run(
 
 async def _run_async(force_paper: bool = False) -> None:
     from config import settings
-    from strategies.market_maker import MarketMakerStrategy
-    from strategies.arb_scanner import ArbScannerStrategy
-    from strategies.signal_trader import SignalTraderStrategy
     from dashboard.app import Dashboard
+    from strategies.arb_scanner import ArbScannerStrategy
+    from strategies.market_maker import MarketMakerStrategy
+    from strategies.signal_trader import SignalTraderStrategy
 
     await _startup(force_paper)
 
@@ -172,13 +180,13 @@ def paper() -> None:
 @app.command()
 def markets(
     limit: int = typer.Option(20, "--limit", "-n", help="Number of markets to list"),
-    search: Optional[str] = typer.Option(None, "--search", "-s", help="Search query"),
+    search: str | None = typer.Option(None, "--search", "-s", help="Search query"),
 ) -> None:
     """List active Polymarket markets. Does not require credentials."""
     asyncio.run(_list_markets(limit=limit, search=search))
 
 
-async def _list_markets(limit: int, search: Optional[str]) -> None:
+async def _list_markets(limit: int, search: str | None) -> None:
     from core.gamma_client import gamma_client
 
     console.print("[cyan]Fetching markets from Gamma API…[/cyan]")
@@ -252,8 +260,8 @@ def status() -> None:
 
 
 async def _status_async() -> None:
-    from risk.manager import risk_manager
     from core.data_store import store
+    from risk.manager import risk_manager
 
     report = await risk_manager.status_report()
 
@@ -264,7 +272,7 @@ async def _status_async() -> None:
 
     console.print(f"\n[bold]Open Orders:[/bold] {len(store.open_orders)}")
     console.print(f"[bold]Positions:[/bold] {len(store.positions)}")
-    console.print(f"[bold]Daily P&L:[/bold] ", _fmt_pnl(store.daily_pnl))
+    console.print("[bold]Daily P&L:[/bold] ", _fmt_pnl(store.daily_pnl))
 
 
 def _fmt_pnl(v: float) -> str:
@@ -286,6 +294,7 @@ def serve(
         os.environ["PAPER_TRADE"] = "true"
 
     import uvicorn
+
     # Apply configured log level (serve() doesn't go through _startup()).
     from config import settings
     log_level = settings.log_level.lower()

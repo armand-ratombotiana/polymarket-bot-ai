@@ -13,10 +13,7 @@ Exposure is never reported as one ambiguous number. It is decomposed into:
 """
 from __future__ import annotations
 
-import time
-from typing import Dict, List
-
-from core.data_store import Position, Side, Trade, store
+from core.data_store import Side, store
 
 # ── Exposure decomposition (mandate section 2) ──────────────────────────────
 
@@ -26,7 +23,6 @@ def compute_exposure(book_provider=None) -> dict:
     token_id -> OrderBook used for gross market value; without it we use cost
     basis (average entry) as the mark.
     """
-    now = time.time()
     positions = [p for p in store.positions.values() if p.current_exposure > 0.001]
 
     capital_invested = sum(p.total_invested for p in positions)
@@ -44,13 +40,13 @@ def compute_exposure(book_provider=None) -> dict:
     )
 
     # Per correlated event group (market slug).
-    by_group: Dict[str, float] = {}
+    by_group: dict[str, float] = {}
     for p in positions:
         key = p.market_slug or "<unknown>"
         by_group[key] = by_group.get(key, 0.0) + p.current_exposure
 
     # Per strategy.
-    by_strategy: Dict[str, float] = {}
+    by_strategy: dict[str, float] = {}
     for p in positions:
         key = p.strategy or "<unknown>"
         by_strategy[key] = by_strategy.get(key, 0.0) + p.current_exposure
@@ -109,8 +105,7 @@ def compute_reconciliation(bankroll_ceiling: float = 200.0) -> dict:
         "sell_revenue": round(sell_revenue, 2),
     }
 
-    over = exp["maximum_remaining_loss"] - (bankroll_ceiling * 0.6)
-    findings: List[str] = []
+    findings: list[str] = []
     if exp["maximum_remaining_loss"] > bankroll_ceiling * 0.6:
         findings.append(
             f"Exposure ${exp['maximum_remaining_loss']:.2f} exceeds 60% of the ${bankroll_ceiling:.0f} "
@@ -145,7 +140,7 @@ def compute_reconciliation(bankroll_ceiling: float = 200.0) -> dict:
 
 # ── Per-strategy accounting & risk-adjusted score ──────────────────────────
 
-def _cumulative_series(pnls: List[float]) -> List[float]:
+def _cumulative_series(pnls: list[float]) -> list[float]:
     series, total = [], 0.0
     for p in pnls:
         total += p
@@ -153,7 +148,7 @@ def _cumulative_series(pnls: List[float]) -> List[float]:
     return series
 
 
-def _max_drawdown(series: List[float]) -> float:
+def _max_drawdown(series: list[float]) -> float:
     peak, mdd = float("-inf"), 0.0
     for v in series:
         peak = max(peak, v)
@@ -180,7 +175,6 @@ def strategy_stats(strategy: str) -> dict:
     )
 
     capital_exposed = sum(t.price * t.size for t in trades if t.side == Side.BUY)
-    sells_revenue = sum(t.price * t.size for t in trades if t.side == Side.SELL)
     positions = [p for p in store.positions.values() if p.strategy == strategy and p.current_exposure > 0.001]
     open_exposure = sum(p.current_exposure for p in positions)
     exposure_dollar_days = sum(p.exposure_dollar_days for p in positions)
@@ -192,7 +186,6 @@ def strategy_stats(strategy: str) -> dict:
     max_drawdown = _max_drawdown(series)
 
     # Fill / execution quality
-    filled_shares = sum(t.size for t in trades)
     notional = sum(t.price * t.size for t in trades)
 
     profit_per_dollar = (net_pnl / capital_exposed) if capital_exposed > 0 else 0.0

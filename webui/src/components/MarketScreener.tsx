@@ -2,7 +2,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { getApiUrl } from '@/lib/api'
+import { getApiUrl, apiFetch } from '@/lib/api'
 
 interface MarketItem {
   id?: string
@@ -33,7 +33,7 @@ export default function MarketScreener({ onSelectMarket, onQuickTrade }: Props) 
       const url = q
         ? `${apiUrl}/api/markets?search=${encodeURIComponent(q)}&limit=40`
         : `${apiUrl}/api/markets?limit=40`
-      const res = await fetch(url)
+      const res = await apiFetch(url)
       if (res.ok) {
         const data = await res.json()
         setMarkets(data.markets || [])

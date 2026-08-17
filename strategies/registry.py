@@ -9,7 +9,6 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Type
 
 from strategies.base import BaseStrategy
 
@@ -28,7 +27,7 @@ class StrategyMeta:
 
 # ── 50 Strategy Metadata Catalog ──────────────────────────────────────────────
 
-STRATEGY_CATALOG: List[StrategyMeta] = [
+STRATEGY_CATALOG: list[StrategyMeta] = [
     # ── Group A: Market Making & Liquidity Provision (8) ──
     StrategyMeta("mm_avellaneda_stoikov", "Avellaneda-Stoikov MM", "market_making", "Reservation price with inventory skewing & volatility bounds", "Medium", True),
     StrategyMeta("mm_glft_optimal", "GLFT Optimal Quoter", "market_making", "Gueant-Tapia-Manziadi intensity-based optimal quote spread", "Medium", False),
@@ -104,7 +103,7 @@ class QuantStrategyInstance(BaseStrategy):
         self.meta = meta
         self.name = meta.strategy_id
         self._interval = 5.0
-        self._active_orders: Dict[str, str] = {}
+        self._active_orders: dict[str, str] = {}
 
     async def _run(self) -> None:
         log.info("[strategy_hub] Started [%s] (%s)", self.meta.name, self.meta.category)
@@ -126,10 +125,10 @@ class StrategyRegistry:
     """
 
     def __init__(self) -> None:
-        self._catalog: Dict[str, StrategyMeta] = {s.strategy_id: s for s in STRATEGY_CATALOG}
-        self._instances: Dict[str, BaseStrategy] = {}
+        self._catalog: dict[str, StrategyMeta] = {s.strategy_id: s for s in STRATEGY_CATALOG}
+        self._instances: dict[str, BaseStrategy] = {}
 
-    def get_catalog(self) -> List[dict]:
+    def get_catalog(self) -> list[dict]:
         # Only the three concrete strategy classes actually execute a trading loop.
         # Everything else in the catalog is a metadata entry / no-op stub.
         implemented = {"mm_avellaneda_stoikov", "arb_binary_dutch_book", "ml_random_forest_quant"}
@@ -177,7 +176,7 @@ class StrategyRegistry:
             return True
         return False
 
-    def get_active_instances(self) -> Dict[str, BaseStrategy]:
+    def get_active_instances(self) -> dict[str, BaseStrategy]:
         return self._instances
 
 

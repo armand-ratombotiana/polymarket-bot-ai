@@ -22,3 +22,4 @@ revisit at the milestone shown; **DECIDED** = stakeholder value recorded (name +
 | Date | Gate | Action |
 |---|---|---|
 | 2026-08-17 | D1–D8 | Register created with defaults recorded (sprint 1, item 1) |
+| 2026-08-17 | D1–D8 | Sprint 1 completed under defaults; containment-only work, no gate forced. Evidence in `docs/SPRINT_1_REPORT.md`. Next checkpoint: D2 at M3. |

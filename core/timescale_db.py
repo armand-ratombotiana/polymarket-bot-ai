@@ -17,7 +17,7 @@ import os
 import sqlite3
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 import numpy as np
 
@@ -193,10 +193,10 @@ class TimescaleDBEngine:
         self,
         token_id: str,
         slug: str,
-        best_bid: Optional[float],
-        best_ask: Optional[float],
-        mid: Optional[float],
-        spread: Optional[float],
+        best_bid: float | None,
+        best_ask: float | None,
+        mid: float | None,
+        spread: float | None,
         volume_24h: float = 0.0,
         liquidity: float = 0.0,
     ) -> None:
@@ -277,7 +277,7 @@ class TimescaleDBEngine:
         source: str,
         category: str,
         sentiment: float,
-        matched_tokens: List[str],
+        matched_tokens: list[str],
     ) -> None:
         """Insert fundamental news item."""
         ts = time.time()
@@ -349,7 +349,7 @@ class TimescaleDBEngine:
                 pass
         await asyncio.to_thread(_insert_sqlite)
 
-    def fetch_training_samples(self, min_samples: int = 500) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+    def fetch_training_samples(self, min_samples: int = 500) -> tuple[np.ndarray | None, np.ndarray | None]:
         """Extract training samples for ML model from database."""
         try:
             with sqlite3.connect(self._sqlite_path) as conn:
@@ -376,7 +376,7 @@ class TimescaleDBEngine:
             log.warning("[timescale_db] Failed to fetch training samples: %s", e)
             return None, None
 
-    def get_stats(self) -> Dict[str, Any]:
+    def get_stats(self) -> dict[str, Any]:
         """Return database telemetry."""
         try:
             with sqlite3.connect(self._sqlite_path) as conn:
@@ -402,7 +402,7 @@ class TimescaleDBEngine:
                 "news_items_recorded": news_count,
                 "ml_feature_vectors": feat_count,
             }
-        except Exception as e:
+        except Exception:
             return {
                 "db_backend": "SQLite3 WAL",
                 "is_timescaledb": False,

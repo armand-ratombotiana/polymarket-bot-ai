@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Dict, List, Optional
 
 from core.data_store import store
 from ml.features import extract_features
@@ -26,9 +25,9 @@ class AICopilotEngine:
     """
 
     def __init__(self) -> None:
-        self._history: List[dict] = []
+        self._history: list[dict] = []
 
-    async def analyze_market(self, token_id: str, market_dict: Optional[dict] = None) -> dict:
+    async def analyze_market(self, token_id: str, market_dict: dict | None = None) -> dict:
         """
         Produce a comprehensive quant & fundamental briefing for a given market token.
         """

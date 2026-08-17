@@ -13,9 +13,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any, Dict, List, Optional
-
-import numpy as np
+from typing import Any
 
 from core.data_store import OrderBook, Side, store
 from core.fundamental_ingest import fundamental_engine
@@ -32,10 +30,10 @@ class DeepMarketAnalysisEngine:
     Multi-Factor Intelligence Engine evaluating prediction market efficiency.
     """
 
-    def analyze_market(self, token_id: str) -> Dict[str, Any]:
+    def analyze_market(self, token_id: str) -> dict[str, Any]:
         """Run complete 9-factor probabilistic and fundamental analysis for a given contract."""
         start_t = time.time()
-        book: Optional[OrderBook] = store.order_books.get(token_id)
+        book: OrderBook | None = store.order_books.get(token_id)
         slug = store.market_slugs.get(token_id, token_id[:18])
 
         if not book or not book.best_bid or not book.best_ask:
@@ -154,7 +152,7 @@ class DeepMarketAnalysisEngine:
             "generation_time_ms": round((time.time() - start_t) * 1000, 2),
         }
 
-    def get_top_ranked_opportunities(self, limit: int = 10) -> List[Dict[str, Any]]:
+    def get_top_ranked_opportunities(self, limit: int = 10) -> list[dict[str, Any]]:
         """Rank all active prediction markets by net expected alpha edge."""
         results = []
         for token_id in list(store.order_books.keys())[:50]:

@@ -12,10 +12,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import Dict, Optional
 
 from core.audit_logger import audit_logger
-from core.data_store import Position, store
+from core.data_store import store
 
 log = logging.getLogger(__name__)
 
@@ -36,7 +35,7 @@ class PositionManager:
     """
 
     def __init__(self) -> None:
-        self.managed_positions: Dict[str, ManagedPosition] = {}
+        self.managed_positions: dict[str, ManagedPosition] = {}
         self._running = False
 
     async def register_entry(self, token_id: str, entry_price: float) -> None:
@@ -66,8 +65,7 @@ class PositionManager:
                 managed = self.managed_positions[pos.token_id]
 
             # Update high water mark
-            if mid > managed.high_water_mark:
-                managed.high_water_mark = mid
+            managed.high_water_mark = max(managed.high_water_mark, mid)
 
             # Check Take-Profit Trigger
             if mid >= managed.take_profit_price:

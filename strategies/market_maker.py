@@ -17,13 +17,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Dict, List, Optional, Tuple
 
 from config import settings
 from core.clob_client import OrderArgs
-from core.data_store import Order, OrderStatus, Side, store
+from core.data_store import Side, store
 from core.gamma_client import gamma_client
-from core.ws_client import ws_client
 from strategies.base import BaseStrategy
 
 log = logging.getLogger(__name__)
@@ -49,13 +47,13 @@ class MarketMakerStrategy(BaseStrategy):
         self._gamma_risk_aversion: float = 0.08
 
         # token_id -> {side: order_id}
-        self._quotes: Dict[str, Dict[str, Optional[str]]] = {}
+        self._quotes: dict[str, dict[str, str | None]] = {}
         # token_id -> last mid we quoted at
-        self._last_mid: Dict[str, float] = {}
+        self._last_mid: dict[str, float] = {}
 
         # Markets we will quote
-        self._token_ids: List[str] = list(settings.mm_token_ids_list)
-        self._market_info: Dict[str, dict] = {}
+        self._token_ids: list[str] = list(settings.mm_token_ids_list)
+        self._market_info: dict[str, dict] = {}
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 

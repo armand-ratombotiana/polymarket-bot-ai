@@ -14,14 +14,13 @@ import math
 import os
 import re
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
 
 log = logging.getLogger(__name__)
 
 VECTOR_STORE_PATH = Path(os.environ.get("VECTOR_STORE_PATH", "/app/data/vector_index.json"))
 
 
-def _tokenize(text: str) -> List[str]:
+def _tokenize(text: str) -> list[str]:
     """Tokenize text into lowercase alphanumeric words + bigrams."""
     words = re.findall(r"\b[a-z0-9_]{2,}\b", text.lower())
     bigrams = [f"{words[i]}_{words[i+1]}" for i in range(len(words) - 1)]
@@ -34,9 +33,9 @@ class MarketVectorStore:
     """
 
     def __init__(self) -> None:
-        self.doc_vectors: Dict[str, Dict[str, float]] = {}  # token_id -> sparse tf-idf vector
-        self.doc_metadata: Dict[str, dict] = {}             # token_id -> market metadata
-        self.idf: Dict[str, float] = {}
+        self.doc_vectors: dict[str, dict[str, float]] = {}  # token_id -> sparse tf-idf vector
+        self.doc_metadata: dict[str, dict] = {}             # token_id -> market metadata
+        self.idf: dict[str, float] = {}
         self._doc_count = 0
 
     def add_market(self, token_id: str, market: dict) -> None:
@@ -52,7 +51,7 @@ class MarketVectorStore:
             return
 
         # Term frequency
-        tf: Dict[str, float] = {}
+        tf: dict[str, float] = {}
         for t in tokens:
             tf[t] = tf.get(t, 0.0) + 1.0
 
@@ -73,7 +72,7 @@ class MarketVectorStore:
 
     def build_index(self) -> None:
         """Compute Inverse Document Frequency (IDF) over all indexed markets."""
-        df: Dict[str, int] = {}
+        df: dict[str, int] = {}
         n = max(self._doc_count, 1)
 
         for vec in self.doc_vectors.values():
@@ -83,7 +82,7 @@ class MarketVectorStore:
         self.idf = {term: math.log((n + 1.0) / (count + 1.0)) + 1.0 for term, count in df.items()}
         log.info("[vector_store] Indexed %d markets with vocabulary size %d", self._doc_count, len(self.idf))
 
-    def search(self, query: str, top_k: int = 10) -> List[Tuple[dict, float]]:
+    def search(self, query: str, top_k: int = 10) -> list[tuple[dict, float]]:
         """
         Execute semantic similarity search for query text.
         Returns list of (market_metadata, similarity_score).
@@ -92,7 +91,7 @@ class MarketVectorStore:
         if not q_tokens or not self.doc_vectors:
             return []
 
-        q_tf: Dict[str, float] = {}
+        q_tf: dict[str, float] = {}
         for t in q_tokens:
             q_tf[t] = q_tf.get(t, 0.0) + 1.0
         q_len = len(q_tokens)
@@ -100,7 +99,7 @@ class MarketVectorStore:
 
         q_norm = math.sqrt(sum(v * v for v in q_vec.values())) or 1.0
 
-        scores: List[Tuple[dict, float]] = []
+        scores: list[tuple[dict, float]] = []
         for tid, doc_tf in self.doc_vectors.items():
             dot = 0.0
             doc_norm_sq = 0.0

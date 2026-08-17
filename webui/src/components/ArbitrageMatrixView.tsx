@@ -2,7 +2,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { getApiUrl } from '@/lib/api'
+import { getApiUrl, apiFetch } from '@/lib/api'
 import { formatHierarchicalMarket } from '@/lib/formatters'
 
 interface ArbOpportunity {
@@ -28,7 +28,7 @@ export default function ArbitrageMatrixView() {
   const fetchOpportunities = async () => {
     try {
       const apiUrl = getApiUrl()
-      const res = await fetch(`${apiUrl}/api/arbitrage/opportunities`)
+      const res = await apiFetch(`${apiUrl}/api/arbitrage/opportunities`)
       if (res.ok) {
         const data = await res.json()
         setOpportunities(data.opportunities || [])
@@ -47,7 +47,7 @@ export default function ArbitrageMatrixView() {
     setExecuting(opp.token_id_yes)
     try {
       const apiUrl = getApiUrl()
-      const res = await fetch(`${apiUrl}/api/arbitrage/execute`, {
+      const res = await apiFetch(`${apiUrl}/api/arbitrage/execute`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any, Dict, List
 
 from core.data_store import store
 
@@ -65,9 +64,9 @@ class ArbitrageScannerEngine:
     Real-time cross-contract arbitrage scanner.
     """
 
-    def scan_opportunities(self) -> List[ArbitrageOpportunity]:
+    def scan_opportunities(self) -> list[ArbitrageOpportunity]:
         """Scan active books for negative-risk arbitrage opportunities."""
-        opportunities: List[ArbitrageOpportunity] = []
+        opportunities: list[ArbitrageOpportunity] = []
         now = time.time()
 
         books = list(store.order_books.values())

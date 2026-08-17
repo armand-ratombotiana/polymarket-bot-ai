@@ -2,7 +2,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { getApiUrl } from '@/lib/api'
+import { getApiUrl, apiFetch } from '@/lib/api'
 
 interface Analytics {
   total_trades: number
@@ -22,7 +22,7 @@ export default function AnalyticsPanel() {
     const fetchAnalytics = async () => {
       try {
         const apiUrl = getApiUrl()
-        const res = await fetch(`${apiUrl}/api/analytics`)
+        const res = await apiFetch(`${apiUrl}/api/analytics`)
         if (res.ok) {
           setData(await res.json())
         }

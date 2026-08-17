@@ -19,7 +19,7 @@ import os
 import sqlite3
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 import numpy as np
 
@@ -111,10 +111,10 @@ class MarketIntelligenceDB:
         self,
         token_id: str,
         slug: str,
-        best_bid: Optional[float],
-        best_ask: Optional[float],
-        mid: Optional[float],
-        spread: Optional[float],
+        best_bid: float | None,
+        best_ask: float | None,
+        mid: float | None,
+        spread: float | None,
         volume_24h: float = 0.0,
         liquidity: float = 0.0,
     ) -> None:
@@ -172,7 +172,7 @@ class MarketIntelligenceDB:
         source: str,
         category: str,
         sentiment: float,
-        matched_tokens: List[str],
+        matched_tokens: list[str],
     ) -> None:
         """Insert fundamental news item."""
         ts = time.time()
@@ -222,7 +222,7 @@ class MarketIntelligenceDB:
 
         await asyncio.to_thread(_insert)
 
-    def fetch_training_samples(self, min_samples: int = 500) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+    def fetch_training_samples(self, min_samples: int = 500) -> tuple[np.ndarray | None, np.ndarray | None]:
         """
         Extract captured feature vectors and inferred resolution labels from the database for ML training.
         """
@@ -254,7 +254,7 @@ class MarketIntelligenceDB:
             log.warning("[market_db] Failed to fetch training samples from DB: %s", e)
             return None, None
 
-    def get_stats(self) -> Dict[str, Any]:
+    def get_stats(self) -> dict[str, Any]:
         """Return database table row counts and disk size."""
         try:
             with sqlite3.connect(self._db_path) as conn:

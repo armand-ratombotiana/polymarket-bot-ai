@@ -2,7 +2,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { getApiUrl } from '@/lib/api'
+import { getApiUrl, apiFetch } from '@/lib/api'
 
 interface DepthLevel {
   price: number
@@ -41,7 +41,7 @@ export default function DepthChartModal({ tokenId, slug, onClose, onOrderPlaced 
     const fetchDepth = async () => {
       try {
         const apiUrl = getApiUrl()
-        const res = await fetch(`${apiUrl}/api/depth/${tokenId}`)
+        const res = await apiFetch(`${apiUrl}/api/depth/${tokenId}`)
         if (res.ok) {
           const json = await res.json()
           setData(json)
@@ -63,7 +63,7 @@ export default function DepthChartModal({ tokenId, slug, onClose, onOrderPlaced 
     setFeedback(null)
     try {
       const apiUrl = getApiUrl()
-      const res = await fetch(`${apiUrl}/api/trade`, {
+      const res = await apiFetch(`${apiUrl}/api/trade`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

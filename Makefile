@@ -7,7 +7,7 @@ API_PORT   := 8080
 UI_PORT    := 3010
 
 .PHONY: help build build-bot build-ui up live down logs cancel status lint \
-        lint-bot lint-ui shell-bot shell-ui clean
+        lint-bot lint-ui test shell-bot shell-ui clean
 
 help:
 	@echo ""
@@ -21,6 +21,7 @@ help:
 	@echo "  make cancel       Emergency: cancel ALL open orders"
 	@echo "  make status       Print risk status from running bot"
 	@echo "  make lint         Run all linters (Python + TypeScript)"
+	@echo "  make test         Run Python test suite (pytest) in .venv"
 	@echo "  make shell-bot    Open bash in the bot container"
 	@echo "  make shell-ui     Open sh in the webui container"
 	@echo "  make clean        Remove containers and images"
@@ -68,7 +69,7 @@ cancel:
 status:
 	curl -s http://localhost:$(API_PORT)/api/status | python -m json.tool
 
-# ── Lint ──────────────────────────────────────────────────────────────────────
+# ── Lint & Test ───────────────────────────────────────────────────────────────
 
 lint: lint-bot lint-ui
 
@@ -76,7 +77,11 @@ lint-bot:
 	python -m compileall -q \
 	  config.py main.py watchdog.py \
 	  core ml strategies risk paper api dashboard backtesting execution
+	ruff check config.py main.py watchdog.py core ml strategies risk paper api dashboard backtesting execution tests
 	@echo "✅ Python: no syntax errors"
+
+test:
+	.venv/Scripts/python.exe -m pytest
 
 lint-ui:
 	cd webui && npm run build -- --no-lint 2>&1 | tail -5

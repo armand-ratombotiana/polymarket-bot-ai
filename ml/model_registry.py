@@ -11,7 +11,7 @@ import logging
 import os
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 log = logging.getLogger(__name__)
 
@@ -29,7 +29,7 @@ class ModelVersionRecord:
         sharpe_ratio: float,
         status: str,
         n_samples: int,
-        parameters: Dict[str, Any],
+        parameters: dict[str, Any],
     ) -> None:
         self.version = version
         self.created_at = created_at
@@ -61,7 +61,7 @@ class ModelRegistry:
     """
 
     def __init__(self) -> None:
-        self.versions: List[ModelVersionRecord] = []
+        self.versions: list[ModelVersionRecord] = []
         self.active_version: str = "v1.0.0"
         self._load_from_disk()
 
@@ -73,7 +73,7 @@ class ModelRegistry:
         ece: float,
         sharpe_ratio: float,
         n_samples: int,
-        parameters: Dict[str, Any],
+        parameters: dict[str, Any],
     ) -> bool:
         """
         Validate model benchmarks and register new version.
@@ -107,7 +107,7 @@ class ModelRegistry:
         self._save_to_disk()
         return promoted
 
-    def get_summary(self) -> Dict[str, Any]:
+    def get_summary(self) -> dict[str, Any]:
         return {
             "active_version": self.active_version,
             "total_registered": len(self.versions),

@@ -12,7 +12,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import Optional
 
 from ml.drift_detector import drift_detector
 from ml.model import ml_model
@@ -31,7 +30,7 @@ class ContinuousTrainingOrchestrator:
 
     def __init__(self) -> None:
         self._running = False
-        self._task: Optional[asyncio.Task] = None
+        self._task: asyncio.Task | None = None
         self._last_retrain_time = time.time()
         self._retrain_count = 0
 

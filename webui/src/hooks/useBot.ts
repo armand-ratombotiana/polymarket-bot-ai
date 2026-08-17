@@ -3,7 +3,7 @@
 'use client'
 
 import { useEffect, useRef, useState, useCallback } from 'react'
-import { getApiUrl, getWsUrl } from '@/lib/api'
+import { getApiUrl, getAuthedWsUrl, authHeaders } from '@/lib/api'
 
 export interface OrderBook {
   token_id: string
@@ -98,7 +98,7 @@ export function useBot() {
   const fetchRestSnapshot = useCallback(async () => {
     const apiUrl = getApiUrl()
     try {
-      const res = await fetch(`${apiUrl}/api/snapshot`)
+      const res = await fetch(`${apiUrl}/api/snapshot`, { headers: authHeaders() })
       if (res.ok) {
         const data = await res.json()
         setSnapshot(data)
@@ -111,12 +111,12 @@ export function useBot() {
       // If /api/snapshot is not yet available, fallback to composite fetch
       try {
         const [booksRes, statusRes, eventsRes, ordersRes, posRes, tradesRes] = await Promise.all([
-          fetch(`${apiUrl}/api/orderbooks`).catch(() => null),
-          fetch(`${apiUrl}/api/status`).catch(() => null),
-          fetch(`${apiUrl}/api/events`).catch(() => null),
-          fetch(`${apiUrl}/api/orders`).catch(() => null),
-          fetch(`${apiUrl}/api/positions`).catch(() => null),
-          fetch(`${apiUrl}/api/trades`).catch(() => null),
+          fetch(`${apiUrl}/api/orderbooks`, { headers: authHeaders() }).catch(() => null),
+          fetch(`${apiUrl}/api/status`, { headers: authHeaders() }).catch(() => null),
+          fetch(`${apiUrl}/api/events`, { headers: authHeaders() }).catch(() => null),
+          fetch(`${apiUrl}/api/orders`, { headers: authHeaders() }).catch(() => null),
+          fetch(`${apiUrl}/api/positions`, { headers: authHeaders() }).catch(() => null),
+          fetch(`${apiUrl}/api/trades`, { headers: authHeaders() }).catch(() => null),
         ])
 
         const booksData = booksRes?.ok ? await booksRes.json() : { order_books: [] }
@@ -160,7 +160,7 @@ export function useBot() {
       return
     }
 
-    const wsUrl = getWsUrl()
+    const wsUrl = getAuthedWsUrl()
     try {
       const ws = new WebSocket(wsUrl)
       wsRef.current = ws
@@ -222,25 +222,25 @@ export function useBot() {
   // Actions
   const activateKillSwitch = async () => {
     const apiUrl = getApiUrl()
-    await fetch(`${apiUrl}/api/kill-switch/activate`, { method: 'POST' }).catch(() => {})
+    await fetch(`${apiUrl}/api/kill-switch/activate`, { method: 'POST', headers: authHeaders() }).catch(() => {})
     fetchRestSnapshot()
   }
 
   const deactivateKillSwitch = async () => {
     const apiUrl = getApiUrl()
-    await fetch(`${apiUrl}/api/kill-switch/deactivate`, { method: 'POST' }).catch(() => {})
+    await fetch(`${apiUrl}/api/kill-switch/deactivate`, { method: 'POST', headers: authHeaders() }).catch(() => {})
     fetchRestSnapshot()
   }
 
   const cancelAllOrders = async () => {
     const apiUrl = getApiUrl()
-    await fetch(`${apiUrl}/api/orders`, { method: 'DELETE' }).catch(() => {})
+    await fetch(`${apiUrl}/api/orders`, { method: 'DELETE', headers: authHeaders() }).catch(() => {})
     fetchRestSnapshot()
   }
 
   const cancelOrder = async (orderId: string) => {
     const apiUrl = getApiUrl()
-    await fetch(`${apiUrl}/api/orders/${orderId}`, { method: 'DELETE' }).catch(() => {})
+    await fetch(`${apiUrl}/api/orders/${orderId}`, { method: 'DELETE', headers: authHeaders() }).catch(() => {})
     fetchRestSnapshot()
   }
 

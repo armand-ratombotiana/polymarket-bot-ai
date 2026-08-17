@@ -7,29 +7,33 @@ Covers:
   - Phase 3: AI/ML 32-Feature Extraction & Calibrated Inference
   - Phase 2: Execution Engine & Backtesting Simulation
 """
-import asyncio
 import os
 import sys
 import time
 import unittest
+
 import numpy as np
 
 # Adjust path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from core.data_store import BANKROLL_BASELINE, Order, OrderBook, OrderStatus, Position, PriceLevel, Side, store
+from backtesting.engine import BacktestEngine
+from core.data_store import (
+    BANKROLL_BASELINE,
+    Order,
+    OrderBook,
+    Position,
+    PriceLevel,
+    Side,
+    store,
+)
 from core.market_db import MarketIntelligenceDB
-from ml.features import extract_features, FEATURE_NAMES, N_FEATURES
+from ml.features import N_FEATURES, extract_features
 from ml.model import MarketMLModel
-from ml.model_registry import ModelRegistry
 from risk.manager import (
     InstitutionalRiskEngine,
-    BANKROLL_CEILING,
-    MAX_DEPLOYABLE_CAPITAL,
-    DAILY_LOSS_STOP,
     recognized_operating_capital,
 )
-from backtesting.engine import BacktestEngine
 
 
 class TestInstitutionalSuite(unittest.IsolatedAsyncioTestCase):
@@ -133,8 +137,8 @@ class TestInstitutionalSuite(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Strategy exposure cap exceeded", reason)
 
     async def test_02_daily_loss_circuit_breaker(self):
-        """Test that breaching the $4.00 daily loss stop halts trading."""
-        store.daily_pnl = -6.00  # Breached $4.00 stop
+        """Test that breaching the $2.00 daily loss stop halts trading."""
+        store.daily_pnl = -6.00  # Breached $2.00 stop
 
         order = Order(
             order_id="test-3",
@@ -261,7 +265,7 @@ class TestInstitutionalSuite(unittest.IsolatedAsyncioTestCase):
 
         slices = smart_router.generate_twap_schedule(total_size_usdc=500.0, price=0.52, duration_seconds=120, num_slices=4)
         self.assertEqual(len(slices), 4)
-        total_sliced = sum(s.size_usdc for s in slices)
+        _ = sum(s.size_usdc for s in slices)
     async def test_09_market_discovery_coverage(self):
         """Test universal catalog pagination, indexing, and coverage report generation."""
         from core.market_discovery import UniversalMarketDiscoveryEngine
@@ -289,12 +293,15 @@ class TestInstitutionalSuite(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(report["coverage_percentage"], 66.67, places=1)
         self.assertIsInstance(discovery.get_full_catalog(), list)
 
-    async def test_10_global_fundamental_news_100k_sources(self):
-        """Test 100,000+ source directory, deduplication, NLP sentiment, and stats."""
+    async def test_10_global_fundamental_news_source_catalog(self):
+        """Test source catalog honesty, deduplication, NLP sentiment, and stats."""
         from core.fundamental_ingest import fundamental_engine
         catalog = fundamental_engine.get_source_catalog()
-        self.assertGreater(catalog["total_sources_supported"], 100000)
+        # Honest counts: GDELT is config-only (not connected) → zero sources.
         self.assertIn("gdelt_global_network", catalog["source_tiers"])
+        self.assertFalse(catalog["gdelt_connected"])
+        self.assertEqual(catalog["gdelt_global_network_count"], 0)
+        self.assertLess(catalog["total_sources_supported"], 1000)
         self.assertGreater(catalog["curated_wires_count"], 20)
 
         # Test ingestion with SHA-256 deduplication
@@ -308,7 +315,9 @@ class TestInstitutionalSuite(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(item2)
 
         stats = fundamental_engine.get_news_stats()
-        self.assertGreater(stats["sources_indexed"], 100000)
+        # sources_indexed = distinct sources actually present — never a fabricated constant
+        self.assertGreaterEqual(stats["sources_indexed"], 1)
+        self.assertLess(stats["sources_indexed"], 1000)
         self.assertIn("bullish", stats["sentiment_distribution"])
 
     async def test_11_accounting_reconciliation(self):
@@ -341,7 +350,11 @@ class TestInstitutionalSuite(unittest.IsolatedAsyncioTestCase):
 
     async def test_12_portfolio_exposure_reconciliation_and_leaderboard(self):
         """Exposure decomposition, reconciliation verdict, and strategy ranking."""
-        from core.portfolio import compute_exposure, compute_reconciliation, leaderboard, strategy_stats
+        from core.portfolio import (
+            compute_exposure,
+            compute_reconciliation,
+            leaderboard,
+        )
 
         store.daily_pnl = 0.0
         store.paper_balance = BANKROLL_BASELINE

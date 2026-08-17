@@ -2,7 +2,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { getApiUrl } from '@/lib/api'
+import { getApiUrl, apiFetch } from '@/lib/api'
 
 interface ReliabilityBin {
   bin_center: number
@@ -53,9 +53,9 @@ export default function AIMLCommandCenter() {
     try {
       const apiUrl = getApiUrl()
       const [resM, resR, resD] = await Promise.all([
-        fetch(`${apiUrl}/api/ml/metrics`),
-        fetch(`${apiUrl}/api/ml/registry`),
-        fetch(`${apiUrl}/api/ml/drift`),
+        apiFetch(`${apiUrl}/api/ml/metrics`),
+        apiFetch(`${apiUrl}/api/ml/registry`),
+        apiFetch(`${apiUrl}/api/ml/drift`),
       ])
       if (resM.ok) setMetrics(await resM.json())
       if (resR.ok) setRegistry(await resR.json())
@@ -73,7 +73,7 @@ export default function AIMLCommandCenter() {
     setRetraining(true)
     try {
       const apiUrl = getApiUrl()
-      await fetch(`${apiUrl}/api/ml/retrain`, { method: 'POST' })
+      await apiFetch(`${apiUrl}/api/ml/retrain`, { method: 'POST' })
       await fetchData()
     } catch {}
     setRetraining(false)
@@ -85,7 +85,7 @@ export default function AIMLCommandCenter() {
     setSearching(true)
     try {
       const apiUrl = getApiUrl()
-      const res = await fetch(`${apiUrl}/api/ai/search?query=${encodeURIComponent(searchQuery)}&top_k=6`)
+      const res = await apiFetch(`${apiUrl}/api/ai/search?query=${encodeURIComponent(searchQuery)}&top_k=6`)
       if (res.ok) {
         const json = await res.json()
         setSearchResults(json.results || [])
