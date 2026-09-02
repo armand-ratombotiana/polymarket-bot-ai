@@ -99,42 +99,44 @@ export default function SystemHealthView() {
 
       {/* KPI Cards */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-2.5">
-        <div className="bg-[#0e1015] p-3 rounded-lg border border-[#1f2335]">
-          <span className="text-[10px] text-[#7e8aaa] block font-medium uppercase">Poller Success Rate</span>
-          <span className="mono text-base font-bold text-green-400">
+        <div className="kpi-card">
+          <span className="kpi-label">Poller Success Rate</span>
+          <span className="kpi-value text-green-400">
             {health.poller.success_rate}%
           </span>
-          <span className="text-[9.5px] text-[#7e8aaa] block mt-0.5">
-            {health.poller.total_tracked} books ({health.poller.latency_ms}ms avg)
+          <span className="kpi-sub">
+            {health.poller.total_tracked} books · {health.poller.latency_ms}ms avg
           </span>
         </div>
 
-        <div className="bg-[#0e1015] p-3 rounded-lg border border-[#1f2335]">
-          <span className="text-[10px] text-[#7e8aaa] block font-medium uppercase">Market DB Size</span>
-          <span className="mono text-base font-bold text-cyan-400">
+        <div className="kpi-card">
+          <span className="kpi-label">Market DB Size</span>
+          <span className="kpi-value text-cyan-400">
             {health.market_db ? `${health.market_db.size_mb} MB` : 'Buffered'}
           </span>
-          <span className="text-[9.5px] text-[#7e8aaa] block mt-0.5">
-            {health.market_db ? `${health.market_db.snapshots_recorded} snaps, ${health.market_db.ticks_recorded} ticks` : 'In-memory state'}
+          <span className="kpi-sub">
+            {health.market_db
+              ? `${health.market_db.snapshots_recorded.toLocaleString()} snaps · ${health.market_db.ticks_recorded.toLocaleString()} ticks`
+              : 'In-memory state'}
           </span>
         </div>
 
-        <div className="bg-[#0e1015] p-3 rounded-lg border border-[#1f2335]">
-          <span className="text-[10px] text-[#7e8aaa] block font-medium uppercase">Model Drift PSI</span>
-          <span className="mono text-base font-bold text-blue-400">
+        <div className="kpi-card">
+          <span className="kpi-label">Model Drift PSI</span>
+          <span className="kpi-value text-blue-400">
             {health.ml_engine.psi_drift.toFixed(4)}
           </span>
-          <span className="text-[9.5px] text-green-400 block mt-0.5">
-            Status: {health.ml_engine.drift_status}
+          <span className="kpi-sub text-green-400">
+            {health.ml_engine.drift_status}
           </span>
         </div>
 
-        <div className="bg-[#0e1015] p-3 rounded-lg border border-[#1f2335]">
-          <span className="text-[10px] text-[#7e8aaa] block font-medium uppercase">Feature Store Vectors</span>
-          <span className="mono text-base font-bold text-amber-400">
-            {health.market_db ? health.market_db.ml_feature_vectors : 0}
+        <div className="kpi-card">
+          <span className="kpi-label">Feature Store Vectors</span>
+          <span className="kpi-value text-amber-400">
+            {health.market_db ? health.market_db.ml_feature_vectors.toLocaleString() : 0}
           </span>
-          <span className="text-[9.5px] text-[#7e8aaa] block mt-0.5">32-feature shape</span>
+          <span className="kpi-sub">38-dimensional shape</span>
         </div>
       </div>
 

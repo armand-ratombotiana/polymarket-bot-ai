@@ -145,12 +145,35 @@ class DeepMarketAnalysisEngine:
             best_ask_sz = book.asks[0].size if book.asks else 0.0
             ofi = (best_bid_sz - best_ask_sz) / max(best_bid_sz + best_ask_sz, 1.0)
 
-            # Compute Opportunity Alpha Score
+            # ML probability edge — primary alpha signal (40 pts weight)
+            ml_edge = 0.0
+            try:
+                from ml.features import extract_features
+                from ml.model import ml_model
+                # Use minimal market dict; volume/liquidity fallback to 0 clips gracefully
+                feats = extract_features(
+                    {"slug": slug, "volume24hr": 0.0, "volume": 0.0, "liquidity": 0.0},
+                    book,
+                )
+                if feats is not None and ml_model.is_fitted:
+                    p_ml, ml_conf = ml_model.predict(feats, token_id=book.token_id)
+                    ml_edge = abs(p_ml - mid) * ml_conf
+            except Exception:
+                ml_edge = 0.0
+
+            # Spread quality: tight spreads are tradeable; penalise very wide spreads
+            spread_quality = max(0.0, 1.0 - spread / 0.05)
+
+            # Composite Alpha Score:
+            #   ML edge   40 pts  — model conviction relative to market price
+            #   OFI       25 pts  — microstructure pressure
+            #   Sentiment 20 pts  — fundamental signal alignment
+            #   Spread     15 pts  — tradability (tight spread preferred)
             alpha_score = (
-                abs(ofi) * 35.0
-                + (spread / 0.05) * 25.0
+                ml_edge * 40.0
+                + abs(ofi) * 25.0
                 + abs(fund_sentiment) * 20.0
-                + (1.0 - abs(mid - 0.5) * 2) * 20.0
+                + spread_quality * 15.0
             )
 
             direction = "BUY YES" if ofi + fund_sentiment >= 0 else "BUY NO / SELL YES"
@@ -159,7 +182,8 @@ class DeepMarketAnalysisEngine:
                 "slug": slug,
                 "mid_price": round(mid, 4),
                 "spread": round(spread, 4),
-                "alpha_score": round(alpha_score, 1),
+                "alpha_score": round(alpha_score, 2),
+                "ml_edge": round(ml_edge, 4),
                 "direction": direction,
                 "regime": regime_info["regime"],
                 "sentiment": "Bullish" if fund_sentiment > 0.1 else "Bearish" if fund_sentiment < -0.1 else "Neutral",

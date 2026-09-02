@@ -18,7 +18,6 @@ import time
 
 from core.data_store import BANKROLL_BASELINE, Side, Trade, store
 from core.gamma_client import gamma_client
-from ml.model import ml_model
 
 log = logging.getLogger(__name__)
 
@@ -90,18 +89,19 @@ class SettlementEngine:
                 resolved_yes = (p0 >= 0.9)
 
         slug = mkt.get("slug") or store.market_slugs.get(yes_token, yes_token[:12])
+        no_token = token_ids[1] if len(token_ids) > 1 else None
 
-        # Settle any active positions in DataStore
+        # Settle any active positions in DataStore (both YES and NO tokens)
         async with store._lock:
-            pos = store.positions.get(yes_token)
-            if pos and (pos.yes_shares > 0 or pos.total_invested > 0):
-                shares = pos.yes_shares
+            # 1. Settle YES token
+            pos_yes = store.positions.get(yes_token)
+            if pos_yes and (pos_yes.yes_shares > 0 or pos_yes.total_invested > 0):
+                shares = pos_yes.yes_shares
                 payout = shares * 1.0 if resolved_yes else 0.0
-                pnl = payout - pos.total_invested
+                pnl = payout - pos_yes.total_invested
 
-                # Record closing trade
-                trade = Trade(
-                    trade_id=f"settle-{yes_token[:8]}",
+                trade_yes = Trade(
+                    trade_id=f"settle-yes-{yes_token[:8]}",
                     token_id=yes_token,
                     side=Side.SELL,
                     price=1.0 if resolved_yes else 0.0,
@@ -110,7 +110,7 @@ class SettlementEngine:
                     strategy="settlement",
                     paper=True,
                 )
-                store.trades.append(trade)
+                store.trades.append(trade_yes)
                 store.daily_pnl += pnl
                 store.paper_balance += payout
                 current_eq = BANKROLL_BASELINE + store.daily_pnl
@@ -118,34 +118,88 @@ class SettlementEngine:
                 store.equity_history.append({
                     "timestamp": time.time(),
                     "equity": round(current_eq, 2),
-                    "pnl": round(store.daily_pnl, 2),
                 })
-
-                # Reset position
-                pos.yes_shares = 0.0
-                pos.total_invested = 0.0
-                pos.realised_pnl += pnl
-
-                outcome_str = "YES (WIN)" if resolved_yes else "NO (LOSS)"
-                await store.log_event(
-                    f"🏆 Market Resolved: {slug} → {outcome_str} | P&L: ${pnl:+.2f}"
+                del store.positions[yes_token]
+                log.info(
+                    "[settlement] Resolved YES token %s (%s): PnL=$%.2f (Payout=$%.2f, Invested=$%.2f)",
+                    slug, "WINNER" if resolved_yes else "ZERO", pnl, payout, pos_yes.total_invested,
                 )
-                log.info("[settlement] Settled %s: %s | PnL: $%.2f", slug, outcome_str, pnl)
+                await store.log_event(
+                    f"🏆 Settlement: {slug} YES -> {'WINNER ($1.00)' if resolved_yes else '$0.00'} | PnL: ${pnl:+.2f}"
+                )
 
-        # Feed ground truth outcome to ML model for continuous online learning
+            # 2. Settle NO token (if present)
+            if no_token:
+                pos_no = store.positions.get(no_token)
+                if pos_no and (pos_no.yes_shares > 0 or pos_no.total_invested > 0):
+                    shares_no = pos_no.yes_shares
+                    resolved_no = not resolved_yes
+                    payout_no = shares_no * 1.0 if resolved_no else 0.0
+                    pnl_no = payout_no - pos_no.total_invested
+
+                    trade_no = Trade(
+                        trade_id=f"settle-no-{no_token[:8]}",
+                        token_id=no_token,
+                        side=Side.SELL,
+                        price=1.0 if resolved_no else 0.0,
+                        size=shares_no,
+                        pnl=pnl_no,
+                        strategy="settlement",
+                        paper=True,
+                    )
+                    store.trades.append(trade_no)
+                    store.daily_pnl += pnl_no
+                    store.paper_balance += payout_no
+                    current_eq = BANKROLL_BASELINE + store.daily_pnl
+                    store.peak_equity = max(store.peak_equity, current_eq)
+                    store.equity_history.append({
+                        "timestamp": time.time(),
+                        "equity": round(current_eq, 2),
+                    })
+                    del store.positions[no_token]
+                    log.info(
+                        "[settlement] Resolved NO token %s (%s): PnL=$%.2f (Payout=$%.2f, Invested=$%.2f)",
+                        slug, "WINNER" if resolved_no else "ZERO", pnl_no, payout_no, pos_no.total_invested,
+                    )
+                    await store.log_event(
+                        f"🏆 Settlement: {slug} NO -> {'WINNER ($1.00)' if resolved_no else '$0.00'} | PnL: ${pnl_no:+.2f}"
+                    )
+
         self._settled_tokens.add(yes_token)
-        ml_model.save()
+        if no_token:
+            self._settled_tokens.add(no_token)
 
-        # Backfill verified outcome labels into the feature store (KD-27/KD-25):
-        # rows recorded at predict-time for this token get the REAL Gamma outcome.
+        # ── Ground-truth backfill & ML online learning ──────────────────────────
+        # Two-step feedback loop:
+        #   1. Persist resolved label to SQLite / TimescaleDB for batch retraining
+        #   2. Immediately update the live SGD online learner with the ground-truth
+        #      so the model adapts in real time without waiting for a full retrain cycle.
+        #
+        # Previously step 2 was MISSING — the SGD learner accumulated predictions
+        # but received zero outcome feedback, making online updates a no-op.
         try:
             from core.timescale_db import timescale_db
             updated = timescale_db.mark_resolved_outcomes(yes_token, resolved_yes=resolved_yes)
             if updated:
-                log.info("[settlement] Backfilled %d feature-store outcome labels for %s (YES=%s)",
+                log.info("[settlement] Backfilled %d feature-store labels for %s (YES=%s)",
                          updated, yes_token, resolved_yes)
+
+            # Fetch the cached feature vector for this token and trigger online update
+            feat_vec = timescale_db.fetch_recent_feature_vector(yes_token)
+            if feat_vec is not None:
+                from ml.model import ml_model
+                ml_model.update(feat_vec, outcome_yes=resolved_yes)
+                log.info("[settlement] ✅ ML online update: %s resolved=%s "
+                         "(SGD updates: %d total)",
+                         slug, "YES" if resolved_yes else "NO", ml_model._n_updates)
+            else:
+                log.debug("[settlement] No cached feature vector for %s — online update skipped", yes_token)
+
+            # Also mark NO token's feature vectors if present
+            if no_token:
+                timescale_db.mark_resolved_outcomes(no_token, resolved_yes=not resolved_yes)
         except Exception as e:
-            log.error("[settlement] Outcome backfill failed for %s: %s", yes_token, e)
+            log.error("[settlement] Outcome backfill / ML update failed for %s: %s", yes_token, e)
 
 
 # Module-level singleton

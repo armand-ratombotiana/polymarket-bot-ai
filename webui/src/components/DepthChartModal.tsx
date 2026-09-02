@@ -244,24 +244,55 @@ export default function DepthChartModal({ tokenId, slug, onClose, onOrderPlaced 
                 />
               </div>
               <div>
-                <label className="form-label text-[10px]">Order Size (USDC) — Max $3/market</label>
-                <input
-                  type="number"
-                  step="0.5"
-                  min="0.5"
-                  max="3"
-                  value={sizeUsdc}
-                  onChange={(e) => setSizeUsdc(e.target.value)}
-                  className="input input-sm mono"
-                  aria-label="Order size in USDC"
-                />
+                <label className="form-label text-[10px]">Order Size ($ USDC · Max $3)</label>
+                <div className="flex items-center gap-1.5">
+                  <input
+                    type="number"
+                    step="0.5"
+                    min="0.5"
+                    max="3"
+                    value={sizeUsdc}
+                    onChange={(e) => setSizeUsdc(e.target.value)}
+                    className="input input-sm w-20 mono"
+                    aria-label="Order size in USDC"
+                  />
+                  <div className="flex items-center gap-1">
+                    {['0.5', '1.0', '1.5', '3.0'].map((preset) => (
+                      <button
+                        key={preset}
+                        type="button"
+                        onClick={() => setSizeUsdc(preset)}
+                        className={`px-1.5 py-0.5 rounded text-[10px] mono font-bold border transition-all ${
+                          sizeUsdc === preset
+                            ? 'bg-blue-500/20 text-cyan-300 border-blue-500/50'
+                            : 'bg-[#0e1015] text-[#7e8aaa] border-[#1f2335] hover:text-white'
+                        }`}
+                      >
+                        ${preset}
+                      </button>
+                    ))}
+                  </div>
+                </div>
               </div>
             </div>
 
-            <div className="flex justify-between items-center pt-1">
-              <span className="text-[11px] text-[#7e8aaa] mono">
-                Est. Shares: {price && sizeUsdc ? (parseFloat(sizeUsdc) / Math.max(parseFloat(price), 0.01)).toFixed(1) : '—'}
-              </span>
+            <div className="flex flex-wrap justify-between items-center pt-1 gap-2">
+              {(() => {
+                const p = parseFloat(price) || 0.5
+                const s = parseFloat(sizeUsdc) || 1.5
+                const estShares = p > 0 ? s / p : 0
+                const estPayout = estShares * 1.0
+                const estProfit = estPayout - s
+                const returnPct = s > 0 ? (estProfit / s) * 100 : 0
+
+                return (
+                  <div className="flex items-center gap-2 bg-[#13161e] border border-[#1f2335] px-2 py-0.5 rounded text-[10.5px]">
+                    <span className="text-[#7e8aaa]">Est. Shares: <strong className="text-[#dde1ed] mono">{estShares.toFixed(1)}</strong></span>
+                    <span className="text-[#3e4560]">|</span>
+                    <span className="text-[#7e8aaa]">Payout: <strong className="text-green-400 mono">${estPayout.toFixed(2)}</strong> ({returnPct >= 0 ? `+${returnPct.toFixed(0)}%` : `${returnPct.toFixed(0)}%`})</span>
+                  </div>
+                )
+              })()}
               <button
                 onClick={handleTrade}
                 disabled={loading}

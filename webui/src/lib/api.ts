@@ -13,7 +13,7 @@ export function getApiUrl(): string {
   if (typeof window !== 'undefined') {
     return `${window.location.protocol}//${window.location.host}`
   }
-  return 'http://localhost:8087'
+  return 'http://localhost:8080'
 }
 
 /**

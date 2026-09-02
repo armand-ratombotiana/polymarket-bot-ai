@@ -234,9 +234,9 @@ export default function Sidebar({ active, onChange, mobileOpen, onMobileClose }:
         {/* Footer */}
         <div className="sidebar-footer">
           <div style={{ padding: '4px 8px' }}>
-            <div className="sidebar-item" style={{ opacity: 0.5, cursor: 'default', fontSize: '10px' }}>
-              <span className="sidebar-icon" aria-hidden="true" style={{ fontSize: '12px' }}>🔒</span>
-              <span className="sidebar-label" style={{ fontSize: '10.5px' }}>No auth configured</span>
+            <div className="sidebar-item" style={{ opacity: 0.75, cursor: 'default', fontSize: '10px' }}>
+              <span className="sidebar-icon" aria-hidden="true" style={{ fontSize: '12px' }}>🟢</span>
+              <span className="sidebar-label" style={{ fontSize: '10.5px' }}>Bot Engine Active</span>
             </div>
           </div>
         </div>

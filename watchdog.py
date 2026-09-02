@@ -16,11 +16,15 @@ logging.basicConfig(
 )
 log = logging.getLogger("watchdog")
 
-HEALTH_URL = "http://localhost:8000/api/health"
+HEALTH_URL = "http://127.0.0.1:8000/api/health"
 CHECK_INTERVAL = 30
-MAX_FAILURES = 3
+MAX_FAILURES = 5
+INITIAL_GRACE_PERIOD = 60
 
 consecutive_fails = 0
+
+# Wait for bot startup before beginning checks
+time.sleep(INITIAL_GRACE_PERIOD)
 
 while True:
     time.sleep(CHECK_INTERVAL)

@@ -60,6 +60,7 @@ const KB_MAP: Record<string, NavSection> = {
 }
 
 export default function Dashboard() {
+  const [mounted, setMounted] = useState(false)
   const { snapshot, status, activateKillSwitch, deactivateKillSwitch, cancelAllOrders, cancelOrder } = useBot()
   const audio = useAudio()
 
@@ -79,11 +80,16 @@ export default function Dashboard() {
   const [confirmCancelAll, setConfirmCancelAll] = useState(false)
   const [actionLoading, setActionLoading] = useState(false)
 
+  useEffect(() => {
+    setMounted(true)
+  }, [])
+
   // Uptime counter
   useEffect(() => {
+    if (!mounted) return
     const t = setInterval(() => setUptime(Math.floor((Date.now() - startTime) / 1000)), 1000)
     return () => clearInterval(t)
-  }, [startTime])
+  }, [mounted, startTime])
 
   const handleKillSwitch = useCallback(async () => {
     setActionLoading(true)
@@ -139,6 +145,17 @@ export default function Dashboard() {
   const isKilled = snapshot.kill_switch
   const isObserving = snapshot.observation_only
   const openOrderCount = snapshot.open_orders?.length ?? 0
+
+  if (!mounted) {
+    return (
+      <div style={{ minHeight: '100vh', background: 'var(--bg-base, #0b0e14)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+        <div style={{ fontFamily: 'JetBrains Mono, monospace', color: 'var(--text-secondary, #8b949e)', fontSize: '13px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+          <span className="status-dot connecting" aria-hidden="true" />
+          Initializing Polymarket Pro Workstation…
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div className="app-shell" style={{ flexDirection: 'column' }}>
@@ -203,21 +220,7 @@ export default function Dashboard() {
 
             {/* ── 1. Command Center ──────────────────────────────────── */}
             {activeSection === 'command' && (
-              <div
-                style={{
-                  display: 'grid',
-                  gridTemplateColumns: '1fr 1fr 300px',
-                  gridTemplateRows: 'auto 1fr 1fr',
-                  gridTemplateAreas: `
-                    "risk   risk    risk"
-                    "market pos     sidebar"
-                    "orders events  sidebar"
-                  `,
-                  gap: '10px',
-                  height: '100%',
-                  minHeight: 0,
-                }}
-              >
+              <div className="command-center-layout">
                 <div style={{ gridArea: 'risk', minHeight: 0 }}>
                   <RiskStatusPanel />
                 </div>
@@ -228,7 +231,11 @@ export default function Dashboard() {
                   />
                 </div>
                 <div style={{ gridArea: 'pos', minHeight: 0, overflow: 'hidden' }}>
-                  <PositionsPanel positions={snapshot.positions} dailyPnl={snapshot.daily_pnl} />
+                  <PositionsPanel
+                    positions={snapshot.positions}
+                    dailyPnl={snapshot.daily_pnl}
+                    onSelectMarket={(m) => setChartMarket(m)}
+                  />
                 </div>
                 <div style={{ gridArea: 'orders', minHeight: 0, overflow: 'hidden' }}>
                   <OrdersPanel
@@ -253,7 +260,7 @@ export default function Dashboard() {
                 >
                   <EquityCurve />
                   <AnalyticsPanel />
-                  <MLPanel />
+                  <MLPanel snapshotMl={snapshot?.ml} />
                 </div>
               </div>
             )}
@@ -281,7 +288,11 @@ export default function Dashboard() {
             {/* ── 4. Portfolio — Positions ───────────────────────────── */}
             {activeSection === 'portfolio-positions' && (
               <div style={{ height: '100%', overflow: 'hidden' }}>
-                <PositionsPanel positions={snapshot.positions} dailyPnl={snapshot.daily_pnl} />
+                <PositionsPanel
+                  positions={snapshot.positions}
+                  dailyPnl={snapshot.daily_pnl}
+                  onSelectMarket={(m) => setChartMarket(m)}
+                />
               </div>
             )}
 
@@ -305,7 +316,7 @@ export default function Dashboard() {
 
             {/* ── 5. Strategies — Registry ──────────────────────────── */}
             {activeSection === 'strategies-registry' && (
-              <div style={{ height: '100%', display: 'grid', gridTemplateColumns: '1fr 300px', gap: '10px' }}>
+              <div className="workstation-split-layout">
                 <div style={{ overflow: 'hidden' }}>
                   <StrategyMatrix />
                 </div>
@@ -318,14 +329,14 @@ export default function Dashboard() {
             {/* ── 6. Strategies — Arbitrage ─────────────────────────── */}
             {activeSection === 'strategies-arbitrage' && (
               <div style={{ height: '100%', overflow: 'hidden' }}>
-                <ArbitrageMatrixView />
+                <ArbitrageMatrixView onSelectMarket={(m) => setChartMarket(m)} />
               </div>
             )}
 
             {/* ── 7. Intelligence — Deep Analysis ───────────────────── */}
             {activeSection === 'intelligence-analysis' && (
               <div style={{ height: '100%', overflow: 'hidden' }}>
-                <DeepAnalysisView />
+                <DeepAnalysisView onOpenChart={(m) => setChartMarket(m)} />
               </div>
             )}
 
@@ -338,20 +349,20 @@ export default function Dashboard() {
 
             {/* ── Intelligence — Copilot ─────────────────────────────── */}
             {activeSection === 'intelligence-copilot' && (
-              <div style={{ height: '100%', display: 'grid', gridTemplateColumns: '1fr 300px', gap: '10px' }}>
+              <div className="workstation-split-layout">
                 <div style={{ overflow: 'hidden' }}>
-                  <AICopilotPanel />
+                  <AICopilotPanel onSelectMarket={(m) => setChartMarket(m)} />
                 </div>
                 <div style={{ overflow: 'auto', display: 'flex', flexDirection: 'column', gap: '10px' }} className="scrollbar-thin">
                   <EquityCurve />
-                  <MLPanel />
+                  <MLPanel snapshotMl={snapshot?.ml} />
                 </div>
               </div>
             )}
 
             {/* ── 8. Analytics — Performance ────────────────────────── */}
             {activeSection === 'analytics-performance' && (
-              <div style={{ height: '100%', display: 'grid', gridTemplateColumns: '1fr 300px', gap: '10px' }}>
+              <div className="workstation-split-layout">
                 <div style={{ overflow: 'hidden', display: 'flex', flexDirection: 'column', gap: '10px' }}>
                   <EquityCurve />
                   <AnalyticsPanel />
@@ -457,7 +468,7 @@ export default function Dashboard() {
               </h2>
               <p id="disconnect-desc" style={{ fontSize: '12.5px', color: 'var(--text-secondary)', lineHeight: 1.6 }}>
                 {status === 'error'
-                  ? 'Could not reach the bot API. Check that the backend container is running on port 8087.'
+                  ? 'Could not reach the bot API. Check that the backend service is running.'
                   : 'Establishing connection to the Polymarket bot API…'}
               </p>
               <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '11.5px', color: 'var(--color-amber-fg)' }}>

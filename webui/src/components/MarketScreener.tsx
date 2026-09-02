@@ -69,16 +69,32 @@ export default function MarketScreener({ onSelectMarket, onQuickTrade }: Props) 
     fetchMarkets(search)
   }
 
+  const [selectedCategory, setSelectedCategory] = useState<string>('ALL')
+
+  const CATEGORY_CHIPS = ['ALL', 'CRYPTO', 'POLITICS', 'SPORTS', 'ECONOMY', 'TECH']
+
+  const filteredMarkets = markets.filter((m) => {
+    if (selectedCategory === 'ALL') return true
+    const cat = (m.category || '').toUpperCase()
+    const slug = (m.slug || '').toUpperCase()
+    if (selectedCategory === 'CRYPTO') return cat.includes('CRYPTO') || slug.includes('BITCOIN') || slug.includes('ETH') || slug.includes('SOL')
+    if (selectedCategory === 'POLITICS') return cat.includes('POLITICS') || slug.includes('ELECTION') || slug.includes('PRESIDENT') || slug.includes('TRUMP')
+    if (selectedCategory === 'SPORTS') return cat.includes('SPORTS') || slug.includes('NBA') || slug.includes('NFL') || slug.includes('SOCCER')
+    if (selectedCategory === 'ECONOMY') return cat.includes('ECONOMY') || slug.includes('FED') || slug.includes('INFLATION') || slug.includes('RATE')
+    if (selectedCategory === 'TECH') return cat.includes('TECH') || slug.includes('AI') || slug.includes('OPENAI') || slug.includes('GPT')
+    return true
+  })
+
   return (
-    <div className="card flex flex-col h-full bg-[#13161e] border border-[#1f2335] overflow-hidden">
+    <div className="card flex flex-col h-full bg-[#13161e] border border-[#1f2335] overflow-hidden shadow-xl">
       {/* Header & Controls */}
       <div className="card-header flex flex-wrap justify-between items-center px-4 py-3 border-b border-[#1f2335] gap-3">
         <div className="flex items-center gap-2">
           <span className="card-title text-sm font-bold text-[#dde1ed]">
             🔍 Prediction Market Screener
           </span>
-          <span className="badge badge-dim text-xs">
-            {markets.length} Markets
+          <span className="badge badge-cyan text-xs font-semibold">
+            {filteredMarkets.length} of {markets.length} Markets
           </span>
           {lastRefreshed && (
             <span className="text-[10.5px] text-[#7e8aaa] mono">
@@ -93,7 +109,7 @@ export default function MarketScreener({ onSelectMarket, onQuickTrade }: Props) 
             placeholder="Search Polymarket events…"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            className="input input-sm w-56 text-xs"
+            className="input input-sm w-56 text-xs bg-[#0e1015] border border-[#1f2335]"
             aria-label="Search prediction market events"
           />
           <button type="submit" className="btn btn-primary btn-sm" disabled={loading}>
@@ -103,13 +119,30 @@ export default function MarketScreener({ onSelectMarket, onQuickTrade }: Props) 
             <button
               type="button"
               onClick={() => { setSearch(''); fetchMarkets(''); }}
-              className="btn btn-ghost btn-sm"
+              className="btn btn-ghost btn-sm text-xs"
               title="Clear search filter"
             >
               Clear
             </button>
           )}
         </form>
+      </div>
+
+      {/* Category Chips Filter Bar */}
+      <div className="flex items-center gap-1.5 px-4 py-2 bg-[#0e1015] border-b border-[#1f2335] overflow-x-auto scrollbar-thin">
+        {CATEGORY_CHIPS.map((cat) => (
+          <button
+            key={cat}
+            onClick={() => setSelectedCategory(cat)}
+            className={`px-2.5 py-1 rounded text-[10.5px] font-bold uppercase transition-all ${
+              selectedCategory === cat
+                ? 'bg-blue-500/20 text-cyan-300 border border-blue-500/40'
+                : 'text-[#7e8aaa] hover:text-[#dde1ed] bg-[#13161e] border border-[#1f2335]'
+            }`}
+          >
+            {cat}
+          </button>
+        ))}
       </div>
 
       {/* Error state */}
@@ -142,23 +175,27 @@ export default function MarketScreener({ onSelectMarket, onQuickTrade }: Props) 
               </tr>
             </thead>
             <tbody>
-              {markets.length === 0 ? (
+              {filteredMarkets.length === 0 ? (
                 <tr>
                   <td colSpan={5} className="text-center py-10 text-[#7e8aaa] text-xs">
-                    No markets found{search ? ` for "${search}"` : ''}. Try adjusting your search query.
+                    No markets found{search ? ` for "${search}"` : ''}. Try adjusting your search query or category filter.
                   </td>
                 </tr>
               ) : (
-                markets.map((m, i) => {
+                filteredMarkets.map((m, i) => {
                   const title = m.groupItemTitle || m.slug
                   const vol = parseFloat(String(m.volume24hr || 0))
                   const liq = parseFloat(String(m.liquidity || 0))
                   const tokenId = m.tokens?.[0]?.token_id || m.conditionId || m.slug
 
                   return (
-                    <tr key={i} className="hover:bg-blue-500/10 transition-colors">
+                    <tr
+                      key={i}
+                      onClick={() => onSelectMarket && onSelectMarket(tokenId, m.slug)}
+                      className="hover:bg-blue-500/10 transition-colors cursor-pointer group"
+                    >
                       <td className="max-w-[340px]">
-                        <span className="text-[#dde1ed] font-medium block truncate" title={title}>
+                        <span className="text-[#dde1ed] group-hover:text-cyan-300 font-medium block truncate transition-colors" title={title}>
                           {title}
                         </span>
                         <span className="text-[10px] text-[#7e8aaa] mono block truncate">{m.slug}</span>
@@ -176,8 +213,12 @@ export default function MarketScreener({ onSelectMarket, onQuickTrade }: Props) 
                       </td>
                       <td className="text-right">
                         <button
-                          onClick={() => onQuickTrade ? onQuickTrade(tokenId, m.slug) : onSelectMarket && onSelectMarket(tokenId, m.slug)}
-                          className="btn btn-primary btn-xs"
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            if (onQuickTrade) onQuickTrade(tokenId, m.slug)
+                            else if (onSelectMarket) onSelectMarket(tokenId, m.slug)
+                          }}
+                          className="btn btn-primary btn-xs font-semibold"
                           aria-label={`Open depth and trade ticket for ${title}`}
                         >
                           Trade / Depth

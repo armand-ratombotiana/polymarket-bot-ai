@@ -171,22 +171,41 @@ export default function StrategyMatrix() {
               </div>
 
               <div className="flex justify-between items-center pt-2 border-t border-[#1f2335]">
-                <span className="text-[10px] text-[#7e8aaa] uppercase mono">
-                  {s.category.replace('_', ' ')} · {s.risk_level} Risk
-                </span>
-                
-                {isImplemented ? (
-                  <button
-                    onClick={() => handleToggle(s.strategy_id, s.is_running)}
-                    disabled={toggling === s.strategy_id}
-                    className={`btn btn-xs ${
-                      s.is_running
-                        ? 'btn-danger'
-                        : 'btn-primary'
+                <div className="flex items-center gap-1.5">
+                  <span className="text-[10px] text-[#7e8aaa] uppercase mono">
+                    {s.category.replace('_', ' ')}
+                  </span>
+                  <span className="text-[#3e4560]">·</span>
+                  <span
+                    className={`text-[9.5px] px-1.5 py-0.2 rounded font-bold uppercase mono ${
+                      s.risk_level === 'LOW'
+                        ? 'text-green-400 bg-green-500/10 border border-green-500/20'
+                        : s.risk_level === 'MEDIUM'
+                        ? 'text-amber-400 bg-amber-500/10 border border-amber-500/20'
+                        : 'text-red-400 bg-red-500/10 border border-red-500/20'
                     }`}
                   >
-                    {toggling === s.strategy_id ? '…' : s.is_running ? 'Stop' : 'Deploy'}
-                  </button>
+                    {s.risk_level}
+                  </span>
+                </div>
+                
+                {isImplemented ? (
+                  <div className="flex items-center gap-1.5">
+                    {s.is_running && (
+                      <span className="w-2 h-2 rounded-full bg-green-400 animate-pulse inline-block" title="Running live execution loop" />
+                    )}
+                    <button
+                      onClick={() => handleToggle(s.strategy_id, s.is_running)}
+                      disabled={toggling === s.strategy_id}
+                      className={`btn btn-xs font-bold ${
+                        s.is_running
+                          ? 'btn-danger'
+                          : 'btn-primary'
+                      }`}
+                    >
+                      {toggling === s.strategy_id ? '…' : s.is_running ? 'Stop' : 'Deploy'}
+                    </button>
+                  </div>
                 ) : (
                   <button
                     onClick={() => handleToggle(s.strategy_id, false)}

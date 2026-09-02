@@ -251,7 +251,7 @@ export default function MarketChartModal({ tokenId, slug, onClose, onOrderPlaced
 
         {/* Quick Trade Footer Pad */}
         <div className="modal-footer bg-[#111420] flex-wrap justify-between gap-3">
-          <div className="flex items-center gap-3">
+          <div className="flex flex-wrap items-center gap-3">
             <div>
               <label className="form-label mb-0.5 text-[10px]">Price ($)</label>
               <input
@@ -266,18 +266,54 @@ export default function MarketChartModal({ tokenId, slug, onClose, onOrderPlaced
               />
             </div>
             <div>
-              <label className="form-label mb-0.5 text-[10px]">Size ($ USDC · Max $3/market)</label>
-              <input
-                type="number"
-                step="0.5"
-                min="0.5"
-                max="3"
-                value={sizeUsdc}
-                onChange={(e) => setSizeUsdc(e.target.value)}
-                className="input input-sm w-24 mono"
-                aria-label="Order size in USDC"
-              />
+              <label className="form-label mb-0.5 text-[10px]">Size ($ USDC · Max $3)</label>
+              <div className="flex items-center gap-1.5">
+                <input
+                  type="number"
+                  step="0.5"
+                  min="0.5"
+                  max="3"
+                  value={sizeUsdc}
+                  onChange={(e) => setSizeUsdc(e.target.value)}
+                  className="input input-sm w-20 mono"
+                  aria-label="Order size in USDC"
+                />
+                <div className="flex items-center gap-1">
+                  {['0.5', '1.0', '1.5', '3.0'].map((preset) => (
+                    <button
+                      key={preset}
+                      type="button"
+                      onClick={() => setSizeUsdc(preset)}
+                      className={`px-1.5 py-0.5 rounded text-[10px] mono font-bold border transition-all ${
+                        sizeUsdc === preset
+                          ? 'bg-blue-500/20 text-cyan-300 border-blue-500/50'
+                          : 'bg-[#0e1015] text-[#7e8aaa] border-[#1f2335] hover:text-white'
+                      }`}
+                    >
+                      ${preset}
+                    </button>
+                  ))}
+                </div>
+              </div>
             </div>
+
+            {/* Payoff Calculation */}
+            {(() => {
+              const p = parseFloat(price) || 0.5
+              const s = parseFloat(sizeUsdc) || 1.5
+              const estShares = p > 0 ? s / p : 0
+              const estPayout = estShares * 1.0
+              const estProfit = estPayout - s
+              const returnPct = s > 0 ? (estProfit / s) * 100 : 0
+
+              return (
+                <div className="flex items-center gap-2 bg-[#0e1015] border border-[#1f2335] px-2.5 py-1 rounded text-[10.5px]">
+                  <span className="text-[#7e8aaa]">Est. Shares: <strong className="text-[#dde1ed] mono">{estShares.toFixed(1)}</strong></span>
+                  <span className="text-[#3e4560]">|</span>
+                  <span className="text-[#7e8aaa]">Payout: <strong className="text-green-400 mono">${estPayout.toFixed(2)}</strong> ({returnPct >= 0 ? `+${returnPct.toFixed(0)}%` : `${returnPct.toFixed(0)}%`})</span>
+                </div>
+              )
+            })()}
           </div>
 
           {tradeMsg && (

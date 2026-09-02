@@ -74,7 +74,6 @@ async def _startup(force_paper: bool = False) -> None:
     logging.getLogger().setLevel(settings.log_level)
 
     from core.clob_client import clob_client
-    from core.ws_client import ws_client
     from paper.simulator import paper_sim
 
     # Derive or load API credentials
@@ -97,8 +96,8 @@ async def _startup(force_paper: bool = False) -> None:
     if settings.paper_trade:
         await paper_sim.start()
 
-    # Start WebSocket listener
-    await ws_client.start()
+    # WS client is NOT started: subscribe() had zero callers (KD-08, KD-24).
+    # D5 decision = tiered REST polling; ws_client is retained for future re-enablement.
 
     console.print(
         f"[bold green]🚀 Bot started  "

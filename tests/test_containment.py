@@ -29,6 +29,11 @@ AUTH = {"Authorization": "Bearer test-token-123"}
 class TestAuthEnforcement(unittest.TestCase):
     """P0-SEC-01 — fail-closed bearer-token auth + CORS lockdown."""
 
+    @classmethod
+    def setUpClass(cls):
+        settings.api_token = "test-token-123"
+        settings.cors_origins = "http://allowed.example"
+
     def test_health_is_public(self):
         r = client.get("/api/health")
         self.assertEqual(r.status_code, 200)

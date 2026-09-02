@@ -63,3 +63,8 @@ yarn-error.log*
 *.swo
 .DS_Store
 Thumbs.db
+
+# Archives
+deploy.tar
+deploy.tar.gz
+

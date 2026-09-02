@@ -10,7 +10,7 @@ const TABLE_DESCRIPTIONS: Record<TableName, string> = {
   market_snapshots: 'Periodic snapshots of top-of-book prices, spreads, and implied probabilities.',
   orderbook_ticks: 'L2 book depth updates and order flow imbalance (OFI) calculations.',
   fundamental_news: 'Fundamental news headlines, sentiment scores, and event tags.',
-  ml_feature_store: '32-dimensional feature vectors computed from live microstructure data.',
+  ml_feature_store: '38-dimensional feature vectors computed from live microstructure data.',
 }
 
 export default function DatabaseExplorerView() {
@@ -41,7 +41,7 @@ export default function DatabaseExplorerView() {
     { id: 'market_snapshots', label: 'Market Snapshots', icon: '📊' },
     { id: 'orderbook_ticks', label: 'Orderbook Ticks (OFI)', icon: '⚡' },
     { id: 'fundamental_news', label: 'Fundamental News', icon: '📰' },
-    { id: 'ml_feature_store', label: 'ML Feature Store (32D)', icon: '🧠' },
+    { id: 'ml_feature_store', label: 'ML Feature Store (38D)', icon: '🧠' },
   ]
 
   return (
@@ -90,7 +90,34 @@ export default function DatabaseExplorerView() {
               {TABLE_DESCRIPTIONS[selectedTable]}
             </span>
           </div>
-          <span className="text-[10px] text-[#7e8aaa] mono">Polled every 5s</span>
+          <div className="flex items-center gap-2">
+            <span className="text-[10px] text-[#7e8aaa] mono">Polled every 5s</span>
+            <button
+              onClick={() => {
+                if (records.length === 0) return
+                const cols = Object.keys(records[0])
+                const rows = records.map((r) =>
+                  cols.map((col) => {
+                    const v = r[col]
+                    return typeof v === 'string' ? `"${v.replace(/"/g, '""')}"` : String(v ?? '')
+                  }).join(',')
+                )
+                const csvContent = 'data:text/csv;charset=utf-8,' + [cols.join(','), ...rows].join('\n')
+                const encodedUri = encodeURI(csvContent)
+                const link = document.createElement('a')
+                link.setAttribute('href', encodedUri)
+                link.setAttribute('download', `${selectedTable}_${Date.now()}.csv`)
+                document.body.appendChild(link)
+                link.click()
+                document.body.removeChild(link)
+              }}
+              disabled={records.length === 0}
+              className="btn btn-ghost btn-sm text-[10px] px-2 py-0.5 border border-[#1f2335] text-[#7e8aaa] hover:text-white hover:border-[#2d3450] flex items-center gap-1"
+              title={`Export ${selectedTable} CSV`}
+            >
+              📥 CSV
+            </button>
+          </div>
         </div>
 
         {loading && records.length === 0 ? (

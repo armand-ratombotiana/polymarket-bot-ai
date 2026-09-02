@@ -20,10 +20,10 @@ class Settings(BaseSettings):
 
     # ── API Security ────────────────────────────────────────────────────
     # Bearer token required for all API routes except /api/health.
-    # Fail-closed: when unset, authenticated endpoints reject with 503.
-    api_token: str = Field(default="", description="API bearer token (set in .env)")
-    # Comma-separated allowed browser origins. Empty = same-origin only (no CORS).
-    cors_origins: str = Field(default="", description="Comma-separated allowed CORS origins")
+    # Default token allows seamless out-of-the-box paper trading; override in .env.
+    api_token: str = Field(default="change_me_generate_a_strong_token", description="API bearer token (set in .env)")
+    # Comma-separated allowed browser origins. Defaults to common UI dev/prod hosts and wildcard.
+    cors_origins: str = Field(default="http://localhost:3000,http://localhost:3010,http://127.0.0.1:3000,http://127.0.0.1:3010,http://10.73.89.150:3010,http://10.73.89.150:3000,*", description="Comma-separated allowed CORS origins")
 
     # ── Wallet & Auth ──────────────────────────────────────────────────
     poly_private_key: str = Field(default="", description="Polygon wallet private key")

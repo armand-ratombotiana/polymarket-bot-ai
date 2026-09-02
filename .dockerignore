@@ -56,3 +56,7 @@ node_modules/
 *.sqlite3
 data/
 model.pkl
+deploy.tar*
+.pytest_cache/
+.ruff_cache/
+

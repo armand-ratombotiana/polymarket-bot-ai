@@ -69,29 +69,49 @@ class PositionManager:
 
             # Check Take-Profit Trigger
             if mid >= managed.take_profit_price:
-                log.info("[position_manager] 🎯 Take-Profit Triggered for %s @ %.4f", pos.token_id[:12], mid)
+                log.info("[position_manager] 🎯 Take-Profit Triggered for %s @ %.4f — Submitting Exit Order", pos.token_id[:12], mid)
                 await audit_logger.log_event(
                     category="EXIT",
-                    event_type="TAKE_PROFIT",
-                    details=f"Take-Profit executed @ {mid:.4f} (Entry: {managed.entry_price:.4f})",
+                    event_type="TAKE_PROFIT_TRIGGERED",
+                    details=f"Take-Profit triggered @ {mid:.4f} (Entry: {managed.entry_price:.4f})",
                     token_id=pos.token_id,
                     slug=store.market_slugs.get(pos.token_id),
                     pnl=pos.realised_pnl,
                     strategy="position_manager",
                 )
+                from core.data_store import Order, Side
+                from paper.simulator import paper_sim
+                exit_order = Order(
+                    token_id=pos.token_id,
+                    side=Side.SELL,
+                    price=round(mid, 3),
+                    size=pos.yes_shares,
+                    strategy="position_manager_tp",
+                )
+                await paper_sim.create_order(exit_order)
 
             # Check Stop-Loss Trigger
             elif mid <= managed.stop_loss_price:
-                log.info("[position_manager] 🛑 Stop-Loss Triggered for %s @ %.4f", pos.token_id[:12], mid)
+                log.info("[position_manager] 🛑 Stop-Loss Triggered for %s @ %.4f — Submitting Exit Order", pos.token_id[:12], mid)
                 await audit_logger.log_event(
                     category="EXIT",
-                    event_type="STOP_LOSS",
-                    details=f"Stop-Loss executed @ {mid:.4f} (Entry: {managed.entry_price:.4f})",
+                    event_type="STOP_LOSS_TRIGGERED",
+                    details=f"Stop-Loss triggered @ {mid:.4f} (Entry: {managed.entry_price:.4f})",
                     token_id=pos.token_id,
                     slug=store.market_slugs.get(pos.token_id),
                     pnl=pos.realised_pnl,
-                    strategy="position_manager",
+                    strategy="position_manager_sl",
                 )
+                from core.data_store import Order, Side
+                from paper.simulator import paper_sim
+                exit_order = Order(
+                    token_id=pos.token_id,
+                    side=Side.SELL,
+                    price=round(mid, 3),
+                    size=pos.yes_shares,
+                    strategy="position_manager_sl",
+                )
+                await paper_sim.create_order(exit_order)
 
     async def start(self) -> None:
         if self._running:

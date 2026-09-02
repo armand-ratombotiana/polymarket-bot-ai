@@ -37,7 +37,7 @@ _TABLE_ENGINE_KEY = {
 
 
 def _storage_counts(stats: dict) -> dict[str, int]:
-    return {t: int(stats.get(_TABLE_COUNT_KEY[t], 0)) for t in _TABLES}
+    return {t: int(stats.get(_TABLE_COUNT_KEY.get(t, f"{t}_recorded"), stats.get(t, 0))) for t in _TABLES}
 
 
 def _engine_counts(stats: dict) -> dict[str, int]:

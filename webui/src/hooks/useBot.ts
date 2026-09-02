@@ -32,6 +32,7 @@ export interface Position {
   token_id: string
   slug: string
   yes_shares: number
+  no_shares?: number
   avg_entry_price: number
   total_invested: number
   realised_pnl: number
@@ -50,11 +51,27 @@ export interface Trade {
   timestamp: number
 }
 
+export interface MLState {
+  model_ready: boolean
+  brier_score: number
+  roc_auc: number
+  ece: number
+  n_updates: number
+  drift_status: string
+  drift_psi: number
+  drift_brier: number | null
+  drift_ewma_brier: number | null
+  adaptive_weights: { rf: number; gb: number; sgd: number; lgbm: number }
+  meta_learner_warm: boolean
+  training_source: string
+}
+
 export interface BotSnapshot {
   type: string
   timestamp: number
   mode: 'paper' | 'live' | 'shadow' | 'backtest' | string
   kill_switch: boolean
+  kill_switch_durable: boolean
   observation_only: boolean
   observation_reason: string
   daily_pnl: number
@@ -65,6 +82,7 @@ export interface BotSnapshot {
   positions: Position[]
   recent_trades: Trade[]
   events: string[]
+  ml?: MLState
 }
 
 const DEFAULT_SNAPSHOT: BotSnapshot = {
@@ -72,6 +90,7 @@ const DEFAULT_SNAPSHOT: BotSnapshot = {
   timestamp: 0,
   mode: 'paper',
   kill_switch: false,
+  kill_switch_durable: false,
   observation_only: false,
   observation_reason: '',
   daily_pnl: 0,
@@ -131,6 +150,7 @@ export function useBot() {
           timestamp: Date.now() / 1000,
           mode: statusData.mode || 'paper',
           kill_switch: Boolean(statusData.kill_switch),
+          kill_switch_durable: Boolean(statusData.kill_switch_durable),
           observation_only: Boolean(statusData.observation_only),
           observation_reason: statusData.observation_reason || '',
           daily_pnl: statusData.daily_pnl || 0,

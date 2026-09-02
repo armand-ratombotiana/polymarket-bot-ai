@@ -122,6 +122,8 @@ class MarketVectorStore:
         try:
             data = {
                 "metadata": self.doc_metadata,
+                "doc_vectors": self.doc_vectors,
+                "idf": self.idf,
                 "doc_count": self._doc_count,
             }
             with open(VECTOR_STORE_PATH, "w", encoding="utf-8") as f:
@@ -136,8 +138,16 @@ class MarketVectorStore:
             with open(VECTOR_STORE_PATH, "r", encoding="utf-8") as f:
                 data = json.load(f)
             self.doc_metadata = data.get("metadata", {})
+            self.doc_vectors = data.get("doc_vectors", {})
+            self.idf = data.get("idf", {})
             self._doc_count = len(self.doc_metadata)
-            log.info("[vector_store] Loaded %d market embeddings from disk", self._doc_count)
+            # Rebuild IDF only when doc_vectors loaded but idf missing (legacy index)
+            if self.doc_vectors and not self.idf:
+                self.build_index()
+            log.info(
+                "[vector_store] Loaded %d market embeddings from disk (vocab=%d)",
+                self._doc_count, len(self.idf),
+            )
         except Exception as e:
             log.warning("[vector_store] Load error: %s", e)
 

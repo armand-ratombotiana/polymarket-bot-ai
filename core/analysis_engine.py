@@ -50,7 +50,17 @@ class DeepMarketAnalysisEngine:
         spread_pct = spread / mid_p if mid_p > 0 else 0.0
 
         # 1. Feature Extraction & AI/ML Inference
-        features = extract_features({"slug": slug, "volume24hr": 25000, "volume": 100000}, book)
+        # Use real market data from discovery catalog so volume/liquidity features are accurate.
+        # Falls back to a minimal dict with zeros (still valid — features clip gracefully).
+        try:
+            from core.market_discovery import market_discovery
+            mkt_data = market_discovery.catalog.get(token_id) or {
+                "slug": slug, "volume24hr": 0.0, "volume": 0.0, "liquidity": 0.0
+            }
+        except Exception:
+            mkt_data = {"slug": slug, "volume24hr": 0.0, "volume": 0.0, "liquidity": 0.0}
+
+        features = extract_features(mkt_data, book)
         if features is not None and ml_model.is_fitted:
             p_ml = float(ml_model.predict_proba(features, token_id=token_id))
             confidence = float(ml_model.predict_confidence(features, token_id=token_id))
@@ -99,7 +109,11 @@ class DeepMarketAnalysisEngine:
                 else:
                     contradicting_news.append(news_dict)
 
-        # 5. Recommendation Action & Rationale
+        # 5. Market Regime Classification
+        from core.deep_analysis import deep_analysis_engine
+        regime_info = deep_analysis_engine.classify_regime(book)
+
+        # 6. Recommendation Action & Rationale
         reasons = []
         action = "MONITOR"
 
@@ -109,6 +123,9 @@ class DeepMarketAnalysisEngine:
         elif total_depth_usdc < 200.0:
             action = "REJECT_RISK"
             reasons.append(f"Insufficient order book liquidity (${total_depth_usdc:.0f} < $200)")
+        elif regime_info.get("tag") == "volatile":
+            action = "MONITOR"
+            reasons.append("High-volatility regime — ML ensemble not trained for liquidation dynamics; standing by")
         elif net_edge >= 0.035 and confidence >= 0.60:
             action = "TRADE_LONG_YES"
             reasons.append(f"Significant positive net edge (+{(net_edge * 100):.1f}%) with {confidence * 100:.0f}% confidence")
@@ -143,10 +160,15 @@ class DeepMarketAnalysisEngine:
             "contradicting_evidence": contradicting_news[:3],
             "suggested_action": action,
             "action_reasons": reasons,
+            "regime": regime_info.get("regime", "Unknown"),
+            "regime_tag": regime_info.get("tag", "unknown"),
             "model_metadata": {
                 "version": model_registry.active_version,
                 "brier_score": ml_model.brier_score,
-                "features_used": 32,
+                "ece": ml_model.ece,
+                "roc_auc": ml_model.roc_auc,
+                "features_used": ml_model.scaler.n_features_in_ if ml_model.is_fitted and hasattr(ml_model.scaler, 'n_features_in_') else 38,
+                "adaptive_weights": ml_model.adaptive_weights,
             },
             "data_freshness_seconds": round(time.time() - book.updated_at, 1),
             "generation_time_ms": round((time.time() - start_t) * 1000, 2),

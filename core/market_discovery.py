@@ -43,13 +43,8 @@ class UniversalMarketDiscoveryEngine:
 
     async def start(self) -> None:
         self._running = True
-        # Run initial catalog synchronization immediately
-        try:
-            await self.sync_full_catalog()
-        except Exception as e:
-            log.warning("[market_discovery] Initial catalog sync: %s", e)
         self._task = asyncio.create_task(self._discovery_loop(), name="market-discovery")
-        log.info("[market_discovery] Universal Catalog & Coverage Engine started (Indexed: %d markets)", len(self.catalog))
+        log.info("[market_discovery] Universal Catalog & Coverage Engine started")
 
     async def stop(self) -> None:
         self._running = False
@@ -58,12 +53,13 @@ class UniversalMarketDiscoveryEngine:
 
     async def _discovery_loop(self) -> None:
         """Periodic full catalog synchronization every 3 minutes."""
+        await asyncio.sleep(2.0)  # Brief warm-up to let API server bind immediately
         while self._running:
-            await asyncio.sleep(180)
             try:
                 await self.sync_full_catalog()
             except Exception as e:
                 log.warning("[market_discovery] Catalog sync loop error: %s", e)
+            await asyncio.sleep(180)
 
     async def sync_full_catalog(self) -> int:
         """Paginate across all Polymarket Gamma market endpoints to ingest 100% of available markets."""
@@ -73,7 +69,9 @@ class UniversalMarketDiscoveryEngine:
 
         async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
             limit = 100
-            for offset in [0, 100, 200, 300, 400, 500, 600]:
+            offset = 0
+            max_offset = 2000  # safety ceiling (20 pages × 100)
+            while offset <= max_offset:
                 try:
                     resp = await client.get(
                         f"{GAMMA_BASE_URL}/markets",
@@ -85,7 +83,8 @@ class UniversalMarketDiscoveryEngine:
                             discovered_batch.extend(batch)
                             authoritative_total += len(batch)
                             if len(batch) < limit:
-                                break
+                                break   # last page reached
+                            offset += limit
                         else:
                             break
                     else:
@@ -98,23 +97,16 @@ class UniversalMarketDiscoveryEngine:
         if not discovered_batch:
             return 0
 
+        from core.gamma_client import GammaClient
+
         valid_tokens: list[str] = []
         for m in discovered_batch:
-            tid = m.get("clobTokenId") or m.get("token_id")
-            if not tid:
-                # Check clobTokenIds array or JSON string
-                c_ids = m.get("clobTokenIds")
-                if isinstance(c_ids, str):
-                    try:
-                        parsed = json.loads(c_ids)
-                        if isinstance(parsed, list) and parsed:
-                            tid = str(parsed[0])
-                    except Exception:
-                        pass
-                elif isinstance(c_ids, list) and c_ids:
-                    tid = str(c_ids[0])
+            token_ids = GammaClient.extract_token_ids(m)
+            tid_single = m.get("clobTokenId") or m.get("token_id")
+            if tid_single and str(tid_single) not in token_ids:
+                token_ids.insert(0, str(tid_single))
 
-            if not tid:
+            if not token_ids:
                 self.excluded_markets.append({
                     "id": m.get("id", "unknown"),
                     "slug": m.get("slug", "unknown"),
@@ -126,31 +118,42 @@ class UniversalMarketDiscoveryEngine:
             # Normalized hierarchical record
             event_title = m.get("groupItemTitle") or m.get("category") or "Global Event"
             question = m.get("question") or m.get("title") or m.get("slug", "").replace("-", " ").title()
-            slug = m.get("slug") or tid[:18]
+            slug = m.get("slug") or str(token_ids[0])[:18]
+            outcomes = m.get("outcomes", ["Yes", "No"])
+            if isinstance(outcomes, str):
+                try:
+                    outcomes = json.loads(outcomes)
+                except Exception:
+                    outcomes = ["Yes", "No"]
 
-            market_record = {
-                "token_id": tid,
-                "event_id": str(m.get("events", [{}])[0].get("id", "") if m.get("events") else m.get("id", "")),
-                "event_title": event_title,
-                "question": question,
-                "slug": slug,
-                "description": m.get("description", ""),
-                "category": m.get("category", "General"),
-                "outcomes": m.get("outcomes", ["Yes", "No"]),
-                "outcome_prices": m.get("outcomePrices", []),
-                "volume_24h": float(m.get("volume24hr") or 0.0),
-                "total_volume": float(m.get("volume") or 0.0),
-                "liquidity": float(m.get("liquidity") or 0.0),
-                "end_date": m.get("endDate") or m.get("end_date_iso", ""),
-                "status": "ACTIVE" if m.get("active") else "CLOSED",
-                "orderbook_supported": True,
-                "last_synced": time.time(),
-            }
+            for idx, tid in enumerate(token_ids):
+                outcome_label = outcomes[idx] if idx < len(outcomes) else f"Outcome-{idx+1}"
+                token_slug = f"{slug} [{outcome_label}]" if len(token_ids) > 1 else slug
 
-            self.catalog[tid] = market_record
-            store.market_slugs[tid] = slug
-            valid_tokens.append(tid)
-            vector_store.add_market(tid, market_record)
+                market_record = {
+                    "token_id": tid,
+                    "event_id": str(m.get("events", [{}])[0].get("id", "") if m.get("events") else m.get("id", "")),
+                    "event_title": event_title,
+                    "question": question,
+                    "slug": token_slug,
+                    "outcome": outcome_label,
+                    "description": m.get("description", ""),
+                    "category": m.get("category", "General"),
+                    "outcomes": outcomes,
+                    "outcome_prices": m.get("outcomePrices", []),
+                    "volume_24h": float(m.get("volume24hr") or 0.0),
+                    "total_volume": float(m.get("volume") or 0.0),
+                    "liquidity": float(m.get("liquidity") or 0.0),
+                    "end_date": m.get("endDate") or m.get("end_date_iso", ""),
+                    "status": "ACTIVE" if m.get("active") else "CLOSED",
+                    "orderbook_supported": True,
+                    "last_synced": time.time(),
+                }
+
+                self.catalog[tid] = market_record
+                store.market_slugs[tid] = token_slug
+                valid_tokens.append(tid)
+                vector_store.add_market(tid, market_record)
 
         # Update Tiered Book Poller with discovered tokens
         book_poller.add_tokens(valid_tokens)

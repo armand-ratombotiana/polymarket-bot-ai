@@ -3,7 +3,7 @@
    No scattered hardcoded values: every color, spacing, and motion value
    comes from this file. */
 
-@import url('https://fonts.googleapis.com/css2?family=Inter:ital,opsz,wght@0,14..32,300;0,14..32,400;0,14..32,500;0,14..32,600;0,14..32,700;1,14..32,400&family=JetBrains+Mono:wght@400;500;600&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:ital,opsz,wght@0,14..32,300;0,14..32,400;0,14..32,500;0,14..32,600;0,14..32,700;0,14..32,800;1,14..32,400&family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&family=Plus+Jakarta+Sans:ital,wght@0,300;0,400;0,500;0,600;0,700;0,800;1,400;1,600&display=swap');
 @import "tailwindcss";
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -18,7 +18,7 @@
   --bg-hover:     #1a1f2e;   /* row hover */
   --bg-selected:  #1e2540;   /* row selected */
   --bg-input:     #0e1015;   /* input background */
-  --bg-overlay:   rgba(4, 5, 10, 0.82); /* modal backdrop */
+  --bg-overlay:   rgba(4, 5, 10, 0.85); /* modal backdrop */
 
   /* ── Borders ────────────────────────────────────────────────────────────── */
   --border:       #1f2335;   /* standard border */
@@ -154,14 +154,26 @@ html {
 body {
   height: 100%;
   background: var(--bg-surface);
+  background-image: 
+    radial-gradient(at 0% 0%, rgba(59, 130, 246, 0.04) 0px, transparent 40%),
+    radial-gradient(at 100% 100%, rgba(6, 182, 212, 0.03) 0px, transparent 40%);
   color: var(--text-primary);
-  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  font-family: 'Plus Jakarta Sans', 'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
   font-size: 13px;
   line-height: 1.5;
-  font-feature-settings: 'kern' 1;
+  font-feature-settings: 'cv02' 1, 'cv03' 1, 'cv04' 1, 'cv11' 1, 'tnum' 1;
+  font-variant-numeric: tabular-nums;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   overflow: hidden;
+}
+
+/* ── Monospace class ─────────────────────────────────────────────────────── */
+.mono, .font-mono, [data-mono="true"] {
+  font-family: 'JetBrains Mono', 'Fira Code', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace !important;
+  font-feature-settings: 'tnum' 1, 'zero' 1;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
 }
 
 /* ── Focus ring ─────────────────────────────────────────────────────────── */
@@ -277,6 +289,7 @@ body {
   background: var(--color-blue-bg);
   color: var(--color-blue-fg);
   border-color: var(--color-blue-bd);
+  box-shadow: inset 0 0 28px rgba(59, 130, 246, 0.06);
 }
 
 .sidebar-item.active::before {
@@ -286,8 +299,9 @@ body {
   top: 0;
   bottom: 0;
   width: 3px;
-  background: var(--color-blue);
+  background: linear-gradient(180deg, var(--color-blue-fg), var(--color-blue));
   border-radius: 0 2px 2px 0;
+  box-shadow: 2px 0 8px rgba(59, 130, 246, 0.4);
 }
 
 .sidebar-icon {
@@ -366,6 +380,14 @@ body {
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   padding: var(--space-2) var(--space-3);
+  transition:
+    border-color var(--duration-fast) var(--easing-std),
+    box-shadow var(--duration-fast) var(--easing-std);
+}
+
+.kpi-card:hover {
+  border-color: var(--border-hover);
+  box-shadow: 0 0 0 1px rgba(59, 130, 246, 0.08) inset;
 }
 
 .kpi-label {
@@ -385,14 +407,53 @@ body {
   font-variant-numeric: tabular-nums;
   color: var(--text-primary);
   display: block;
+  line-height: 1.2;
 }
 
 .kpi-sub {
   font-size: 10px;
   color: var(--text-dim);
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
   display: block;
-  margin-top: 1px;
+  margin-top: 2px;
 }
+
+/* ── Skeleton loading card ───────────────────────────────────────────────── */
+.skeleton-card {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: var(--space-2) var(--space-3);
+  overflow: hidden;
+  position: relative;
+}
+
+.skeleton-line {
+  height: 10px;
+  background: linear-gradient(90deg, var(--bg-hover) 25%, #202540 50%, var(--bg-hover) 75%);
+  background-size: 200% 100%;
+  animation: skeleton-shimmer 1.5s ease-in-out infinite;
+  border-radius: var(--radius-sm);
+  margin-bottom: var(--space-1);
+}
+
+.skeleton-line-lg {
+  height: 20px;
+  background: linear-gradient(90deg, var(--bg-hover) 25%, #202540 50%, var(--bg-hover) 75%);
+  background-size: 200% 100%;
+  animation: skeleton-shimmer 1.5s ease-in-out infinite;
+  border-radius: var(--radius-sm);
+  margin-bottom: var(--space-2);
+}
+
+/* ── Monthly returns heatmap ─────────────────────────────────────────────── */
+.heatmap-cell-pos-3 { background: rgba(34, 197, 94, 0.35); color: #4ade80; }
+.heatmap-cell-pos-2 { background: rgba(34, 197, 94, 0.20); color: #4ade80; }
+.heatmap-cell-pos-1 { background: rgba(34, 197, 94, 0.10); color: #86efac; }
+.heatmap-cell-zero  { background: transparent;              color: var(--text-dim); }
+.heatmap-cell-neg-1 { background: rgba(239, 68, 68, 0.10);  color: #fca5a5; }
+.heatmap-cell-neg-2 { background: rgba(239, 68, 68, 0.20);  color: #f87171; }
+.heatmap-cell-neg-3 { background: rgba(239, 68, 68, 0.35);  color: #ef4444; }
 
 /* ═══════════════════════════════════════════════════════════════════════════
    DATA TABLES
@@ -1243,6 +1304,61 @@ body {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
+   WORKSTATION LAYOUTS & RESPONSIVE GRIDS
+   ═══════════════════════════════════════════════════════════════════════════ */
+.command-center-layout {
+  display: grid;
+  grid-template-columns: 1fr 1fr 310px;
+  grid-template-rows: auto 1fr 1fr;
+  grid-template-areas:
+    "risk   risk    risk"
+    "market pos     sidebar"
+    "orders events  sidebar";
+  gap: 10px;
+  height: 100%;
+  min-height: 0;
+}
+
+.workstation-split-layout {
+  display: grid;
+  grid-template-columns: 1fr 310px;
+  gap: 10px;
+  height: 100%;
+  min-height: 0;
+}
+
+@media (max-width: 1200px) {
+  .command-center-layout {
+    grid-template-columns: 1fr 1fr;
+    grid-template-rows: auto auto auto auto;
+    grid-template-areas:
+      "risk   risk"
+      "market pos"
+      "orders events"
+      "sidebar sidebar";
+    height: auto;
+    overflow-y: auto;
+  }
+
+  .workstation-split-layout {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto auto;
+    height: auto;
+    overflow-y: auto;
+  }
+}
+
+@media (max-width: 768px) {
+  .command-center-layout,
+  .workstation-split-layout {
+    display: flex;
+    flex-direction: column;
+    height: auto;
+    overflow-y: auto;
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
    RESPONSIVE HELPERS
    ═══════════════════════════════════════════════════════════════════════════ */
 @media (max-width: 1280px) {
@@ -1273,3 +1389,4 @@ body {
   .sidebar-label { display: block; }
   .main-content { width: 100%; }
 }
+

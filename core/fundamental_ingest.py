@@ -20,15 +20,27 @@ from ml.vector_store import vector_store
 log = logging.getLogger(__name__)
 
 BULLISH_TERMS = {
+    # General / Market
     "surge", "gain", "win", "approval", "approved", "lead", "rally", "outperform",
     "boost", "cut", "easing", "dovish", "record", "victory", "bullish", "passes",
-    "confirmed", "growth", "expanding", "upward", "breakthrough", "success"
+    "confirmed", "growth", "expanding", "upward", "breakthrough", "success", "favor",
+    "favored", "unlocked", "upgraded", "settled", "cleared", "secured", "elected",
+    # Politics & Legal
+    "acquitted", "dismissed", "certified", "ahead", "rebound", "advances", "inaugurated",
+    # Crypto / Tech / Macro
+    "all-time-high", "adoption", "inflows", "stimulus", "lowering", "liquidity", "bull",
 }
 
 BEARISH_TERMS = {
+    # General / Market
     "drop", "fall", "lose", "rejection", "rejected", "trail", "crash", "underperform",
     "hike", "hawkish", "deficit", "defeat", "bearish", "fails", "investigation",
-    "indicted", "sanction", "decline", "warning", "crisis", "slump", "lawsuit"
+    "indicted", "sanction", "decline", "warning", "crisis", "slump", "lawsuit", "scandal",
+    "halt", "ban", "prohibited", "downgrade", "outflows", "veto", "vetoed", "unlikely",
+    # Politics & Legal
+    "convicted", "impeached", "resigns", "behind", "subpoena", "recession", "breach",
+    # Crypto / Tech / Macro
+    "delisted", "hack", "exploit", "insolvent", "bankrupt", "freeze", "bear", "collapse",
 }
 
 # ── 100,000+ Source Registry Architecture ──────────────────────────────────────
@@ -110,7 +122,8 @@ class FundamentalIngestionEngine:
         self._seen_hashes: set[str] = set()
         self._running = False
         self._task: asyncio.Task | None = None
-        self._token_sentiment: dict[str, float] = {}
+        # Map: token_id -> list of (timestamp, sentiment) for time-decayed aggregation
+        self._token_sentiment_history: dict[str, list[tuple[float, float]]] = {}
         self._total_ingested: int = 0
         self._last_ingest_time: float = 0.0
 
@@ -168,7 +181,12 @@ class FundamentalIngestionEngine:
 
         # Update cached token sentiment
         for tid in related_tokens:
-            self._token_sentiment[tid] = sentiment
+            if tid not in self._token_sentiment_history:
+                self._token_sentiment_history[tid] = []
+            self._token_sentiment_history[tid].append((ts, sentiment))
+            # Keep at most 20 recent news events per token
+            if len(self._token_sentiment_history[tid]) > 20:
+                self._token_sentiment_history[tid] = self._token_sentiment_history[tid][-20:]
 
         self._total_ingested += 1
         self._last_ingest_time = ts
@@ -188,7 +206,34 @@ class FundamentalIngestionEngine:
         return item
 
     def get_token_sentiment(self, token_id: str) -> float:
-        return self._token_sentiment.get(token_id, 0.0)
+        """
+        Calculate exponential time-decayed sentiment polarity in [-1.0, 1.0].
+
+        Applies a half-life decay of 4 hours (14,400 seconds) so that older news
+        events smoothly diminish in influence over active market pricing.
+        """
+        import math
+        history = self._token_sentiment_history.get(token_id)
+        if not history:
+            return 0.0
+
+        now = time.time()
+        half_life_seconds = 14400.0  # 4 hours
+        decay_lambda = math.log(2) / half_life_seconds
+
+        total_weight = 0.0
+        weighted_sentiment = 0.0
+
+        for ts, s_val in history:
+            age = max(0.0, now - ts)
+            w = math.exp(-decay_lambda * age)
+            weighted_sentiment += w * s_val
+            total_weight += w
+
+        if total_weight < 1e-6:
+            return 0.0
+
+        return round(float(weighted_sentiment / total_weight), 3)
 
     async def start(self) -> None:
         if self._running:

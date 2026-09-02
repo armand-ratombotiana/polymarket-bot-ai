@@ -28,7 +28,7 @@ log = logging.getLogger(__name__)
 
 MID_TOLERANCE = 0.004   # 0.4% move triggers re-quote
 LOOP_SLEEP = 4.0        # Quote review interval (seconds)
-MAX_MARKETS_TO_QUOTE = 4
+MAX_MARKETS_TO_QUOTE = 8
 
 
 class MarketMakerStrategy(BaseStrategy):
@@ -194,16 +194,30 @@ class MarketMakerStrategy(BaseStrategy):
         q = (pos.yes_shares if pos else 0.0)
         invested = (pos.total_invested if pos else 0.0)
 
-        # Approximate price volatility from spread
-        sigma_sq = max(0.001, (market_spread ** 2) / 2.0)
+        # Approximate price volatility: blend spread-based estimate with ML rolling_volatility
+        # feature (index 36 in the 38-feature vector) if available from the model.
+        spread_sigma_sq = max(0.001, (market_spread ** 2) / 2.0)
+        ml_adj, ml_skew = self._ml_spread_adjustment(token_id, book)
+        # Try to use rolling_volatility feature from the model scaler for sigma
+        sigma_sq = spread_sigma_sq  # fallback
+        try:
+            from ml.features import N_FEATURES, extract_features
+            mkt = self._market_info.get(token_id, {})
+            feats = extract_features(mkt, book)
+            if feats is not None and len(feats) == N_FEATURES:
+                # Feature index 36 = rolling_volatility (already [0,1] scaled)
+                rolling_vol = float(feats[36])
+                if rolling_vol > 0.01:
+                    sigma_sq = max(spread_sigma_sq, rolling_vol ** 2)
+        except Exception:
+            pass
 
-        # Reservation price (r) skews down when holding long inventory
-        # r = s - q * gamma * sigma^2
-        reservation_price = mid - (q * 0.01 * self._gamma_risk_aversion * sigma_sq)
+        # Reservation price (r) skews down with long inventory + toward ML fair value
+        # r = s - q * gamma * sigma^2 + ml_skew
+        reservation_price = mid - (q * 0.01 * self._gamma_risk_aversion * sigma_sq) + ml_skew
         reservation_price = max(0.02, min(0.98, reservation_price))
 
-        # Dynamic optimal half-spread
-        half_spread = max(self._base_spread_frac / 2.0, market_spread / 2.0)
+        half_spread = max(self._base_spread_frac / 2.0, market_spread / 2.0) * ml_adj
 
         bid_price = round(max(0.01, reservation_price - half_spread), 4)
         ask_price = round(min(0.99, reservation_price + half_spread), 4)
@@ -251,6 +265,50 @@ class MarketMakerStrategy(BaseStrategy):
                 log.info("[MM] %s: quote SELL %.2f @ %.4f", slug, ask_size, ask_price)
 
         log.debug("[MM] %s: Bid=%.4f Ask=%.4f (mid=%.4f, inv=%.1f)", slug, bid_price, ask_price, mid, q)
+
+    def _ml_spread_adjustment(self, token_id: str, book) -> tuple[float, float]:
+        """
+        Return (spread_multiplier, reservation_skew) driven by ML confidence and direction:
+
+        spread_multiplier:
+          - High confidence (> 0.7): tighten 15%  → 0.85  (better fill probability)
+          - Low confidence  (< 0.3): widen  25%   → 1.25  (protect adverse selection)
+          - Otherwise:               neutral       → 1.0
+
+        reservation_skew:
+          Shift the A-S reservation price toward the ML fair-value estimate.
+          If ML predicts p_yes = 0.65 and market mid = 0.50, skew = +0.015 — the maker
+          quotes a higher reservation and passively accumulates YES inventory at fair value.
+          Capped at ±2.0% to avoid over-steering.
+        """
+        try:
+            from ml.features import extract_features
+            from ml.model import ml_model
+            market = self._market_info.get(token_id, {})
+            feats = extract_features(market, book)
+            if feats is None:
+                return 1.0, 0.0
+            p_yes, confidence = ml_model.predict(feats, token_id=token_id)
+
+            # Spread multiplier
+            if confidence > 0.7:
+                spread_mult = 0.85
+            elif confidence < 0.3:
+                spread_mult = 1.25
+            else:
+                spread_mult = 1.0
+
+            # Directional reservation skew: (ML fair value - market mid) * damping
+            mid = book.mid or 0.5
+            price_edge = p_yes - mid
+            # Damping 0.15: max ±1.5% skew even at 10% edge — conservative to avoid
+            # over-steering the reservation away from the live mid in thin markets.
+            reservation_skew = float(price_edge * 0.15)
+            reservation_skew = max(-0.02, min(0.02, reservation_skew))
+
+            return spread_mult, reservation_skew
+        except Exception:
+            return 1.0, 0.0
 
     async def _cancel_quotes(self, token_id: str) -> None:
         quotes = self._quotes.get(token_id, {})

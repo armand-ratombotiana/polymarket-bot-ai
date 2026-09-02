@@ -199,7 +199,7 @@ class TestInstitutionalSuite(unittest.IsolatedAsyncioTestCase):
         features = extract_features({"volume24hr": 50000, "volume": 200000}, book)
         self.assertIsNotNone(features)
         self.assertEqual(len(features), N_FEATURES)
-        self.assertEqual(len(features), 32)
+        self.assertEqual(len(features), 38)
         self.assertFalse(np.isnan(features).any())
 
     def test_05_ai_model_calibration_and_registry(self):
@@ -207,7 +207,7 @@ class TestInstitutionalSuite(unittest.IsolatedAsyncioTestCase):
         model = MarketMLModel()
         model.fit_initial()
         
-        dummy_feat = np.ones(32, dtype=np.float32) * 0.5
+        dummy_feat = np.ones(N_FEATURES, dtype=np.float32) * 0.5
         p_yes, conf = model.predict(dummy_feat)
         
         self.assertGreaterEqual(p_yes, 0.01)

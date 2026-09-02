@@ -40,19 +40,25 @@ class BookPoller:
         self._base = settings.poly_clob_host.rstrip("/")
         self._success_count = 0
         self._error_count = 0
+        # Persistent semaphore — created once, reused across poll cycles
+        self._sem = asyncio.Semaphore(MAX_CONCURRENT)
+        # Circuit-breaker rolling window (last 30 request results)
+        self._result_window: list[bool] = []  # True=success, False=error
+        self._circuit_open = False
+        self._circuit_open_until: float = 0.0
 
     def set_tokens(self, token_ids: list[str]) -> None:
-        """Assign first 15 to Tier 1, rest to Tier 2."""
+        """Assign first 50 to Tier 1, rest to Tier 2."""
         tokens = list(dict.fromkeys(token_ids))
-        self._tier1_tokens = set(tokens[:15])
-        self._tier2_tokens = set(tokens[15:])
+        self._tier1_tokens = set(tokens[:50])
+        self._tier2_tokens = set(tokens[50:])
         log.info("[book_poller] Configured %d Tier-1 and %d Tier-2 tokens",
                  len(self._tier1_tokens), len(self._tier2_tokens))
 
     def add_tokens(self, token_ids: list[str]) -> None:
         for tid in token_ids:
             if tid not in self._tier1_tokens and tid not in self._tier2_tokens:
-                if len(self._tier1_tokens) < 20:
+                if len(self._tier1_tokens) < 50:
                     self._tier1_tokens.add(tid)
                 else:
                     self._tier2_tokens.add(tid)
@@ -92,19 +98,44 @@ class BookPoller:
         await asyncio.sleep(1.0 if tier == 1 else 3.0)
         while self._running:
             try:
+                # Circuit breaker: pause polling if sustained error rate > 80%
+                import time
+                if self._circuit_open:
+                    if time.time() < self._circuit_open_until:
+                        await asyncio.sleep(interval)
+                        continue
+                    else:
+                        self._circuit_open = False
+                        self._result_window.clear()
+                        log.info("[book_poller] Circuit breaker CLOSED — resuming polling")
+
                 tokens = list(self._tier1_tokens if tier == 1 else self._tier2_tokens)
                 if tokens:
-                    sem = asyncio.Semaphore(MAX_CONCURRENT)
-
+                    # Reuse persistent semaphore (not re-created every cycle)
                     async def fetch_one(tid: str) -> None:
-                        async with sem:
+                        async with self._sem:
                             await self._fetch_book(tid)
 
                     tasks = [asyncio.create_task(fetch_one(t)) for t in tokens]
                     results = await asyncio.gather(*tasks, return_exceptions=True)
-                    errors = sum(1 for r in results if isinstance(r, Exception))
-                    if errors:
-                        self._error_count += errors
+                    for r in results:
+                        success = not isinstance(r, Exception)
+                        self._result_window.append(success)
+                        if success:
+                            self._success_count += 1
+                        else:
+                            self._error_count += 1
+                    # Keep only last 30 results for circuit breaker
+                    if len(self._result_window) > 30:
+                        self._result_window = self._result_window[-30:]
+                    # Trip circuit breaker if error rate > 80%
+                    if len(self._result_window) >= 10:
+                        err_rate = self._result_window.count(False) / len(self._result_window)
+                        if err_rate > 0.80 and not self._circuit_open:
+                            self._circuit_open = True
+                            self._circuit_open_until = time.time() + 30.0
+                            log.warning("[book_poller] Circuit breaker OPEN — error rate %.0f%%, pausing 30s",
+                                        err_rate * 100)
             except Exception as e:
                 log.debug("[book_poller] Tier-%d poll cycle error: %s", tier, e)
             await asyncio.sleep(interval)
@@ -115,11 +146,20 @@ class BookPoller:
         try:
             resp = await self._client.get("/book", params={"token_id": token_id})
             if resp.status_code == 200:
-                await self._apply_book(token_id, resp.json())
+                data = resp.json()
+                await self._apply_book(token_id, data)
                 self._success_count += 1
+                from core.ingestion.raw_vault import raw_vault
+                from core.ingestion.source_registry import source_registry
+                asyncio.create_task(raw_vault.record_observation("clob_rest", data))
+                asyncio.create_task(source_registry.record_metric("clob_rest", True))
             else:
                 log.debug("[book_poller] %s HTTP %d", token_id[:12], resp.status_code)
-        except Exception:
+                from core.ingestion.source_registry import source_registry
+                asyncio.create_task(source_registry.record_metric("clob_rest", False, f"HTTP {resp.status_code}"))
+        except Exception as e:
+            from core.ingestion.source_registry import source_registry
+            asyncio.create_task(source_registry.record_metric("clob_rest", False, str(e)))
             raise
 
     async def _apply_book(self, token_id: str, data: dict) -> None:

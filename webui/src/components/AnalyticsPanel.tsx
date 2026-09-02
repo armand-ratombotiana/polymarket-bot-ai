@@ -32,6 +32,12 @@ interface Analytics {
   active_strategies: string[]
 }
 
+const STRATEGY_LABELS: Record<string, string> = {
+  mm_avellaneda_stoikov: 'Avellaneda-Stoikov MM',
+  arb_binary_dutch_book: 'Dutch-Book Arb',
+  ml_random_forest_quant: 'RF Quant Ensemble',
+}
+
 export default function AnalyticsPanel() {
   const [data, setData] = useState<Analytics | null>(null)
   const [loading, setLoading] = useState(true)
@@ -78,17 +84,29 @@ export default function AnalyticsPanel() {
   const ciLowPct = data.win_rate_ci_low != null ? (data.win_rate_ci_low * 100).toFixed(1) : null
   const ciHighPct = data.win_rate_ci_high != null ? (data.win_rate_ci_high * 100).toFixed(1) : null
 
+  // Determine trend arrow from CI midpoint vs 50%
+  const ciMid = data.win_rate_ci_low != null && data.win_rate_ci_high != null
+    ? (data.win_rate_ci_low + data.win_rate_ci_high) / 2
+    : data.win_rate
+  const trendArrow = ciMid > 0.505 ? '▲' : ciMid < 0.495 ? '▼' : '▶'
+  const trendColor = ciMid > 0.505 ? 'text-green-400' : ciMid < 0.495 ? 'text-red-400' : 'text-[#7e8aaa]'
+
+  const activeStrats = data.active_strategies ?? []
+
   return (
-    <div className="card flex flex-col">
-      <div className="card-header flex justify-between items-center">
+    <div className="card flex flex-col bg-[#13161e] border border-[#1f2335] shadow-md">
+      <div className="card-header p-3 border-b border-[#1f2335] flex justify-between items-center">
         <div className="flex items-center gap-2">
-          <span className="card-title">📊 Performance Analytics</span>
+          <span className="card-title text-xs font-bold text-[#dde1ed]">📊 Performance Analytics</span>
           <span className="badge badge-amber text-[9.5px]">
             {data.mode?.toUpperCase() || 'PAPER'}
           </span>
         </div>
-        <div className="flex items-center gap-1.5">
-          <span className="mono text-xs text-green-400 font-semibold">
+        <div className="flex items-center gap-2">
+          <span className={`mono text-xs font-bold ${trendColor}`}>
+            {trendArrow}
+          </span>
+          <span className="mono text-xs text-green-400 font-bold">
             {winRatePct}% Win Rate
           </span>
         </div>
@@ -104,74 +122,72 @@ export default function AnalyticsPanel() {
         </div>
       )}
 
+      {/* Active Strategies Strip */}
+      {activeStrats.length > 0 && (
+        <div className="px-3 pt-2.5 flex flex-wrap gap-1.5">
+          <span className="text-[10px] text-[#7e8aaa] uppercase font-semibold tracking-wider self-center">Active:</span>
+          {activeStrats.map((s) => (
+            <span key={s} className="badge badge-green text-[9px]">
+              ● {STRATEGY_LABELS[s] ?? s.replace(/_/g, ' ')}
+            </span>
+          ))}
+        </div>
+      )}
+
       <div className="p-3 grid grid-cols-2 gap-2 text-[11px]">
         {/* Win Rate + Wilson CI */}
-        <div className="bg-[#0e1015] p-2 rounded border border-[#1f2335]">
-          <span className="text-[#7e8aaa] block text-[10px] uppercase font-semibold">Win Rate (Wilson 95% CI)</span>
-          <span className="mono font-semibold text-[#dde1ed] text-[13px]">
-            {winRatePct}%
-          </span>
-          <span className="text-[9.5px] text-[#7e8aaa] block mt-0.5 mono">
+        <div className="kpi-card">
+          <span className="kpi-label">Win Rate (Wilson 95% CI)</span>
+          <span className="kpi-value text-[#dde1ed]">{winRatePct}%</span>
+          <span className="kpi-sub">
             {ciLowPct && ciHighPct ? `[${ciLowPct}% – ${ciHighPct}%] (n=${n})` : `n=${n}`}
           </span>
         </div>
 
         {/* Profit Factor */}
-        <div className="bg-[#0e1015] p-2 rounded border border-[#1f2335]">
-          <span className="text-[#7e8aaa] block text-[10px] uppercase font-semibold">Profit Factor</span>
-          <span className="mono font-semibold text-[#60a5fa] text-[13px]">
+        <div className="kpi-card">
+          <span className="kpi-label">Profit Factor</span>
+          <span className="kpi-value text-[#60a5fa]">
             {typeof data.profit_factor === 'number'
               ? data.profit_factor.toFixed(2)
               : data.profit_factor === 'Infinity'
               ? '∞'
               : '—'}
           </span>
-          <span className="text-[9.5px] text-[#7e8aaa] block mt-0.5">
-            Gross wins / Gross losses
-          </span>
+          <span className="kpi-sub">Gross wins / Gross losses</span>
         </div>
 
         {/* Total Trades & Volume */}
-        <div className="bg-[#0e1015] p-2 rounded border border-[#1f2335]">
-          <span className="text-[#7e8aaa] block text-[10px] uppercase font-semibold">Trades / Volume</span>
-          <span className="mono font-semibold text-[#dde1ed] text-[13px]">
-            {data.total_trades} trades
-          </span>
-          <span className="text-[9.5px] text-[#22d3ee] block mt-0.5 mono">
-            {fmtUsd(data.total_volume_usdc)} vol
-          </span>
+        <div className="kpi-card">
+          <span className="kpi-label">Trades / Volume</span>
+          <span className="kpi-value text-[#dde1ed]">{data.total_trades} trades</span>
+          <span className="kpi-sub text-[#22d3ee]">{fmtUsd(data.total_volume_usdc)} vol</span>
         </div>
 
         {/* Max Drawdown */}
-        <div className="bg-[#0e1015] p-2 rounded border border-[#1f2335]">
-          <span className="text-[#7e8aaa] block text-[10px] uppercase font-semibold">Max Drawdown</span>
-          <span className="mono font-semibold text-[#f87171] text-[13px]">
+        <div className="kpi-card">
+          <span className="kpi-label">Max Drawdown</span>
+          <span className="kpi-value text-[#f87171]">
             {fmtUsd(data.max_drawdown_dollars)} ({fmtPct(data.max_drawdown_pct)})
           </span>
-          <span className="text-[9.5px] text-[#7e8aaa] block mt-0.5 mono">
-            Peak: {fmtUsd(data.peak_equity)}
-          </span>
+          <span className="kpi-sub">Peak: {fmtUsd(data.peak_equity)}</span>
         </div>
 
-        {/* Realized vs Unrealized P&L */}
-        <div className="bg-[#0e1015] p-2 rounded border border-[#1f2335]">
-          <span className="text-[#7e8aaa] block text-[10px] uppercase font-semibold">Realized P&L</span>
-          <span className={`mono font-semibold text-[13px] ${data.realized_pnl >= 0 ? 'text-[#4ade80]' : 'text-[#f87171]'}`}>
+        {/* Realized P&L */}
+        <div className="kpi-card">
+          <span className="kpi-label">Realized P&amp;L</span>
+          <span className={`kpi-value ${data.realized_pnl >= 0 ? 'text-[#4ade80]' : 'text-[#f87171]'}`}>
             {fmtPnl(data.realized_pnl)}
           </span>
-          <span className="text-[9.5px] text-[#7e8aaa] block mt-0.5">
-            Closed positions today
-          </span>
+          <span className="kpi-sub">Closed positions today</span>
         </div>
 
-        <div className="bg-[#0e1015] p-2 rounded border border-[#1f2335]">
-          <span className="text-[#7e8aaa] block text-[10px] uppercase font-semibold">Unrealized P&L</span>
-          <span className={`mono font-semibold text-[13px] ${data.unrealized_pnl >= 0 ? 'text-[#4ade80]' : 'text-[#f87171]'}`}>
+        <div className="kpi-card">
+          <span className="kpi-label">Unrealized P&amp;L</span>
+          <span className={`kpi-value ${data.unrealized_pnl >= 0 ? 'text-[#4ade80]' : 'text-[#f87171]'}`}>
             {fmtPnl(data.unrealized_pnl)}
           </span>
-          <span className="text-[9.5px] text-[#7e8aaa] block mt-0.5">
-            Mark-to-mid open book
-          </span>
+          <span className="kpi-sub">Mark-to-mid open book</span>
         </div>
       </div>
     </div>

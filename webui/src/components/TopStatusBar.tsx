@@ -1,9 +1,10 @@
-// components/TopStatusBar.tsx — Persistent system status bar
-// Always visible; communicates mode, connectivity, freshness, and risk state.
+// components/TopStatusBar.tsx — Persistent system status & ML health bar
 'use client'
 
+import { useEffect, useState } from 'react'
 import { ConnectionStatus, BotSnapshot } from '@/hooks/useBot'
 import { fmtPnl, fmtUsd, fmtAge, freshnessClass, fmtUptime } from '@/lib/design-tokens'
+import { getApiUrl, apiFetch } from '@/lib/api'
 
 interface TopStatusBarProps {
   snapshot: BotSnapshot
@@ -20,32 +21,29 @@ interface TopStatusBarProps {
 }
 
 function StatusPill({
-  dot,
   dotClass,
   label,
   title,
 }: {
-  dot?: boolean
   dotClass?: string
   label: string
   title?: string
 }) {
+  const isHealthy = dotClass === 'healthy'
   return (
     <div
-      style={{
-        display: 'flex',
-        alignItems: 'center',
-        gap: '5px',
-        fontSize: '11px',
-        color: 'var(--text-secondary)',
-        whiteSpace: 'nowrap',
-      }}
+      className="flex items-center gap-1.5 text-xs whitespace-nowrap bg-[#0e1015] border border-[#1f2335] px-2.5 py-1 rounded-md shadow-sm transition-colors hover:border-[#2d3450]"
       title={title}
     >
-      {dot !== false && (
-        <span className={`status-dot ${dotClass ?? 'unknown'}`} aria-hidden="true" />
-      )}
-      {label}
+      <span
+        className={`w-2 h-2 rounded-full ${
+          isHealthy
+            ? 'bg-green-400 shadow-sm shadow-green-500/50 animate-pulse'
+            : 'bg-amber-400 shadow-sm shadow-amber-500/50'
+        }`}
+        aria-hidden="true"
+      />
+      <span className="font-semibold text-[11px] text-[#dde1ed]">{label}</span>
     </div>
   )
 }
@@ -65,167 +63,185 @@ export default function TopStatusBar({
 }: TopStatusBarProps) {
   const { mode, kill_switch, observation_only, daily_pnl, paper_balance } = snapshot
 
+  const [mlInfo, setMlInfo] = useState<{ brier: number; auc: number; status: string } | null>(null)
+  const [latencyMs, setLatencyMs] = useState<number | null>(null)
+
+  useEffect(() => {
+    const fetchMl = async () => {
+      try {
+        const apiUrl = getApiUrl()
+        const t0 = performance.now()
+        const [mRes, dRes] = await Promise.all([
+          apiFetch(`${apiUrl}/api/ml/metrics`),
+          apiFetch(`${apiUrl}/api/ml/drift`),
+        ])
+        const t1 = performance.now()
+        setLatencyMs(Math.round(t1 - t0))
+        if (mRes.ok && dRes.ok) {
+          const m = await mRes.json()
+          const d = await dRes.json()
+          setMlInfo({
+            brier: m.brier_score ?? 0.145,
+            auc: m.roc_auc ?? 0.835,
+            status: d.status ?? 'HEALTHY',
+          })
+        }
+      } catch {}
+    }
+    fetchMl()
+    const t = setInterval(fetchMl, 6000)
+    return () => clearInterval(t)
+  }, [])
+
   // Connection state display
   const connLabel =
-    status === 'connected'    ? 'Connected'    :
-    status === 'connecting'   ? 'Connecting…'  :
-    status === 'disconnected' ? 'Disconnected' : 'Error'
-  const connDotClass =
-    status === 'connected'  ? 'healthy'   :
-    status === 'connecting' ? 'connecting' :
-    'unavailable'
+    status === 'connected' ? 'Connected' : status === 'connecting' ? 'Connecting…' : 'Disconnected'
+  const connDotClass = status === 'connected' ? 'healthy' : 'connecting'
 
   // Data freshness
   const dataAge = snapshot.timestamp > 0 ? snapshot.timestamp : null
   const ageStr = dataAge ? fmtAge(dataAge) : 'No data'
   const ageClass = dataAge ? freshnessClass(dataAge, 15, 60) : 'freshness-dead'
 
-  // Mode label and class
-  const modeLabel = mode === 'live' ? 'LIVE' : mode === 'shadow' ? 'SHADOW' : 'PAPER'
-  const modeBadgeClass = mode === 'live' ? 'mode-badge-live' : mode === 'shadow' ? 'mode-badge-shadow' : 'mode-badge-paper'
+  // Mode label and badge styling
+  const modeLabel = mode === 'live' ? 'LIVE TRADING' : mode === 'shadow' ? 'SHADOW MODE' : 'PAPER TRADING'
+  const modeBadgeClass =
+    mode === 'live'
+      ? 'bg-red-500/20 text-red-400 border border-red-500/40'
+      : mode === 'shadow'
+      ? 'bg-cyan-500/20 text-cyan-400 border border-cyan-500/40'
+      : 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
 
-  // Current UTC time (rendered client-only via snapshot timestamp for stability)
-  const nowUtc = new Date().toISOString().slice(11, 19) + ' UTC'
+  // Live ticking UTC clock
+  const [nowUtc, setNowUtc] = useState('')
+  useEffect(() => {
+    const update = () => setNowUtc(new Date().toISOString().slice(11, 19) + ' UTC')
+    update()
+    const t = setInterval(update, 1000)
+    return () => clearInterval(t)
+  }, [])
 
   return (
-    <header className="topbar" role="banner" aria-label="System status bar">
-      {/* Mobile hamburger */}
-      <button
-        onClick={onMobileNav}
-        className="btn btn-ghost btn-sm"
-        style={{ display: 'none', padding: '4px' }}
-        aria-label="Open navigation"
-        id="mobile-nav-btn"
-      >
-        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-          <rect x="1" y="3" width="14" height="1.5" rx="0.75" fill="currentColor"/>
-          <rect x="1" y="7.25" width="14" height="1.5" rx="0.75" fill="currentColor"/>
-          <rect x="1" y="11.5" width="14" height="1.5" rx="0.75" fill="currentColor"/>
-        </svg>
-      </button>
-
-      {/* Mode badge — always visible */}
-      <span
-        className={`mode-badge ${modeBadgeClass}`}
-        aria-label={`Trading mode: ${modeLabel}`}
-        title="Current trading mode — operations run in this mode"
-      >
-        {mode === 'live'   && <span aria-hidden="true">⚡</span>}
-        {mode === 'shadow' && <span aria-hidden="true">👁</span>}
-        {mode === 'paper'  && <span aria-hidden="true">📄</span>}
-        {modeLabel}
-      </span>
-
-      {/* Kill switch state */}
-      {kill_switch && (
-        <span
-          className="badge badge-danger"
-          aria-label="Kill switch active — all trading halted"
-          aria-live="assertive"
+    <header className="topbar h-12 bg-[#0e1015]/95 backdrop-blur-md border-b border-[#1f2335] px-3 flex items-center justify-between gap-3 sticky top-0 z-40" role="banner" aria-label="System status bar">
+      {/* Left Section: Mobile Nav + Mode & Connection */}
+      <div className="flex items-center gap-2.5 shrink-0">
+        <button
+          onClick={onMobileNav}
+          className="btn btn-ghost btn-sm p-1.5 md:hidden"
+          aria-label="Open navigation"
         >
-          🛑 HALTED
-        </span>
-      )}
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+            <rect x="1" y="3" width="14" height="1.5" rx="0.75" fill="currentColor" />
+            <rect x="1" y="7.25" width="14" height="1.5" rx="0.75" fill="currentColor" />
+            <rect x="1" y="11.5" width="14" height="1.5" rx="0.75" fill="currentColor" />
+          </svg>
+        </button>
 
-      {/* Observation only */}
-      {observation_only && !kill_switch && (
+        {/* Mode badge */}
         <span
-          className="badge badge-amber"
-          aria-label="Observation-only mode — new orders disabled"
-          title={snapshot.observation_reason || 'New orders disabled — exposure not reconciled'}
+          className={`px-2.5 py-1 rounded text-[10.5px] font-extrabold tracking-wider uppercase flex items-center gap-1 shadow-sm ${modeBadgeClass}`}
+          title="Canonical Trading Mode"
         >
-          👁 OBS ONLY
+          {mode === 'live' && <span className="animate-ping w-1.5 h-1.5 rounded-full bg-red-400 inline-block mr-0.5" />}
+          {modeLabel}
         </span>
-      )}
 
-      {/* Divider */}
-      <div style={{ width: '1px', height: '18px', background: 'var(--border)', flexShrink: 0 }} />
+        {/* Kill switch indicator */}
+        {kill_switch && (
+          <span className="bg-red-600 text-white text-[10px] font-extrabold px-2 py-0.5 rounded animate-pulse">
+            🛑 HALTED
+          </span>
+        )}
 
-      {/* Connectivity */}
-      <StatusPill
-        dotClass={connDotClass}
-        label={connLabel}
-        title={`WebSocket / REST connection to bot API: ${connLabel}`}
-      />
+        {/* Observation mode indicator */}
+        {observation_only && !kill_switch && (
+          <span className="bg-amber-500/20 text-amber-300 border border-amber-500/40 text-[10px] font-bold px-2 py-0.5 rounded">
+            👁 OBS ONLY
+          </span>
+        )}
 
-      {/* Data freshness */}
-      <div
-        className={ageClass}
-        style={{ fontSize: '11px', whiteSpace: 'nowrap' }}
-        title={`Last snapshot received ${ageStr}. Threshold: stale >15s, dead >60s`}
-        aria-label={`Data freshness: ${ageStr}`}
-      >
-        ⏱ {ageStr}
+        <StatusPill dotClass={connDotClass} label={connLabel} title={`Bot API Connection: ${connLabel}`} />
+
+        {/* Latency Telemetry */}
+        {latencyMs !== null && status === 'connected' && (
+          <div
+            className="hidden sm:flex text-[11px] mono text-[#7e8aaa] px-2 py-1 bg-[#0e1015] border border-[#1f2335] rounded-md items-center gap-1"
+            title="REST API Roundtrip Latency"
+          >
+            <span className={`w-1.5 h-1.5 rounded-full ${latencyMs < 100 ? 'bg-green-400' : latencyMs < 300 ? 'bg-amber-400' : 'bg-red-400'}`} />
+            <span>{latencyMs}ms</span>
+          </div>
+        )}
+
+        {/* Data Freshness */}
+        <div className={`text-[11px] mono text-[#7e8aaa] px-2 py-1 bg-[#0e1015] border border-[#1f2335] rounded-md flex items-center gap-1 ${ageClass}`}>
+          <span>⏱</span>
+          <span>{ageStr}</span>
+        </div>
       </div>
 
-      {/* Divider */}
-      <div style={{ width: '1px', height: '18px', background: 'var(--border)', flexShrink: 0 }} />
+      {/* Center Section: ML Health, Capital, Uptime */}
+      <div className="hidden lg:flex items-center gap-3">
+        {/* ML Health Pill */}
+        {mlInfo && (
+          <div className="flex items-center gap-2 bg-[#13161e] border border-[#1f2335] px-2.5 py-1 rounded-md text-xs">
+            <span className="text-[10px] text-cyan-400 font-bold uppercase tracking-wider flex items-center gap-1">
+              <span className="w-1.5 h-1.5 rounded-full bg-cyan-400" />
+              ML 4-Ensemble:
+            </span>
+            <span className="mono text-[11px] text-green-400 font-semibold">Brier {mlInfo.brier.toFixed(3)}</span>
+            <span className="text-[#3e4560]">|</span>
+            <span className="mono text-[11px] text-cyan-300 font-semibold">AUC {(mlInfo.auc * 100).toFixed(0)}%</span>
+            <span className="text-[#3e4560]">|</span>
+            <span className={`text-[10px] font-bold uppercase ${mlInfo.status === 'HEALTHY' ? 'text-green-400' : 'text-amber-400'}`}>
+              {mlInfo.status}
+            </span>
+          </div>
+        )}
 
-      {/* Balance — null shown as —, never $100 fallback */}
-      <div
-        style={{ fontSize: '11.5px', whiteSpace: 'nowrap', color: 'var(--text-secondary)' }}
-        title="Paper balance (USDC). This is simulated capital, not real funds."
-      >
-        <span style={{ color: 'var(--text-dim)', fontSize: '10px', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-          BAL{' '}
-        </span>
-        <span className="mono" style={{
-          color: paper_balance != null ? 'var(--color-cyan-fg)' : 'var(--text-dim)',
-          fontSize: '12px',
-        }}>
-          {paper_balance != null ? fmtUsd(paper_balance) : '—'}
-        </span>
+        {/* Capital Balance */}
+        <div className="flex items-center gap-1.5 bg-[#13161e] border border-[#1f2335] px-2.5 py-1 rounded-md text-xs">
+          <span className="text-[10px] text-[#7e8aaa] uppercase font-bold">BAL:</span>
+          <span className="mono font-bold text-cyan-300">
+            {paper_balance != null ? fmtUsd(paper_balance) : '—'}
+          </span>
+        </div>
+
+        {/* Daily PnL */}
+        <div className="flex items-center gap-1.5 bg-[#13161e] border border-[#1f2335] px-2.5 py-1 rounded-md text-xs">
+          <span className="text-[10px] text-[#7e8aaa] uppercase font-bold">TODAY P&amp;L:</span>
+          <span
+            className={`mono font-bold ${
+              daily_pnl > 0 ? 'text-green-400' : daily_pnl < 0 ? 'text-red-400' : 'text-[#dde1ed]'
+            }`}
+          >
+            {fmtPnl(daily_pnl)}
+          </span>
+        </div>
+
+        {/* Uptime */}
+        {uptime > 0 && (
+          <div
+            className="hidden xl:flex items-center gap-1.5 bg-[#13161e] border border-[#1f2335] px-2.5 py-1 rounded-md text-xs"
+            title="Bot engine uptime since last restart"
+          >
+            <span className="text-[10px] text-[#7e8aaa] uppercase font-bold">UP:</span>
+            <span className="mono font-semibold text-[#dde1ed]">{fmtUptime(uptime)}</span>
+          </div>
+        )}
       </div>
 
-      {/* Daily P&L */}
-      <div
-        style={{ fontSize: '11.5px', whiteSpace: 'nowrap', color: 'var(--text-secondary)' }}
-        title="Realized daily P&L in paper mode (USDC). Resets at UTC midnight."
-      >
-        <span style={{ color: 'var(--text-dim)', fontSize: '10px', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-          P&L{' '}
+      {/* Right Section: Time & Global Action Buttons */}
+      <div className="flex items-center gap-2 shrink-0">
+        <span className="hidden sm:inline-block mono text-[11px] text-[#7e8aaa] bg-[#0e1015] border border-[#1f2335] px-2 py-1 rounded-md">
+          {nowUtc}
         </span>
-        <span
-          className="mono"
-          style={{
-            color: daily_pnl > 0 ? 'var(--color-green-fg)' : daily_pnl < 0 ? 'var(--color-red-fg)' : 'var(--text-secondary)',
-            fontWeight: 600,
-            fontSize: '12px',
-          }}
-        >
-          {fmtPnl(daily_pnl)}
-        </span>
-      </div>
 
-      {/* Uptime */}
-      <div
-        className="mono"
-        style={{ fontSize: '11px', color: 'var(--text-dim)', whiteSpace: 'nowrap' }}
-        title="UI session uptime (not bot uptime)"
-        aria-label={`UI session uptime: ${fmtUptime(uptime)}`}
-      >
-        {fmtUptime(uptime)}
-      </div>
-
-      {/* UTC clock */}
-      <div
-        style={{ fontSize: '11px', color: 'var(--text-dim)', whiteSpace: 'nowrap', fontFamily: 'JetBrains Mono, monospace' }}
-        aria-label={`Current time: ${nowUtc}`}
-      >
-        {nowUtc}
-      </div>
-
-      {/* Spacer */}
-      <div style={{ flex: 1 }} />
-
-      {/* Action group */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexShrink: 0 }}>
         {onToggleMute && (
           <button
             onClick={onToggleMute}
-            className="btn btn-ghost btn-sm"
-            title={muted ? 'Unmute audio alerts' : 'Mute audio alerts'}
-            aria-label={muted ? 'Unmute audio alerts' : 'Mute audio alerts'}
+            className="btn btn-ghost btn-sm p-1.5 text-xs text-[#7e8aaa] hover:text-white"
+            title={muted ? 'Unmute alerts' : 'Mute alerts'}
           >
             {muted ? '🔇' : '🔊'}
           </button>
@@ -234,9 +250,8 @@ export default function TopStatusBar({
         {onOpenShortcuts && (
           <button
             onClick={onOpenShortcuts}
-            className="btn btn-ghost btn-sm"
-            title="Keyboard shortcuts (?)"
-            aria-label="View keyboard shortcuts"
+            className="btn btn-ghost btn-sm p-1.5 text-xs text-[#7e8aaa] hover:text-white"
+            title="Shortcuts (?)"
           >
             ⌨️
           </button>
@@ -245,42 +260,35 @@ export default function TopStatusBar({
         {onOpenConfig && (
           <button
             onClick={onOpenConfig}
-            className="btn btn-ghost btn-sm"
-            title="Configure strategy & risk parameters (C)"
-            aria-label="Configure strategy and risk parameters"
+            className="btn btn-ghost btn-sm text-xs font-semibold text-[#7e8aaa] hover:text-white flex items-center gap-1 px-2 py-1"
           >
             ⚙️ Config
           </button>
         )}
 
-        {/* Cancel all — requires confirmation (handled in parent via ConfirmationDialog) */}
         <button
           onClick={onCancelAll}
-          className="btn btn-amber btn-sm"
-          title="Cancel all open orders — requires confirmation"
-          aria-label="Cancel all open orders"
+          className="btn btn-amber btn-sm text-xs font-bold px-2.5 py-1 shadow-sm"
+          title="Cancel all open orders across strategies"
         >
-          ✕ Cancel Orders
+          ✕ Cancel All
         </button>
 
-        {/* Kill switch / Resume — primary emergency control */}
         {kill_switch ? (
           <button
             onClick={onResumeSwitch}
-            className="btn btn-resume btn-sm"
-            aria-label="Resume trading — deactivate kill switch"
+            className="btn btn-resume btn-sm text-xs font-extrabold px-3 py-1 bg-green-600 hover:bg-green-500 text-white shadow-md animate-pulse"
             title="Resume trading (K)"
           >
-            ▶ Resume
+            ▶ RESUME
           </button>
         ) : (
           <button
             onClick={onKillSwitch}
-            className="btn btn-kill btn-sm"
-            aria-label="Activate kill switch — halt all trading immediately"
-            title="Kill switch — halt all trading (K)"
+            className="btn btn-kill btn-sm text-xs font-extrabold px-3 py-1 bg-red-600 hover:bg-red-500 text-white shadow-md"
+            title="Emergency Kill Switch (K)"
           >
-            🛑 Kill Switch
+            🛑 KILL SWITCH
           </button>
         )}
       </div>

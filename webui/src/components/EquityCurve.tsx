@@ -103,14 +103,14 @@ export default function EquityCurve() {
   const strokeColor = isProfit ? '#22c55e' : '#ef4444'
 
   return (
-    <div className="card p-3 flex flex-col justify-between min-h-[160px]">
+    <div className="card p-3 flex flex-col justify-between min-h-[160px] bg-[#13161e] border border-[#1f2335] shadow-md">
       <div className="card-header pb-1 flex justify-between items-center">
         <div className="flex items-center gap-1.5">
-          <span className="card-title">📈 Portfolio Equity</span>
+          <span className="card-title text-xs font-bold text-[#dde1ed]">📈 Portfolio Equity</span>
           <span className="badge badge-amber text-[9.5px]">Paper</span>
         </div>
         <div className="flex items-center gap-2">
-          <span className="mono text-xs font-semibold text-[#e8eaf0]">
+          <span className="mono text-xs font-semibold text-[#dde1ed]">
             {currentEquity !== null ? fmtUsd(currentEquity) : '—'}
           </span>
           <span className={`badge ${isProfit ? 'badge-green' : 'badge-red'} text-[10px]`}>

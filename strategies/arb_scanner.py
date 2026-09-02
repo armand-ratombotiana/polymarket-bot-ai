@@ -57,12 +57,31 @@ class ArbScannerStrategy(BaseStrategy):
         await store.log_event(f"🔍 Arb Scanner active — scanning {len(self._pairs)} binary market pair(s)")
         log.info("[arb_scanner] Monitoring %d binary pairs for arbitrage", len(self._pairs))
 
+        # Background pair refresh so new markets are picked up automatically
+        asyncio.create_task(self._pair_refresh_loop(), name="arb-pair-refresh")
+
         while self._running:
             try:
                 await self._scan_for_arb()
             except Exception as e:
                 log.error("[arb_scanner] Scan error: %s", e)
             await asyncio.sleep(self._scan_interval)
+
+    async def _pair_refresh_loop(self) -> None:
+        """Rebuild YES/NO token pairs every 10 minutes to capture new markets."""
+        await asyncio.sleep(600)
+        while self._running:
+            try:
+                old_count = len(self._pairs)
+                await self._build_market_pairs()
+                new_count = len(self._pairs)
+                all_tokens = list(self._pairs.keys()) + list(self._pairs.values())
+                book_poller.add_tokens(all_tokens)
+                if new_count != old_count:
+                    log.info("[arb_scanner] Pair refresh: %d -> %d binary pairs", old_count, new_count)
+            except Exception as e:
+                log.debug("[arb_scanner] Pair refresh error: %s", e)
+            await asyncio.sleep(600)
 
     async def _build_market_pairs(self) -> None:
         """Fetch markets from Gamma and build YES/NO token-pair mappings."""
@@ -86,22 +105,30 @@ class ArbScannerStrategy(BaseStrategy):
     # ── Arbitrage Scan ────────────────────────────────────────────────────────
 
     async def _scan_for_arb(self) -> None:
-        opportunities: list[tuple[str, str, float, float, float]] = []
+        # (yes_tid, no_tid, yes_price, no_price, profit, arb_type)
+        opportunities: list[tuple[str, str, float, float, float, str]] = []
 
         for yes_tid, no_tid in list(self._pairs.items()):
-            opp = await self._check_pair(yes_tid, no_tid)
-            if opp:
-                opportunities.append((yes_tid, no_tid, *opp))
+            long_opp = await self._check_long_dutch_book(yes_tid, no_tid)
+            if long_opp:
+                opportunities.append((yes_tid, no_tid, *long_opp, "long_dutch_book"))
+
+            short_opp = await self._check_short_overpriced(yes_tid, no_tid)
+            if short_opp:
+                opportunities.append((yes_tid, no_tid, *short_opp, "short_overpriced"))
 
         if opportunities:
             opportunities.sort(key=lambda x: x[4], reverse=True)
-            best = opportunities[0]
-            yes_tid, no_tid, yes_price, no_price, profit = best
-            await self._execute_arb(yes_tid, no_tid, yes_price, no_price, profit)
+            # Execute top-3 best opportunities per scan cycle
+            for opp in opportunities[:3]:
+                yes_tid, no_tid, yes_price, no_price, profit, arb_type = opp
+                await self._execute_arb(yes_tid, no_tid, yes_price, no_price, profit, arb_type)
 
-    async def _check_pair(
+    async def _check_long_dutch_book(
         self, yes_token: str, no_token: str
     ) -> tuple[float, float, float] | None:
+        """Dutch Book: Ask(YES) + Ask(NO) < 1.00 — buy both sides for guaranteed profit."""
+        import time as _time
         yes_book = await store.get_order_book(yes_token)
         no_book = await store.get_order_book(no_token)
 
@@ -110,19 +137,101 @@ class ArbScannerStrategy(BaseStrategy):
         if yes_book.best_ask is None or no_book.best_ask is None:
             return None
 
-        # Dutch Book Arbitrage: Buy YES + Buy NO for less than $1.00
+        # ── Staleness guard: skip if either book is > 30s old ──────────────────
+        now = _time.time()
+        if (now - yes_book.updated_at) > 30.0 or (now - no_book.updated_at) > 30.0:
+            return None
+
+        # ── Depth adequacy: enough size at ask prices to fill our order ────────
+        yes_ask_depth = yes_book.asks[0].size if yes_book.asks else 0.0
+        no_ask_depth = no_book.asks[0].size if no_book.asks else 0.0
+        min_required_shares = max(1.0, self._order_size / max(yes_book.best_ask, 0.05))
+        if yes_ask_depth < min_required_shares or no_ask_depth < min_required_shares:
+            return None  # Insufficient depth — would move the market against us
+
         total_cost = yes_book.best_ask + no_book.best_ask
         profit_per_share = 1.00 - total_cost
 
         if profit_per_share >= self._min_profit_frac:
+            # ── ML quality filter ─────────────────────────────────────────────
+            # If ML strongly disagrees with the YES ask price, the book is likely
+            # stale or has a data error — skip rather than trading on bad data.
+            ml_suspicion = self._ml_arb_suspicion(yes_token, yes_book, yes_book.best_ask)
+            if ml_suspicion:
+                log.warning(
+                    "[arb_scanner] ⚠ Long-arb on %s SKIPPED — ML quality filter triggered "
+                    "(ML disagrees with ask price by >20¢ at high confidence)",
+                    self._market_slugs.get(yes_token, yes_token[:12]),
+                )
+                return None
+
             slug = self._market_slugs.get(yes_token, yes_token[:12])
             log.info(
-                "[arb_scanner] 🚀 ARB FOUND on %s: YES=%.4f + NO=%.4f = %.4f total (profit=%.4f/sh)",
+                "[arb_scanner] 🚀 LONG-ARB on %s: YES@%.4f + NO@%.4f = %.4f (profit=+%.4f/sh)",
                 slug, yes_book.best_ask, no_book.best_ask, total_cost, profit_per_share,
             )
             return yes_book.best_ask, no_book.best_ask, profit_per_share
-
         return None
+
+    async def _check_short_overpriced(
+        self, yes_token: str, no_token: str
+    ) -> tuple[float, float, float] | None:
+        """Short-side overpriced: Bid(YES) + Bid(NO) > 1.00 — sell both sides for guaranteed profit."""
+        import time as _time
+        yes_book = await store.get_order_book(yes_token)
+        no_book = await store.get_order_book(no_token)
+
+        if yes_book is None or no_book is None:
+            return None
+        if yes_book.best_bid is None or no_book.best_bid is None:
+            return None
+
+        # ── Staleness guard ────────────────────────────────────────────────────
+        now = _time.time()
+        if (now - yes_book.updated_at) > 30.0 or (now - no_book.updated_at) > 30.0:
+            return None
+
+        # ── Depth adequacy: enough bid depth to absorb our sell ────────────────
+        yes_bid_depth = yes_book.bids[0].size if yes_book.bids else 0.0
+        no_bid_depth = no_book.bids[0].size if no_book.bids else 0.0
+        min_required_shares = max(1.0, self._order_size / max(yes_book.best_bid, 0.05))
+        if yes_bid_depth < min_required_shares or no_bid_depth < min_required_shares:
+            return None
+
+        total_bid = yes_book.best_bid + no_book.best_bid
+        profit_per_share = total_bid - 1.00
+
+        if profit_per_share >= self._min_profit_frac:
+            slug = self._market_slugs.get(yes_token, yes_token[:12])
+            log.info(
+                "[arb_scanner] 🚀 SHORT-ARB on %s: YES@%.4f + NO@%.4f = %.4f (profit=+%.4f/sh)",
+                slug, yes_book.best_bid, no_book.best_bid, total_bid, profit_per_share,
+            )
+            return yes_book.best_bid, no_book.best_bid, profit_per_share
+        return None
+
+    def _ml_arb_suspicion(self, token_id: str, book, book_price: float) -> bool:
+        """
+        Returns True when the ML model's probability estimate diverges from the
+        book price by > 0.20 at high confidence (> 0.7) — indicating a stale or
+        erroneous book rather than a genuine arb opportunity.
+
+        This prevents trading on data errors masquerading as arb signals.
+        """
+        try:
+            from core.market_discovery import market_discovery
+            from ml.features import extract_features
+            from ml.model import ml_model
+            mkt_data = market_discovery.catalog.get(token_id) or {}
+            feats = extract_features(mkt_data, book)
+            if feats is None or not ml_model.is_fitted:
+                return False
+            p_yes, confidence = ml_model.predict(feats, token_id=token_id)
+            ml_disagreement = abs(p_yes - book_price)
+            # Only flag as suspicious when the model is confident AND disagrees significantly
+            return bool(confidence > 0.70 and ml_disagreement > 0.20)
+        except Exception:
+            return False
 
     async def _execute_arb(
         self,
@@ -131,22 +240,35 @@ class ArbScannerStrategy(BaseStrategy):
         yes_price: float,
         no_price: float,
         profit: float,
+        arb_type: str = "long_dutch_book",
     ) -> None:
         slug = self._market_slugs.get(yes_token, yes_token[:12])
         size = max(1.0, self._order_size / max(yes_price, 0.05))
 
         await store.log_event(
-            f"⚡ ARB Opportunity on {slug}: YES@{yes_price:.4f} + NO@{no_price:.4f} | +{profit*100:.2f}% profit"
+            f"⚡ ARB [{arb_type}] {slug}: YES@{yes_price:.4f} + NO@{no_price:.4f} | +{profit*100:.2f}% profit"
         )
 
-        yes_args = OrderArgs(
-            token_id=yes_token, price=yes_price, side=Side.BUY,
-            size=size, order_type="FOK",
-        )
-        no_args = OrderArgs(
-            token_id=no_token, price=no_price, side=Side.BUY,
-            size=size, order_type="FOK",
-        )
+        if arb_type == "long_dutch_book":
+            # Buy both sides simultaneously
+            yes_args = OrderArgs(
+                token_id=yes_token, price=yes_price, side=Side.BUY,
+                size=size, order_type="FOK",
+            )
+            no_args = OrderArgs(
+                token_id=no_token, price=no_price, side=Side.BUY,
+                size=size, order_type="FOK",
+            )
+        else:
+            # Short-side: sell both sides (send as SELL at bid prices)
+            yes_args = OrderArgs(
+                token_id=yes_token, price=yes_price, side=Side.SELL,
+                size=size, order_type="FOK",
+            )
+            no_args = OrderArgs(
+                token_id=no_token, price=no_price, side=Side.SELL,
+                size=size, order_type="FOK",
+            )
 
         yes_order, no_order = await asyncio.gather(
             self.submit_order(yes_args),
@@ -156,6 +278,6 @@ class ArbScannerStrategy(BaseStrategy):
         if yes_order and no_order:
             est_pnl = profit * size
             await store.log_event(
-                f"✅ ARB executed on {slug}: Locked in ${est_pnl:.2f} expected profit"
+                f"✅ ARB [{arb_type}] executed on {slug}: Locked in ${est_pnl:.2f} expected profit"
             )
-            log.info("[arb_scanner] ARB executed on %s — profit: $%.2f", slug, est_pnl)
+            log.info("[arb_scanner] ARB [%s] executed on %s — profit: $%.2f", arb_type, slug, est_pnl)

@@ -66,6 +66,28 @@ def to_dec(val: float) -> Decimal:
     return Decimal(str(round(val, 4)))
 
 
+def dynamic_model_risk_multiplier() -> Decimal:
+    """
+    Computes a risk multiplier [0.30, 1.00] based on live ML model calibration and concept drift:
+      - Healthy (PSI < 0.10, Brier <= 0.16) -> 1.00 (100% standard capacity)
+      - Moderate shift / elevated Brier (PSI >= 0.10 or Brier > 0.16) -> 0.60 (60% capacity)
+      - Significant drift / degraded Brier (PSI >= 0.20 or Brier > 0.22) -> 0.30 (30% capacity)
+    """
+    try:
+        from ml.drift_detector import drift_detector
+        from ml.model import ml_model
+        status = drift_detector.drift_status
+        brier = drift_detector.rolling_brier if drift_detector.rolling_brier is not None else ml_model.brier_score
+
+        if status == "SIGNIFICANT_DRIFT" or brier > 0.22:
+            return Decimal("0.30")
+        elif status == "MODERATE_SHIFT" or brier > 0.16:
+            return Decimal("0.60")
+        return Decimal("1.00")
+    except Exception:
+        return Decimal("1.00")
+
+
 class InstitutionalRiskEngine:
     """
     Central pre-trade risk and portfolio supervisor.
@@ -163,16 +185,21 @@ class InstitutionalRiskEngine:
             if order.side == Side.BUY and (total_exp + order_cost) > MAX_TOTAL_OPEN_RISK:
                 return False, f"Total open risk cap exceeded (${total_exp + order_cost:.2f} > ${MAX_TOTAL_OPEN_RISK:.2f})"
 
-            # 6. Max position per market ($3) and absolute exceptional max ($5).
+            # Dynamic ML-health sizing scaling
+            ml_risk_mult = dynamic_model_risk_multiplier()
+            effective_mkt_cap = MAX_POSITION_PER_MARKET * ml_risk_mult
+            effective_norm_cap = NORMAL_MAX_POSITION * ml_risk_mult
+
+            # 6. Max position per market (scaled dynamically with ML calibration)
             market_exp = to_dec(await store.exposure_for_market(order.token_id))
-            if order.side == Side.BUY and (market_exp + order_cost) > MAX_POSITION_PER_MARKET:
-                return False, f"Per-market position cap exceeded (${market_exp + order_cost:.2f} > ${MAX_POSITION_PER_MARKET:.2f})"
+            if order.side == Side.BUY and (market_exp + order_cost) > effective_mkt_cap:
+                return False, f"Per-market position cap exceeded (${market_exp + order_cost:.2f} > ${effective_mkt_cap:.2f}, scale={ml_risk_mult*100:.0f}%)"
             if order.side == Side.BUY and (market_exp + order_cost) > ABSOLUTE_MAX_POSITION:
                 return False, f"Absolute position cap exceeded (${market_exp + order_cost:.2f} > ${ABSOLUTE_MAX_POSITION:.2f})"
 
-            # 6b. Normal position size guidance ($2 max for new/experimental positions)
-            if order.side == Side.BUY and market_exp <= 0 and order_cost > NORMAL_MAX_POSITION:
-                return False, f"Normal position cap exceeded for new position (${order_cost:.2f} > ${NORMAL_MAX_POSITION:.2f})"
+            # 6b. Normal position size guidance (scaled dynamically with ML calibration)
+            if order.side == Side.BUY and market_exp <= 0 and order_cost > effective_norm_cap:
+                return False, f"Normal position cap exceeded for new position (${order_cost:.2f} > ${effective_norm_cap:.2f}, scale={ml_risk_mult*100:.0f}%)"
 
             # 6c. Per-strategy exposure cap ($15 max)
             if order.side == Side.BUY and order.strategy:
@@ -299,6 +326,8 @@ class InstitutionalRiskEngine:
             "total_exposure": round(float(total_exp), 2),
             "max_total_exposure": float(MAX_TOTAL_OPEN_RISK),
             "max_position_per_market": float(MAX_POSITION_PER_MARKET),
+            "dynamic_risk_multiplier": float(dynamic_model_risk_multiplier()),
+            "effective_max_position_per_market": float(MAX_POSITION_PER_MARKET * dynamic_model_risk_multiplier()),
             "absolute_max_position": float(ABSOLUTE_MAX_POSITION),
             "max_correlated_exposure": float(MAX_CORRELATED_EXPOSURE),
             "max_strategy_exposure": float(MAX_STRATEGY_EXPOSURE),

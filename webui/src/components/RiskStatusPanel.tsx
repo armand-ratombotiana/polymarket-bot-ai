@@ -1,6 +1,4 @@
-// components/RiskStatusPanel.tsx — Full command-center risk strip
-// Every metric is labeled with currency, period, mode, and definition.
-// No hardcoded values. Null shown as —, never a fallback number.
+// components/RiskStatusPanel.tsx — Institutional Risk & Capital Governance Strip
 'use client'
 
 import { useEffect, useState } from 'react'
@@ -32,13 +30,19 @@ interface RiskStatus {
   deployable_ceiling: number
   total_exposure: number
   max_total_exposure: number
+  max_position_per_market: number
+  dynamic_risk_multiplier?: number
+  effective_max_position_per_market?: number
   daily_pnl: number
   daily_loss_limit: number
+  weekly_pnl?: number
+  weekly_loss_limit?: number
+  drawdown_dollars?: number
+  max_drawdown_limit?: number
   max_loss_if_all_zero: number
   kill_switch?: boolean
   paper_balance?: number | null
-  open_orders_count?: number
-  open_positions_count?: number
+  open_orders?: number
 }
 
 interface KpiProps {
@@ -52,36 +56,66 @@ interface KpiProps {
 }
 
 function Kpi({ label, value, sub, valueColor, tooltip, warn, danger }: KpiProps) {
-  const vc = danger ? 'var(--color-red-fg)'
-    : warn ? 'var(--color-amber-fg)'
+  const vc = danger
+    ? 'var(--color-red-fg)'
+    : warn
+    ? 'var(--color-amber-fg)'
     : valueColor ?? 'var(--text-primary)'
   return (
     <div
-      className="kpi-card"
+      className="kpi-card bg-[#0e1015] border border-[#1f2335] p-2.5 rounded-lg flex flex-col justify-between"
       title={tooltip}
       data-tooltip={tooltip}
-      style={{ position: 'relative' }}
     >
-      <span className="kpi-label">{label}</span>
-      <span className="kpi-value mono" style={{ color: vc, fontSize: '13px' }}>
-        {value ?? <span className="unavailable-value">—</span>}
+      <span className="text-[10px] text-[#7e8aaa] font-semibold uppercase tracking-wider block mb-1">
+        {label}
       </span>
-      {sub && <span className="kpi-sub">{sub}</span>}
+      <span className="mono font-bold text-sm" style={{ color: vc }}>
+        {value ?? <span className="text-[#3e4560]">—</span>}
+      </span>
+      {sub && <span className="text-[9.5px] text-[#7e8aaa] mt-0.5 block">{sub}</span>}
     </div>
   )
 }
 
-function ExposureBar({ used, max }: { used: number; max: number }) {
-  const pct = max > 0 ? Math.min(used / max, 1) : 0
-  const cls = pct > 0.9 ? 'danger' : pct > 0.7 ? 'warning' : 'safe'
+function CapitalAllocationBar({ invested, reserved, maxDeployable }: { invested: number; reserved: number; maxDeployable: number }) {
+  const investedPct = maxDeployable > 0 ? (invested / maxDeployable) * 100 : 0
+  const reservedPct = maxDeployable > 0 ? (reserved / maxDeployable) * 100 : 0
+  const availablePct = Math.max(0, 100 - investedPct - reservedPct)
+
   return (
-    <div style={{ padding: '0 12px 8px' }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '10.5px', color: 'var(--text-secondary)', marginBottom: '4px' }}>
-        <span>Exposure utilization</span>
-        <span className="mono">{(pct * 100).toFixed(1)}%</span>
+    <div className="px-3 py-2 bg-[#0e1015] border border-[#1f2335] rounded-lg mx-3 mb-2">
+      <div className="flex justify-between items-center text-[10.5px] text-[#7e8aaa] mb-1.5">
+        <span className="font-semibold text-[#dde1ed] flex items-center gap-1.5">
+          <span>📊 Capital Allocation</span>
+          <span className="text-[9.5px] font-normal text-[#7e8aaa]">(${invested.toFixed(2)} deployed / $60 ceiling)</span>
+        </span>
+        <span className="mono text-cyan-300 font-bold">{investedPct.toFixed(1)}% Deployed</span>
       </div>
-      <div className="exposure-bar" role="progressbar" aria-valuenow={Math.round(pct * 100)} aria-valuemin={0} aria-valuemax={100} aria-label={`Exposure utilization ${(pct*100).toFixed(1)}%`}>
-        <div className={`exposure-bar-fill ${cls}`} style={{ width: `${pct * 100}%` }} />
+
+      <div className="w-full bg-[#13161e] border border-[#1f2335] h-2 rounded-full overflow-hidden flex">
+        <div
+          className="h-full bg-cyan-400 transition-all duration-300"
+          style={{ width: `${Math.min(investedPct, 100)}%` }}
+          title={`Invested: $${invested.toFixed(2)}`}
+        />
+        <div
+          className="h-full bg-amber-400 transition-all duration-300"
+          style={{ width: `${Math.min(reservedPct, 100)}%` }}
+          title={`Reserved: $${reserved.toFixed(2)}`}
+        />
+      </div>
+
+      <div className="flex justify-between text-[9px] text-[#7e8aaa] mt-1 mono">
+        <span className="flex items-center gap-1">
+          <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 inline-block" /> Active: ${invested.toFixed(2)}
+        </span>
+        <span className="flex items-center gap-1">
+          <span className="w-1.5 h-1.5 rounded-full bg-amber-400 inline-block" /> Pending: ${reserved.toFixed(2)}
+        </span>
+        <span className="flex items-center gap-1 text-green-400">
+          <span className="w-1.5 h-1.5 rounded-full bg-green-400 inline-block" /> Avail: ${(maxDeployable - invested - reserved).toFixed(2)}
+        </span>
       </div>
     </div>
   )
@@ -113,30 +147,28 @@ export default function RiskStatusPanel() {
       }
     }
     fetchAll()
-    const t = setInterval(fetchAll, 4000)
+    const t = setInterval(fetchAll, 3000)
     return () => clearInterval(t)
   }, [])
 
   if (loading) {
     return (
-      <div className="card" style={{ padding: '12px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+      <div className="card p-3 flex items-center gap-2 bg-[#13161e] border border-[#1f2335]">
         <span className="spinner" aria-hidden="true" />
-        <span style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>Loading risk status…</span>
+        <span className="text-xs text-[#7e8aaa]">Loading institutional risk telemetry…</span>
       </div>
     )
   }
 
   if (error || !risk) {
     return (
-      <div className="card">
-        <div className="card-header">
-          <span className="card-title">🛡 Risk &amp; Exposure</span>
-          <span className="badge badge-red" aria-label="Status unavailable">Unavailable</span>
+      <div className="card bg-[#13161e] border border-[#1f2335]">
+        <div className="card-header p-3 border-b border-[#1f2335] flex justify-between">
+          <span className="card-title text-xs font-bold text-[#dde1ed]">🛡 Risk &amp; Exposure</span>
+          <span className="badge badge-red">Unavailable</span>
         </div>
-        <div className="error-state" style={{ padding: '16px' }}>
-          <span className="error-state-icon">⚠</span>
-          <span className="error-state-title">Cannot reach /api/status</span>
-          <span className="error-state-desc">Risk data unavailable. Backend may be starting up.</span>
+        <div className="p-4 text-center text-xs text-[#7e8aaa]">
+          Risk engine offline or starting up.
         </div>
       </div>
     )
@@ -147,166 +179,126 @@ export default function RiskStatusPanel() {
   const groups = recon?.exposure.exposure_per_group ?? {}
   const topGroups = Object.entries(groups).sort((a, b) => b[1] - a[1]).slice(0, 2)
 
-  const expPct = risk.max_total_exposure > 0
-    ? risk.total_exposure / risk.max_total_exposure
-    : null
-
-  const dailyBudgetUsed = risk.daily_loss_limit > 0 && risk.daily_pnl < 0
-    ? Math.abs(risk.daily_pnl) / risk.daily_loss_limit
-    : 0
-
+  const expPct = risk.max_total_exposure > 0 ? risk.total_exposure / risk.max_total_exposure : null
   const modeLabel = risk.mode === 'live' ? 'LIVE' : risk.mode === 'shadow' ? 'SHADOW' : 'PAPER'
   const modeBadgeClass = risk.mode === 'live' ? 'badge-red' : risk.mode === 'shadow' ? 'badge-cyan' : 'badge-amber'
 
+  const dynamicMult = risk.dynamic_risk_multiplier ?? 1.0
+  const effectiveCap = risk.effective_max_position_per_market ?? 3.0
+
   return (
-    <div className="card" style={{ display: 'flex', flexDirection: 'column' }}>
+    <div className="card h-full flex flex-col bg-[#13161e] border border-[#1f2335] rounded-lg overflow-hidden shadow-xl">
       {/* Header */}
-      <div className="card-header">
-        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-          <span className="card-title">🛡 Risk &amp; Capital</span>
-          <span className={`badge ${modeBadgeClass}`} aria-label={`Mode: ${modeLabel}`}>{modeLabel}</span>
-          <span className={`badge ${reconOk ? 'badge-green' : 'badge-red'}`}
-            aria-label={reconOk ? 'Exposure reconciled' : 'Reconciliation failed'}>
-            {reconOk ? '✓ Reconciled' : '⚠ Unreconciled'}
+      <div className="card-header p-3 border-b border-[#1f2335] flex flex-wrap justify-between items-center gap-2">
+        <div className="flex items-center gap-2">
+          <span className="card-title text-xs font-bold text-[#dde1ed] tracking-wide">
+            🛡 INSTITUTIONAL RISK &amp; RECONCILIATION
           </span>
-          {risk.kill_switch && (
-            <span className="badge badge-danger" aria-label="Kill switch active">🛑 Halted</span>
-          )}
+          <span className={`badge ${modeBadgeClass} text-[9.5px]`}>{modeLabel}</span>
+          <span
+            className={`badge ${reconOk ? 'badge-green' : 'badge-red'} text-[9.5px]`}
+            title={reconOk ? 'Exposure reconciled with ledger' : 'Ledger reconciliation discrepancy detected'}
+          >
+            {reconOk ? '✓ Reconciled' : '⚠ Discrepancy'}
+          </span>
+          {risk.kill_switch && <span className="badge badge-red animate-pulse text-[9.5px]">🛑 Circuit Breaker Active</span>}
         </div>
-        {lastUpdated && (
-          <span style={{ fontSize: '10px', color: 'var(--text-dim)' }}>
-            {new Date(lastUpdated).toISOString().slice(11, 19)} UTC
+
+        {/* Dynamic Model Health Multiplier Badge */}
+        <div className="flex items-center gap-1.5">
+          <span className="text-[10px] text-[#7e8aaa]">ML Risk Scale:</span>
+          <span
+            className={`px-2 py-0.5 rounded text-[10px] font-bold font-mono ${
+              dynamicMult >= 1.0
+                ? 'bg-green-500/15 text-green-400 border border-green-500/30'
+                : dynamicMult >= 0.6
+                ? 'bg-amber-500/15 text-amber-400 border border-amber-500/30'
+                : 'bg-red-500/15 text-red-400 border border-red-500/30'
+            }`}
+          >
+            {(dynamicMult * 100).toFixed(0)}% (${effectiveCap.toFixed(2)} Cap)
           </span>
-        )}
+        </div>
       </div>
 
-      {/* Observation warning */}
+      {/* Observation Warning */}
       {observing && (
-        <div className="banner-warning" style={{ margin: '8px 12px 0', fontSize: '11.5px' }} role="alert">
-          <span aria-hidden="true">⚠</span>
-          <span>
-            New orders disabled — exposure not reconciled against ${risk.bankroll_ceiling.toFixed(0)} ceiling.
-            {risk.observation_reason ? ` Reason: ${risk.observation_reason}` : ''}
-          </span>
+        <div className="bg-amber-500/10 border-l-4 border-amber-500 text-amber-300 text-xs px-3 py-2 mx-3 mt-2 rounded">
+          <strong>Observation Mode Active:</strong> New live orders disabled until portfolio exposure is reconciled.
+          {risk.observation_reason ? ` (${risk.observation_reason})` : ''}
         </div>
       )}
 
-      {/* Reconciliation findings */}
-      {recon && recon.findings.length > 0 && (
-        <div style={{ padding: '8px 12px 0' }}>
-          {recon.findings.slice(0, 3).map((f, i) => (
-            <div key={i} style={{ fontSize: '11px', color: 'var(--color-red-fg)', marginBottom: '2px' }}>
-              • {f}
-            </div>
-          ))}
-        </div>
-      )}
-
-      {/* KPI grid — Capital */}
-      <div style={{ padding: '10px 12px 6px' }}>
-        <div style={{ fontSize: '10px', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--text-dim)', marginBottom: '6px' }}>
-          Capital (USDC · {modeLabel})
-        </div>
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '6px' }}>
-          <Kpi
-            label="Operating Capital"
-            value={fmtUsd(100)}
-            sub="configured limit"
-            tooltip="USD 100 operating capital — maximum capital intended to be deployed. Source: config.py"
-          />
-          <Kpi
-            label="Abs. Ceiling"
-            value={fmtUsd(risk.bankroll_ceiling)}
-            sub="hard stop"
-            tooltip="USD 200 absolute ceiling — exposure beyond this triggers observation mode. Source: risk/manager.py"
-          />
-          <Kpi
-            label="Deployable"
-            value={fmtUsd(risk.deployable_ceiling)}
-            tooltip="Maximum deployable capital under current risk rules (deployable_ceiling from /api/status)"
-          />
-          <Kpi
-            label="Available Cash"
-            value={recon ? fmtUsd(recon.exposure.available_cash) : null}
-            tooltip="Cash not currently invested or reserved for pending orders"
-          />
-          <Kpi
-            label="Capital Invested"
-            value={recon ? fmtUsd(recon.exposure.capital_invested) : null}
-            tooltip="Sum of cost basis of all open positions"
-          />
-          <Kpi
-            label="Pending Orders"
-            value={recon ? fmtUsd(recon.exposure.reserved_for_pending_orders) : null}
-            tooltip="Capital reserved for open orders not yet filled"
-          />
-        </div>
+      {/* Capital Allocation Visual Meter */}
+      <div className="mt-2.5">
+        <CapitalAllocationBar
+          invested={recon?.exposure.capital_invested || 0}
+          reserved={recon?.exposure.reserved_for_pending_orders || 0}
+          maxDeployable={60.0}
+        />
       </div>
 
-      {/* Exposure utilization bar */}
-      <ExposureBar used={risk.total_exposure} max={risk.max_total_exposure} />
-
-      {/* KPI grid — Exposure & P&L */}
-      <div style={{ padding: '0 12px 6px' }}>
-        <div style={{ fontSize: '10px', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--text-dim)', marginBottom: '6px' }}>
-          Exposure &amp; P&amp;L (USDC · Today)
-        </div>
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '6px' }}>
+      {/* Primary KPI Grid — Capital & Position Limits */}
+      <div className="px-3 pb-2">
+        <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+          <Kpi
+            label="Operating Bankroll"
+            value={fmtUsd(100)}
+            sub="Active Sizing Base"
+            tooltip="USD 100.00 operating capital — automated sizing baseline"
+          />
+          <Kpi
+            label="Deployable Ceiling"
+            value={fmtUsd(risk.deployable_ceiling || 60)}
+            sub="$40 Cash Reserve"
+            tooltip="Maximum capital deployable without breaching the $40 minimum cash reserve"
+          />
+          <Kpi
+            label="Max Per Market"
+            value={`$${effectiveCap.toFixed(2)}`}
+            sub={`Scaled: ${(dynamicMult * 100).toFixed(0)}%`}
+            valueColor="var(--color-cyan-fg)"
+            tooltip="Dynamically scaled maximum dollar commitment per individual market based on ML calibration health"
+          />
           <Kpi
             label="Total Exposure"
             value={fmtUsd(risk.total_exposure)}
-            sub={expPct != null ? `${(expPct * 100).toFixed(1)}% of limit` : undefined}
+            sub={expPct != null ? `${(expPct * 100).toFixed(1)}% of $25 limit` : undefined}
             warn={expPct != null && expPct > 0.7}
             danger={expPct != null && expPct > 0.9}
-            tooltip="Total open exposure = capital_invested + reserved_for_pending. Source: /api/status total_exposure"
+            tooltip="Total open risk across all positions + active open orders ($25.00 hard cap)"
           />
           <Kpi
-            label="Max Remaining Loss"
-            value={recon ? fmtUsd(recon.exposure.maximum_remaining_loss) : null}
-            tooltip="Worst-case loss if all open positions resolve against you (assume all shares → $0)"
-          />
-          <Kpi
-            label="Net Directional"
-            value={recon ? fmtUsd(recon.exposure.net_directional_exposure) : null}
-            tooltip="Net directional bias: long exposure minus short exposure"
-          />
-          <Kpi
-            label="Daily P&L"
-            value={fmtPnl(risk.daily_pnl)}
-            sub="paper mode · today"
+            label="Daily Loss Stop"
+            value={`-$2.00`}
+            sub={`PnL: ${fmtPnl(risk.daily_pnl)}`}
             valueColor={risk.daily_pnl >= 0 ? 'var(--color-green-fg)' : 'var(--color-red-fg)'}
-            tooltip="Realized daily P&L in paper mode. Resets at UTC midnight. Source: /api/status daily_pnl"
+            tooltip="Circuit breaker activates and cancels all open orders if daily realized losses reach -$2.00"
           />
           <Kpi
-            label="Daily Loss Limit"
-            value={fmtUsd(risk.daily_loss_limit)}
-            sub="hard breaker"
-            tooltip="Daily loss stop. When daily_pnl reaches −daily_loss_limit, new orders are blocked. Source: risk/manager.py"
-          />
-          <Kpi
-            label="Loss Budget Used"
-            value={fmtPct(dailyBudgetUsed)}
-            warn={dailyBudgetUsed > 0.5}
-            danger={dailyBudgetUsed > 0.8}
-            tooltip="How much of the daily loss limit has been consumed today"
+            label="Max Drawdown Stop"
+            value={`-$8.00`}
+            sub="High-Water Mark"
+            tooltip="Hard stop: halts all execution if portfolio draws down $8.00 from peak equity"
           />
         </div>
       </div>
 
-      {/* Correlated groups */}
+      {/* Correlated Groups Strip */}
       {topGroups.length > 0 && (
-        <div style={{ padding: '0 12px 10px', borderTop: '1px solid var(--border)', paddingTop: '8px' }}>
-          <div style={{ fontSize: '10px', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--text-dim)', marginBottom: '4px' }}>
-            Largest Correlated Groups
+        <div className="px-3 pb-3 pt-2 border-t border-[#1f2335] mt-auto">
+          <div className="text-[10px] font-bold uppercase tracking-wider text-[#7e8aaa] mb-1.5 flex justify-between">
+            <span>Largest Correlated Market Exposure</span>
+            <span>Limit: $8.00 Max</span>
           </div>
-          {topGroups.map(([name, val]) => (
-            <div key={name} style={{ display: 'flex', justifyContent: 'space-between', fontSize: '11.5px', marginBottom: '2px' }}>
-              <span style={{ color: 'var(--text-secondary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '70%' }}>
-                {name}
-              </span>
-              <span className="mono" style={{ color: 'var(--color-amber-fg)', flexShrink: 0 }}>{fmtUsd(val)}</span>
-            </div>
-          ))}
+          <div className="space-y-1">
+            {topGroups.map(([name, val]) => (
+              <div key={name} className="flex justify-between items-center text-xs bg-[#0e1015] px-2.5 py-1 rounded border border-[#1f2335]">
+                <span className="text-[#dde1ed] truncate max-w-[200px] text-[11px]">{name}</span>
+                <span className="mono text-amber-400 font-bold">{fmtUsd(val)}</span>
+              </div>
+            ))}
+          </div>
         </div>
       )}
     </div>

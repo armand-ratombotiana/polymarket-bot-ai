@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections import OrderedDict
 from dataclasses import dataclass
 
 from config import settings
@@ -27,10 +28,12 @@ from strategies.base import BaseStrategy
 
 log = logging.getLogger(__name__)
 
-SCAN_INTERVAL = 60.0        # Scan interval in seconds
+SCAN_INTERVAL = 15.0        # Scan interval in seconds (uses pre-polled store.order_books)
 MODEL_SAVE_INTERVAL = 300   # Save model every 5 minutes
 KELLY_FRACTION = 0.25       # Quarter-Kelly for conservative bankroll management
 STALE_ORDER_SECONDS = 180   # Cancel unfilled signal orders after 3 minutes
+FEATURE_CACHE_MAX = 500     # Bound feature cache to prevent unbounded memory growth
+MIN_KELLY_NUMERATOR = 0.02  # Minimum raw Kelly f* numerator: (p*b - (1-p)) > 2%
 
 
 @dataclass
@@ -59,8 +62,9 @@ class SignalTraderStrategy(BaseStrategy):
         self._min_confidence = max(0.55, settings.signal_min_confidence)
         self._base_order_size = settings.signal_order_size_usdc
         self._active_signals: dict[str, str] = {}
-        self._feature_cache: dict[str, object] = {}
-        self._market_cache: dict[str, dict] = {}
+        # Bounded OrderedDict: evicts oldest entries when capacity is reached
+        self._feature_cache: OrderedDict = OrderedDict()
+        self._market_cache: OrderedDict = OrderedDict()
         self._last_model_save = time.time()
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
@@ -86,10 +90,27 @@ class SignalTraderStrategy(BaseStrategy):
 
     async def _scan_markets(self) -> None:
         await self._recycle_stale_orders()
-        markets = await gamma_client.get_markets(active=True, limit=40, order="volume24hr")
-        signals: list[MarketSignal] = []
 
-        for mkt in markets:
+        # Use pre-indexed market_discovery catalog (800+ markets) instead of a
+        # fresh Gamma API fetch — avoids redundant HTTP calls and covers the full
+        # market universe already polled by book_poller.
+        try:
+            from core.market_discovery import market_discovery
+            catalog_items = list(market_discovery.catalog.values())
+        except Exception:
+            catalog_items = []
+
+        # Fall back to Gamma API if catalog is empty (first startup race)
+        if not catalog_items:
+            try:
+                raw_markets = await gamma_client.get_markets(active=True, limit=60, order="volume24hr")
+                catalog_items = raw_markets
+            except Exception as e:
+                log.debug("[signal_trader] Gamma fallback failed: %s", e)
+                return
+
+        signals: list[MarketSignal] = []
+        for mkt in catalog_items:
             try:
                 sig = await self._evaluate_market(mkt)
                 if sig and sig.confidence >= self._min_confidence:
@@ -101,8 +122,8 @@ class SignalTraderStrategy(BaseStrategy):
             return
 
         signals.sort(key=lambda s: s.confidence, reverse=True)
-        # Execute top 2 highest-conviction signals per scan cycle
-        for sig in signals[:2]:
+        # Execute top 3 highest-conviction signals per scan cycle
+        for sig in signals[:3]:
             await self._act_on_signal(sig)
 
     async def _evaluate_market(self, mkt: dict) -> MarketSignal | None:
@@ -121,8 +142,13 @@ class SignalTraderStrategy(BaseStrategy):
 
         features = extract_features(mkt, book)
         if features is not None:
+            # Bounded cache: evict oldest when full
             self._feature_cache[yes_token] = features
+            if len(self._feature_cache) > FEATURE_CACHE_MAX:
+                self._feature_cache.popitem(last=False)
             self._market_cache[yes_token] = mkt
+            if len(self._market_cache) > FEATURE_CACHE_MAX:
+                self._market_cache.popitem(last=False)
             return self._ml_signal(yes_token, slug, mkt, book, features)
 
         return None
@@ -138,18 +164,23 @@ class SignalTraderStrategy(BaseStrategy):
             return None
 
         mid = book.mid or 0.5
+        spread = book.spread or 0.01
 
-        if p_yes >= 0.52:
+        # Regime filter: skip directional signals in high-volatility / wide-spread regimes.
+        # The ensemble is not calibrated for liquidation dynamics under extreme vol.
+        if spread >= 0.04:
+            return None
+
+        # Raised thresholds: 0.52/0.48 → 0.55/0.45 — eliminates low-conviction noise trades
+        if p_yes >= 0.55:
             direction = Side.BUY
-            # Price just above the current ask so the order can actually fill;
-            # fall back to mid + 1% when the book has no ask side.
             if book.best_ask is not None:
                 target_price = round(min(book.best_ask + 0.001, 0.98), 4)
             else:
                 target_price = round(min(mid + 0.01, 0.98), 4)
             win_prob = p_yes
             payout_ratio = (1.0 - target_price) / max(target_price, 0.01)
-        elif p_yes <= 0.48:
+        elif p_yes <= 0.45:
             direction = Side.SELL
             if book.best_bid is not None:
                 target_price = round(max(book.best_bid - 0.001, 0.02), 4)
@@ -162,7 +193,14 @@ class SignalTraderStrategy(BaseStrategy):
 
         # Fractional Kelly Position Sizing
         # Kelly: f* = (p * b - (1 - p)) / b
-        kelly_f = max(0.0, (win_prob * payout_ratio - (1.0 - win_prob)) / max(payout_ratio, 0.01))
+        kelly_numerator = win_prob * payout_ratio - (1.0 - win_prob)
+
+        # Minimum edge guard: raw Kelly numerator must exceed 2% for the trade
+        # to have genuine expected value after fees and slippage.
+        if kelly_numerator <= MIN_KELLY_NUMERATOR:
+            return None
+
+        kelly_f = max(0.0, kelly_numerator / max(payout_ratio, 0.01))
         kelly_f = min(0.3, kelly_f * KELLY_FRACTION)  # capped at 30% max
 
         # Scale against the USD 100 operating capital, hard-capped by the
@@ -176,7 +214,7 @@ class SignalTraderStrategy(BaseStrategy):
             confidence=confidence,
             target_price=target_price,
             size_usdc=size_usdc,
-            reason=f"ML Prob={p_yes:.1%} (Kelly {kelly_f*100:.1f}%)",
+            reason=f"ML Prob={p_yes:.1%} (Kelly {kelly_f*100:.1f}%, edge={kelly_numerator*100:.1f}%)",
             ml_score=p_yes,
             source="ml",
         )

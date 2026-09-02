@@ -41,7 +41,7 @@ EXPOSE 8000
 # supervisord manages: bot API server + health watchdog (both auto-restart)
 CMD ["supervisord", "-c", "/app/supervisord.conf"]
 
-HEALTHCHECK --interval=20s --timeout=5s --start-period=35s --retries=5 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')"
+HEALTHCHECK --interval=20s --timeout=5s --start-period=60s --retries=5 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health')"
 
 LABEL version="2.0.0" description="Polymarket bot — 24/7 supervisord + ML + FastAPI"
