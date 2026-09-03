@@ -51,4 +51,10 @@ prompt
 
 server.log
 # Skills directory
-/skills/
+/skills/mini-services/polymarket-bot/data/*.db
+mini-services/polymarket-bot/data/*.db-*
+mini-services/polymarket-bot/data/*.pkl
+mini-services/polymarket-bot/data/*.json
+mini-services/polymarket-bot/server.log
+upload/
+tool-results/
