@@ -78,6 +78,17 @@ export default function LeaderboardPanel() {
                 <span className="mono text-[11px] text-cyan-300 font-medium">
                   {(r.win_rate * 100).toFixed(0)}%
                 </span>
+                {r.profit_factor !== null ? (
+                  <span className="badge badge-blue text-[9px]">PF {r.profit_factor.toFixed(2)}</span>
+                ) : (
+                  <span className="badge badge-dim text-[9px]">PF —</span>
+                )}
+                <span className={`mono text-[10px] ${r.max_drawdown < 0 ? 'text-red-400' : 'text-[#7e8aaa]'}`}>
+                  DD ${r.max_drawdown.toFixed(2)}
+                </span>
+                <span className={`mono text-[10px] font-medium ${r.net_pnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                  {r.net_pnl >= 0 ? '+' : '-'}${Math.abs(r.net_pnl).toFixed(2)}
+                </span>
                 <span className={`mono font-bold text-xs ${r.risk_adjusted_score >= 0 ? 'text-green-400' : 'text-red-400'}`}>
                   {r.risk_adjusted_score >= 0 ? '+' : ''}{r.risk_adjusted_score.toFixed(2)}
                 </span>

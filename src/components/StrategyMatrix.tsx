@@ -13,6 +13,14 @@ interface StrategyMeta {
   is_running: boolean
 }
 
+// U14: Per-strategy live P&L row from GET /api/leaderboard (subset of fields)
+interface StrategyPerf {
+  strategy: string
+  net_pnl: number
+  win_rate: number
+  closed_trades: number
+}
+
 // Canonical implemented strategies supported by the execution bot
 const IMPLEMENTED_STRATEGIES = new Set([
   'mm_avellaneda_stoikov',
@@ -33,6 +41,8 @@ const CATEGORIES = [
 
 export default function StrategyMatrix() {
   const [catalog, setCatalog] = useState<StrategyMeta[]>([])
+  // U14: per-strategy performance map keyed by strategy_id
+  const [perf, setPerf] = useState<Record<string, StrategyPerf>>({})
   const [activeTab, setActiveTab] = useState('all')
   const [search, setSearch] = useState('')
   const [toggling, setToggling] = useState<string | null>(null)
@@ -49,9 +59,30 @@ export default function StrategyMatrix() {
     } catch {}
   }
 
+  // U14: live per-strategy P&L / win-rate / trade count from the leaderboard.
+  // Fetched in parallel with fetchCatalog — never blocks catalog rendering.
+  const fetchPerf = async () => {
+    try {
+      const apiUrl = getApiUrl()
+      const res = await apiFetch(`${apiUrl}/api/leaderboard`)
+      if (res.ok) {
+        const json = await res.json()
+        const rows: StrategyPerf[] = json.ranked ?? []
+        const map: Record<string, StrategyPerf> = {}
+        for (const r of rows) map[r.strategy] = r
+        setPerf(map)
+      }
+    } catch {}
+  }
+
   useEffect(() => {
+    // U14: catalog + leaderboard fetched in parallel (no await between them)
     fetchCatalog()
-    const timer = setInterval(fetchCatalog, 4000)
+    fetchPerf()
+    const timer = setInterval(() => {
+      fetchCatalog()
+      fetchPerf()
+    }, 4000)
     return () => clearInterval(timer)
   }, [])
 
@@ -142,6 +173,8 @@ export default function StrategyMatrix() {
       <div className="flex-1 overflow-y-auto p-3 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3 scrollbar-thin">
         {filtered.map((s) => {
           const isImplemented = IMPLEMENTED_STRATEGIES.has(s.strategy_id)
+          // U14: per-strategy perf row (may be undefined if no closed trades yet)
+          const p = perf[s.strategy_id]
           return (
             <div
               key={s.strategy_id}
@@ -168,6 +201,17 @@ export default function StrategyMatrix() {
                   </div>
                 </div>
                 <p className="text-[11px] text-[#7e8aaa] leading-relaxed mb-3">{s.description}</p>
+                {/* U14: live P&L strip — green/red net_pnl, win-rate %, closed-trade count */}
+                {p && (
+                  <div
+                    className={`mono text-[10px] font-semibold mb-2 ${
+                      p.net_pnl >= 0 ? 'text-green-400' : 'text-red-400'
+                    }`}
+                    title={`net_pnl ${p.net_pnl.toFixed(2)} · win_rate ${(p.win_rate * 100).toFixed(1)}% · ${p.closed_trades} closed trades`}
+                  >
+                    {p.net_pnl >= 0 ? '+' : ''}{p.net_pnl.toFixed(2)} · {p.win_rate * 100}% WR · {p.closed_trades} trades
+                  </div>
+                )}
               </div>
 
               <div className="flex justify-between items-center pt-2 border-t border-[#1f2335]">

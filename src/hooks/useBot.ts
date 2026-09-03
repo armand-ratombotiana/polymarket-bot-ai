@@ -117,6 +117,16 @@ export function useBot() {
   const restPollRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const isWsConnectedRef = useRef(false)
 
+  // U11 — Price-flash tracking state.
+  // prevMidsRef holds the last-seen mid price per token_id so each incoming
+  // snapshot can be diffed against the prior mid. flashTimersRef holds the
+  // per-token 500ms clear timers so a re-triggered flash refreshes the clear
+  // window rather than firing early. priceFlashes is the public state that
+  // components consume to apply .price-up / .price-down CSS classes.
+  const prevMidsRef = useRef<Record<string, number>>({})
+  const flashTimersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({})
+  const [priceFlashes, setPriceFlashes] = useState<Record<string, 'up' | 'down'>>({})
+
   // Direct REST fetch to populate data immediately or on fallback
   const fetchRestSnapshot = useCallback(async () => {
     const apiUrl = getApiUrl()
@@ -247,6 +257,83 @@ export function useBot() {
     }
   }, [connect, fetchRestSnapshot])
 
+  // U11 — Derive price-flash directions on each new order_books snapshot.
+  // For every token whose mid price moved relative to the prior snapshot,
+  // record 'up' or 'down' in priceFlashes and (re)schedule a 500ms clear.
+  // The first snapshot after mount establishes the baseline (no flashes),
+  // because there is no previous mid to diff against.
+  useEffect(() => {
+    const books = snapshot.order_books
+    if (!Array.isArray(books) || books.length === 0) return
+
+    const prevMids = prevMidsRef.current
+    const nextMids: Record<string, number> = {}
+    const newFlashes: Record<string, 'up' | 'down'> = {}
+
+    for (const book of books) {
+      const tokenId = book.token_id
+      const mid = book.mid
+      if (typeof tokenId !== 'string' || typeof mid !== 'number' || Number.isNaN(mid)) {
+        continue
+      }
+      nextMids[tokenId] = mid
+      const prevMid = prevMids[tokenId]
+      if (typeof prevMid === 'number' && !Number.isNaN(prevMid)) {
+        if (mid > prevMid) {
+          newFlashes[tokenId] = 'up'
+        } else if (mid < prevMid) {
+          newFlashes[tokenId] = 'down'
+        }
+      }
+    }
+
+    // Persist the latest mids as the new baseline for the next diff.
+    prevMidsRef.current = nextMids
+
+    const tokenIds = Object.keys(newFlashes)
+    if (tokenIds.length === 0) return
+
+    // Merge new flashes into existing state — preserves overlapping flashes
+    // from a prior snapshot that are still within their 500ms window, while
+    // overwriting the direction for tokens that just ticked again.
+    setPriceFlashes((prev) => {
+      const merged = { ...prev }
+      for (const tokenId of tokenIds) {
+        merged[tokenId] = newFlashes[tokenId]
+      }
+      return merged
+    })
+
+    // (Re)schedule the 500ms clear per token. Re-triggered flashes refresh
+    // the clear window so the CSS class persists for a full 500ms after
+    // the most recent tick.
+    for (const tokenId of tokenIds) {
+      const existing = flashTimersRef.current[tokenId]
+      if (existing) clearTimeout(existing)
+      flashTimersRef.current[tokenId] = setTimeout(() => {
+        setPriceFlashes((prev) => {
+          if (!(tokenId in prev)) return prev
+          const next = { ...prev }
+          delete next[tokenId]
+          return next
+        })
+        delete flashTimersRef.current[tokenId]
+      }, 500)
+    }
+  }, [snapshot.order_books])
+
+  // U11 — On unmount, clear any pending flash timers to avoid
+  // setState-after-unmount warnings / leaked timers.
+  useEffect(() => {
+    return () => {
+      const timers = flashTimersRef.current
+      for (const tokenId of Object.keys(timers)) {
+        const timer = timers[tokenId]
+        if (timer) clearTimeout(timer)
+      }
+    }
+  }, [])
+
   // Actions
   const activateKillSwitch = async () => {
     const apiUrl = getApiUrl()
@@ -284,6 +371,7 @@ export function useBot() {
   return {
     snapshot,
     status,
+    priceFlashes,
     activateKillSwitch,
     deactivateKillSwitch,
     cancelAllOrders,

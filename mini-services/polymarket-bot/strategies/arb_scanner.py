@@ -117,6 +117,14 @@ class ArbScannerStrategy(BaseStrategy):
             if short_opp:
                 opportunities.append((yes_tid, no_tid, *short_opp, "short_overpriced"))
 
+        # U9 — Observability: best-effort scan telemetry (additive; never breaks the scan).
+        try:
+            from core.observability import record_metric
+            record_metric("strategy", "arb_scanner.pairs_scanned", len(self._pairs))
+            record_metric("strategy", "arb_scanner.opportunities", len(opportunities))
+            record_metric("strategy", "arb_scanner.rejected", len(self._pairs) - len(opportunities))
+        except: pass
+
         if opportunities:
             opportunities.sort(key=lambda x: x[4], reverse=True)
             # Execute top-3 best opportunities per scan cycle

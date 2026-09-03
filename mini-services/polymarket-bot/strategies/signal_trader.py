@@ -138,6 +138,14 @@ class SignalTraderStrategy(BaseStrategy):
             except Exception as e:
                 log.debug("[signal_trader] Market evaluation error: %s", e)
 
+        # U9 — Observability: best-effort scan telemetry (additive; never breaks the scan).
+        try:
+            from core.observability import record_metric
+            record_metric("strategy", "signal_trader.evaluations", len(catalog_items))
+            record_metric("strategy", "signal_trader.signals", len(signals))
+            record_metric("strategy", "signal_trader.rejected", len(catalog_items) - len(signals))
+        except: pass
+
         if not signals:
             return
 

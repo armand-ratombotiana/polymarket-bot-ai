@@ -1,0 +1,834 @@
+     1→"""
+     2→core/live_safety_gate.py — God Mode §82 Live Trading Safety Gate.
+     3→
+     4→Ten-check staged validation that MUST pass before live trading is enabled.
+     5→Every check is fail-closed: an exception inside a check is recorded as a
+     6→failed check (with the exception text in ``detail``) rather than crashing
+     7→the gate — the gate's contract is to always return a verdict, never raise.
+     8→
+     9→Checks (in staged order — each must pass before live trading is authorised):
+    10→
+    11→  ┌────┬──────────────────────────────┬───────────────────────────────────────────┐
+    12→  │ #  │ check id                      │ pass condition                           │
+    13→  ├────┼──────────────────────────────┼───────────────────────────────────────────┤
+    14→  │ 1  │ paper_mode_24h                │ trading_mode == "paper" AND              │
+    15→  │    │                               │ (now - session_start) >= 24h             │
+    16→  │ 2  │ positive_expectancy          │ closed_positions avg_pnl > 0 (count > 0) │
+    17→  │ 3  │ max_drawdown_under_2usd       │ current drawdown < $2.00                 │
+    18→  │ 4  │ win_rate_over_50pct           │ closed_positions win_rate > 0.50         │
+    19→  │ 5  │ min_20_closed_trades          │ closed_positions count >= 20             │
+    20→  │ 6  │ ml_trained_on_real_data       │ ml_model fitted AND training_source      │
+    21→  │    │                               │ contains "real" AND n_real_samples > 0   │
+    22→  │ 7  │ drift_healthy                 │ drift_detector.drift_status == HEALTHY  │
+    23→  │ 8  │ kill_switch_tested            │ audit trail has ≥1 kill_switch_activated │
+    24→  │    │                               │ AND ≥1 kill_switch_deactivated event,    │
+    25→  │    │                               │ OR durable marker file present            │
+    26→  │ 9  │ risk_limits_verified          │ risk_manager.status_report() shows all   │
+    27→  │    │                               │ limits healthy (kill switch clear,        │
+    28→  │    │                               │ exposure reconciled, within all caps)    │
+    29→  │ 10 │ api_credentials_configured    │ settings.has_credentials AND             │
+    30→  │    │                               │ settings.has_api_keys                    │
+    31→  └────┴──────────────────────────────┴───────────────────────────────────────────┘
+    32→
+    33→The HTTP layer (``api/server.py``) calls ``register_routes(app)`` at startup
+    34→to expose:
+    35→
+    36→  GET  /api/live/readiness   — run all 10 checks, return {passed, checks, ...}
+    37→  POST /api/live/enable      — attempt to flip live mode on (only succeeds if
+    38→                               all 10 checks pass; requires confirm=true)
+    39→"""
+    40→from __future__ import annotations
+    41→
+    42→import logging
+    43→import os
+    44→import time
+    45→from pathlib import Path
+    46→from typing import Any
+    47→
+    48→log = logging.getLogger(__name__)
+    49→
+    50→# ── God Mode §82 thresholds ─────────────────────────────────────────────────
+    51→# Centralised so the dashboard / tests can introspect the exact bar the gate
+    52→# holds live trading to. None of these are tunable at runtime on purpose —
+    53→# live authorisation is a deliberately high, stable bar.
+    54→PAPER_MODE_MIN_SECONDS: float = 24.0 * 3600.0   # 24h continuous paper session
+    55→MIN_CLOSED_TRADES: int = 20
+    56→MIN_WIN_RATE: float = 0.50
+    57→MAX_LIVE_DRAWDOWN_USD: float = 2.0
+    58→DRIFT_HEALTHY_STATUS: str = "HEALTHY"
+    59→
+    60→# ── Durable marker for an operator-asserted kill-switch test ────────────────
+    61→# Optional override for check #8: if the audit trail doesn't yet carry the
+    62→# activate→deactivate evidence (e.g. fresh deploy where the switch was
+    63→# exercised before audit logging began, or audit DB rotated), an operator can
+    64→# ``touch`` this marker file to assert "kill switch has been tested". The
+    65→# audit-trail path remains the primary signal — this is a documented escape
+    66→# hatch, not the default.
+    67→KILL_SWITCH_TESTED_PATH: Path = Path(
+    68→    os.environ.get(
+    69→        "LIVE_SAFETY_KILL_SWITCH_TESTED_PATH",
+    70→        "/app/data/live_safety_kill_switch_tested",
+    71→    )
+    72→)
+    73→
+    74→# ── Stable check identifiers (dashboards / tests rely on these) ─────────────
+    75→CHECK_PAPER_MODE = "paper_mode_24h"
+    76→CHECK_POSITIVE_EXPECTANCY = "positive_expectancy"
+    77→CHECK_MAX_DRAWDOWN = "max_drawdown_under_2usd"
+    78→CHECK_WIN_RATE = "win_rate_over_50pct"
+    79→CHECK_CLOSED_TRADES = "min_20_closed_trades"
+    80→CHECK_ML_REAL_DATA = "ml_trained_on_real_data"
+    81→CHECK_DRIFT_HEALTHY = "drift_healthy"
+    82→CHECK_KILL_SWITCH_TESTED = "kill_switch_tested"
+    83→CHECK_RISK_LIMITS = "risk_limits_verified"
+    84→CHECK_API_CREDENTIALS = "api_credentials_configured"
+    85→
+    86→# Staged evaluation order — checks are presented in this exact sequence in the
+    87→# report so an operator reads top-to-bottom: paper-mode soak → performance
+    88→# evidence → ML governance → safety posture → credentials.
+    89→CHECK_ORDER: tuple[str, ...] = (
+    90→    CHECK_PAPER_MODE,
+    91→    CHECK_POSITIVE_EXPECTANCY,
+    92→    CHECK_MAX_DRAWDOWN,
+    93→    CHECK_WIN_RATE,
+    94→    CHECK_CLOSED_TRADES,
+    95→    CHECK_ML_REAL_DATA,
+    96→    CHECK_DRIFT_HEALTHY,
+    97→    CHECK_KILL_SWITCH_TESTED,
+    98→    CHECK_RISK_LIMITS,
+    99→    CHECK_API_CREDENTIALS,
+   100→)
+   101→
+   102→SEVERITY_BLOCKING = "BLOCKING"   # every check is blocking until it passes
+   103→
+   104→
+   105→# ── Public API ───────────────────────────────────────────────────────────────
+   106→
+   107→async def check_live_readiness() -> dict[str, Any]:
+   108→    """
+   109→    Run all 10 God Mode §82 staged checks and return a verdict dict::
+   110→
+   111→        {
+   112→            "passed": bool,                  # True only if ALL 10 checks pass
+   113→            "checks": [ {id, name, passed, severity, threshold, value, detail}, ... ],
+   114→            "passed_count": int,
+   115→            "total_count": int,
+   116→            "blocking_checks": [str, ...],   # ids of failed checks (empty if passed)
+   117→            "checked_at": float,             # epoch seconds
+   118→        }
+   119→
+   120→    Never raises — a check that throws records itself as failed (with the
+   121→    exception text in ``detail``) so the gate always returns a verdict. This
+   122→    is the live-trading safety contract: the gate must answer, even when a
+   123→    dependency is broken.
+   124→    """
+   125→    checks: list[dict[str, Any]] = []
+   126→    checks.append(await _check_paper_mode())
+   127→    checks.append(await _check_positive_expectancy())
+   128→    checks.append(await _check_max_drawdown())
+   129→    checks.append(await _check_win_rate())
+   130→    checks.append(await _check_closed_trades())
+   131→    checks.append(await _check_ml_real_data())
+   132→    checks.append(await _check_drift_healthy())
+   133→    checks.append(await _check_kill_switch_tested())
+   134→    checks.append(await _check_risk_limits())
+   135→    checks.append(await _check_api_credentials())
+   136→
+   137→    passed_count = sum(1 for c in checks if c.get("passed"))
+   138→    blocking = [c["id"] for c in checks if not c.get("passed")]
+   139→    return {
+   140→        "passed": len(blocking) == 0,
+   141→        "checks": checks,
+   142→        "passed_count": passed_count,
+   143→        "total_count": len(checks),
+   144→        "blocking_checks": blocking,
+   145→        "checked_at": time.time(),
+   146→    }
+   147→
+   148→
+   149→async def get_live_safety_report() -> dict[str, Any]:
+   150→    """
+   151→    Richer report wrapping ``check_live_readiness`` with mode context,
+   152→    thresholds, and operator guidance. The shape::
+   153→
+   154→        {
+   155→            "generated_at": float,
+   156→            "gate": "God Mode §82 — Live Trading Safety Gate",
+   157→            "readiness": { … check_live_readiness output … },
+   158→            "mode_context": {
+   159→                "trading_mode": str,
+   160→                "paper_trade": bool,
+   161→                "live_trading_enabled": bool,
+   162→                "has_credentials": bool,
+   163→                "has_api_keys": bool,
+   164→                "kill_switch_active": bool,
+   165→                "kill_switch_durable": bool,
+   166→            },
+   167→            "thresholds": { … §82 constants … },
+   168→            "guidance": str,
+   169→        }
+   170→
+   171→    Designed as the single payload an operator dashboard polls to render the
+   172→    full "are we ready to go live?" posture.
+   173→    """
+   174→    readiness = await check_live_readiness()
+   175→
+   176→    mode_context: dict[str, Any]
+   177→    try:
+   178→        from config import settings
+   179→        from core.data_store import store
+   180→        from core.safety import kill_switch_file_exists
+   181→
+   182→        mode_context = {
+   183→            "trading_mode": settings.trading_mode,
+   184→            "paper_trade": bool(settings.paper_trade),
+   185→            "live_trading_enabled": bool(settings.live_trading_enabled),
+   186→            "has_credentials": bool(settings.has_credentials),
+   187→            "has_api_keys": bool(settings.has_api_keys),
+   188→            "kill_switch_active": bool(getattr(store, "kill_switch_active", False)),
+   189→            "kill_switch_durable": bool(kill_switch_file_exists()),
+   190→        }
+   191→    except Exception as e:
+   192→        log.error("[live_safety_gate] mode context gathering failed: %s", e)
+   193→        mode_context = {"error": f"mode context unavailable: {e}"}
+   194→
+   195→    return {
+   196→        "generated_at": time.time(),
+   197→        "gate": "God Mode §82 — Live Trading Safety Gate",
+   198→        "readiness": readiness,
+   199→        "mode_context": mode_context,
+   200→        "thresholds": {
+   201→            "paper_mode_min_seconds": PAPER_MODE_MIN_SECONDS,
+   202→            "min_closed_trades": MIN_CLOSED_TRADES,
+   203→            "min_win_rate": MIN_WIN_RATE,
+   204→            "max_live_drawdown_usd": MAX_LIVE_DRAWDOWN_USD,
+   205→            "drift_healthy_status": DRIFT_HEALTHY_STATUS,
+   206→            "check_order": list(CHECK_ORDER),
+   207→        },
+   208→        "guidance": (
+   209→            "All 10 staged checks must pass before live trading is enabled. "
+   210→            "POST /api/live/enable with confirm=true to attempt activation; "
+   211→            "the endpoint refuses and returns HTTP 409 with the blocking "
+   212→            "check list if any check fails. The in-memory mode flip is "
+   213→            "supplemented (not replaced) by setting TRADING_MODE=live + "
+   214→            "LIVE_TRADING_ENABLED=true in .env and restarting for durable "
+   215→            "activation across process restarts."
+   216→        ),
+   217→    }
+   218→
+   219→
+   220→# ── Individual staged checks ────────────────────────────────────────────────
+   221→# Each returns a dict: {id, name, passed, severity, threshold, value, detail}.
+   222→# Local imports keep a broken dependency from crashing the whole gate — the
+   223→# try/except envelope converts any failure into a recorded failed check.
+   224→
+   225→async def _check_paper_mode() -> dict[str, Any]:
+   226→    """Check #1: paper_mode ≥ 24h — current continuous paper session length."""
+   227→    name = "Paper mode soak ≥ 24h"
+   228→    threshold = f"trading_mode=='paper' AND session_age_s >= {PAPER_MODE_MIN_SECONDS:.0f}"
+   229→    try:
+   230→        from config import settings
+   231→        from core.data_store import store
+   232→
+   233→        mode = settings.trading_mode
+   234→        session_start = float(getattr(store, "session_start", time.time()))
+   235→        age_s = max(0.0, time.time() - session_start)
+   236→        in_paper = mode == "paper"
+   237→        passed = in_paper and age_s >= PAPER_MODE_MIN_SECONDS
+   238→        if passed:
+   239→            detail = f"paper session running {age_s/3600.0:.2f}h (≥24h)"
+   240→        elif not in_paper:
+   241→            detail = (
+   242→                f"not currently in paper mode (trading_mode={mode!r}); "
+   243→                f"the §82 gate requires a continuous ≥24h paper soak first. "
+   244→                f"Note: session_start resets on every process restart, so the "
+   245→                f"measured age reflects only the current continuous session."
+   246→            )
+   247→        else:
+   248→            detail = (
+   249→                f"paper session only {age_s/3600.0:.2f}h old "
+   250→                f"(need ≥{PAPER_MODE_MIN_SECONDS/3600.0:.0f}h); "
+   251→                f"session_start resets on restart."
+   252→            )
+   253→        return {
+   254→            "id": CHECK_PAPER_MODE, "name": name, "passed": passed,
+   255→            "severity": SEVERITY_BLOCKING, "threshold": threshold,
+   256→            "value": {"trading_mode": mode, "session_age_seconds": round(age_s, 1)},
+   257→            "detail": detail,
+   258→        }
+   259→    except Exception as e:
+   260→        log.error("[live_safety_gate] paper_mode check failed: %s", e)
+   261→        return _failed(CHECK_PAPER_MODE, name, threshold, f"check raised: {e}")
+   262→
+   263→
+   264→async def _check_positive_expectancy() -> dict[str, Any]:
+   265→    """Check #2: positive expectancy — avg PnL per closed trade > 0."""
+   266→    name = "Positive expectancy (avg PnL > 0)"
+   267→    threshold = "closed_positions.avg_pnl > 0 (count > 0)"
+   268→    try:
+   269→        from core.closed_positions import closed_positions
+   270→
+   271→        stats = await closed_positions.get_closed_stats()
+   272→        count = int(stats.get("count", 0))
+   273→        avg_pnl = float(stats.get("avg_pnl", 0.0) or 0.0)
+   274→        # Expectancy = mean PnL per trade = (win_rate*avg_win)+(loss_rate*avg_loss).
+   275→        # stats.avg_pnl is exactly this (total_pnl/count), so the >0 test is the
+   276→        # canonical positive-expectancy gate.
+   277→        passed = count > 0 and avg_pnl > 0.0
+   278→        if passed:
+   279→            detail = f"avg_pnl=${avg_pnl:+.4f} across {count} closed trade(s) — positive expectancy"
+   280→        elif count == 0:
+   281→            detail = "no closed trades yet — expectancy undefined until ≥1 trade closes"
+   282→        else:
+   283→            detail = f"avg_pnl=${avg_pnl:+.4f} across {count} closed trade(s) — non-positive expectancy"
+   284→        return {
+   285→            "id": CHECK_POSITIVE_EXPECTANCY, "name": name, "passed": passed,
+   286→            "severity": SEVERITY_BLOCKING, "threshold": threshold,
+   287→            "value": {"count": count, "avg_pnl": round(avg_pnl, 4)},
+   288→            "detail": detail,
+   289→        }
+   290→    except Exception as e:
+   291→        log.error("[live_safety_gate] positive_expectancy check failed: %s", e)
+   292→        return _failed(CHECK_POSITIVE_EXPECTANCY, name, threshold, f"check raised: {e}")
+   293→
+   294→
+   295→async def _check_max_drawdown() -> dict[str, Any]:
+   296→    """Check #3: current drawdown < $2.00 (stricter than the $8 hard breaker)."""
+   297→    name = "Max drawdown < $2.00"
+   298→    threshold = f"drawdown_dollars < {MAX_LIVE_DRAWDOWN_USD:.2f}"
+   299→    try:
+   300→        report = await _risk_status_report()
+   301→        dd = float(report.get("drawdown_dollars", 0.0) or 0.0)
+   302→        passed = dd < MAX_LIVE_DRAWDOWN_USD
+   303→        if passed:
+   304→            detail = f"current drawdown ${dd:.2f} < ${MAX_LIVE_DRAWDOWN_USD:.2f} live gate"
+   305→        else:
+   306→            detail = (
+   307→                f"current drawdown ${dd:.2f} >= ${MAX_LIVE_DRAWDOWN_USD:.2f} live gate "
+   308→                f"(risk engine hard breaker is ${report.get('max_drawdown_limit', 0.0):.2f})"
+   309→            )
+   310→        return {
+   311→            "id": CHECK_MAX_DRAWDOWN, "name": name, "passed": passed,
+   312→            "severity": SEVERITY_BLOCKING, "threshold": threshold,
+   313→            "value": {
+   314→                "drawdown_dollars": round(dd, 4),
+   315→                "max_drawdown_limit": float(report.get("max_drawdown_limit", 0.0) or 0.0),
+   316→            },
+   317→            "detail": detail,
+   318→        }
+   319→    except Exception as e:
+   320→        log.error("[live_safety_gate] max_drawdown check failed: %s", e)
+   321→        return _failed(CHECK_MAX_DRAWDOWN, name, threshold, f"check raised: {e}")
+   322→
+   323→
+   324→async def _check_win_rate() -> dict[str, Any]:
+   325→    """Check #4: win rate > 50%."""
+   326→    name = "Win rate > 50%"
+   327→    threshold = f"closed_positions.win_rate > {MIN_WIN_RATE:.2f}"
+   328→    try:
+   329→        from core.closed_positions import closed_positions
+   330→
+   331→        stats = await closed_positions.get_closed_stats()
+   332→        count = int(stats.get("count", 0))
+   333→        win_rate = float(stats.get("win_rate", 0.0) or 0.0)
+   334→        passed = count > 0 and win_rate > MIN_WIN_RATE
+   335→        if passed:
+   336→            detail = f"win_rate={win_rate*100:.2f}% across {count} closed trade(s)"
+   337→        elif count == 0:
+   338→            detail = "no closed trades yet — win rate undefined"
+   339→        else:
+   340→            detail = f"win_rate={win_rate*100:.2f}% (need > {MIN_WIN_RATE*100:.0f}%)"
+   341→        return {
+   342→            "id": CHECK_WIN_RATE, "name": name, "passed": passed,
+   343→            "severity": SEVERITY_BLOCKING, "threshold": threshold,
+   344→            "value": {"count": count, "win_rate": round(win_rate, 4)},
+   345→            "detail": detail,
+   346→        }
+   347→    except Exception as e:
+   348→        log.error("[live_safety_gate] win_rate check failed: %s", e)
+   349→        return _failed(CHECK_WIN_RATE, name, threshold, f"check raised: {e}")
+   350→
+   351→
+   352→async def _check_closed_trades() -> dict[str, Any]:
+   353→    """Check #5: ≥ 20 closed trades (statistical significance floor)."""
+   354→    name = "≥ 20 closed trades"
+   355→    threshold = f"closed_positions.count >= {MIN_CLOSED_TRADES}"
+   356→    try:
+   357→        from core.closed_positions import closed_positions
+   358→
+   359→        stats = await closed_positions.get_closed_stats()
+   360→        count = int(stats.get("count", 0))
+   361→        passed = count >= MIN_CLOSED_TRADES
+   362→        if passed:
+   363→            detail = f"{count} closed trade(s) (≥ {MIN_CLOSED_TRADES})"
+   364→        else:
+   365→            detail = f"{count} closed trade(s) — need ≥ {MIN_CLOSED_TRADES} for statistical significance"
+   366→        return {
+   367→            "id": CHECK_CLOSED_TRADES, "name": name, "passed": passed,
+   368→            "severity": SEVERITY_BLOCKING, "threshold": threshold,
+   369→            "value": {"count": count},
+   370→            "detail": detail,
+   371→        }
+   372→    except Exception as e:
+   373→        log.error("[live_safety_gate] closed_trades check failed: %s", e)
+   374→        return _failed(CHECK_CLOSED_TRADES, name, threshold, f"check raised: {e}")
+   375→
+   376→
+   377→async def _check_ml_real_data() -> dict[str, Any]:
+   378→    """Check #6: ML model trained on real data (not synthetic-only)."""
+   379→    name = "ML trained on real data"
+   380→    threshold = "ml_model.is_fitted AND training_source contains 'real' AND n_real_samples > 0"
+   381→    try:
+   382→        from ml.model import ml_model
+   383→
+   384→        is_fitted = bool(getattr(ml_model, "is_fitted", False))
+   385→        training_source = str(getattr(ml_model, "training_source", "synthetic_only"))
+   386→        n_real = int(getattr(ml_model, "n_real_samples", 0) or 0)
+   387→        # ``fit_initial`` sets training_source="real_and_synthetic" when the
+   388→        # TimescaleDB history had ≥200 real samples; "synthetic_only" otherwise.
+   389→        has_real = "real" in training_source and n_real > 0
+   390→        passed = is_fitted and has_real
+   391→        if passed:
+   392→            detail = (
+   393→                f"model fitted on {n_real} real + "
+   394→                f"{getattr(ml_model, 'n_synthetic_samples', 0)} synthetic samples "
+   395→                f"(source={training_source})"
+   396→            )
+   397→        elif not is_fitted:
+   398→            detail = "ml_model not fitted — train on real market history before going live"
+   399→        else:
+   400→            detail = (
+   401→                f"model trained on synthetic-only data (source={training_source}, "
+   402→                f"n_real_samples={n_real}) — §82 requires real-data training"
+   403→            )
+   404→        return {
+   405→            "id": CHECK_ML_REAL_DATA, "name": name, "passed": passed,
+   406→            "severity": SEVERITY_BLOCKING, "threshold": threshold,
+   407→            "value": {
+   408→                "is_fitted": is_fitted, "training_source": training_source,
+   409→                "n_real_samples": n_real,
+   410→                "n_synthetic_samples": int(getattr(ml_model, "n_synthetic_samples", 0) or 0),
+   411→            },
+   412→            "detail": detail,
+   413→        }
+   414→    except Exception as e:
+   415→        log.error("[live_safety_gate] ml_real_data check failed: %s", e)
+   416→        return _failed(CHECK_ML_REAL_DATA, name, threshold, f"check raised: {e}")
+   417→
+   418→
+   419→async def _check_drift_healthy() -> dict[str, Any]:
+   420→    """Check #7: ML drift detector reports HEALTHY status."""
+   421→    name = "ML drift status HEALTHY"
+   422→    threshold = f"drift_detector.drift_status == {DRIFT_HEALTHY_STATUS!r}"
+   423→    try:
+   424→        from ml.drift_detector import drift_detector
+   425→
+   426→        status = str(getattr(drift_detector, "drift_status", "UNKNOWN"))
+   427→        passed = status == DRIFT_HEALTHY_STATUS
+   428→        if passed:
+   429→            detail = (
+   430→                f"drift_status=HEALTHY (PSI={drift_detector.last_psi}, "
+   431→                f"KS={drift_detector.last_ks_stat}, "
+   432→                f"rolling_brier={drift_detector.rolling_brier})"
+   433→            )
+   434→        else:
+   435→            detail = (
+   436→                f"drift_status={status} (need HEALTHY) — PSI={drift_detector.last_psi}, "
+   437→                f"KS={drift_detector.last_ks_stat}, "
+   438→                f"rolling_brier={drift_detector.rolling_brier}; "
+   439→                f"retrain before going live"
+   440→            )
+   441→        return {
+   442→            "id": CHECK_DRIFT_HEALTHY, "name": name, "passed": passed,
+   443→            "severity": SEVERITY_BLOCKING, "threshold": threshold,
+   444→            "value": {
+   445→                "drift_status": status,
+   446→                "psi": float(drift_detector.last_psi),
+   447→                "ks_stat": float(drift_detector.last_ks_stat),
+   448→                "rolling_brier": drift_detector.rolling_brier,
+   449→            },
+   450→            "detail": detail,
+   451→        }
+   452→    except Exception as e:
+   453→        log.error("[live_safety_gate] drift_healthy check failed: %s", e)
+   454→        return _failed(CHECK_DRIFT_HEALTHY, name, threshold, f"check raised: {e}")
+   455→
+   456→
+   457→async def _check_kill_switch_tested() -> dict[str, Any]:
+   458→    """Check #8: kill switch has been exercised (activated then deactivated).
+   459→
+   460→    Primary signal: the audit trail carries at least one
+   461→    ``kill_switch_activated`` AND at least one ``kill_switch_deactivated``
+   462→    event (proving the operator ran the full activate→deactivate cycle, so the
+   463→    durable marker file + in-memory flag + cancel-all-orders path are all
+   464→    known-good).
+   465→
+   466→    Escape hatch: a durable marker file at ``KILL_SWITCH_TESTED_PATH`` lets an
+   467→    operator assert "tested" when the audit evidence is unavailable (e.g. on a
+   468→    fresh deploy where the switch was exercised before audit logging began or
+   469→    the audit DB was rotated). The marker is the documented override, not the
+   470→    default — the audit trail is the canonical evidence path.
+   471→    """
+   472→    name = "Kill switch tested (activate→deactivate exercised)"
+   473→    threshold = "audit trail has ≥1 kill_switch_activated AND ≥1 kill_switch_deactivated, OR marker file present"
+   474→    try:
+   475→        # Escape hatch first — cheap filesystem check.
+   476→        marker_present = False
+   477→        try:
+   478→            marker_present = KILL_SWITCH_TESTED_PATH.exists()
+   479→        except OSError:
+   480→            marker_present = False
+   481→
+   482→        activated_count = 0
+   483→        deactivated_count = 0
+   484→        last_activated_ts: float | None = None
+   485→        last_deactivated_ts: float | None = None
+   486→        try:
+   487→            from core.audit_logger import audit_logger
+   488→
+   489→            # Pull a wide window of risk-category events so we don't miss an
+   490→            # early-cycle test buried under later risk events. 500 is generous
+   491→            # but bounded — the audit DB is append-only and risk events are
+   492→            # rare (only fire on breaker trips / manual resets).
+   493→            events = await audit_logger.get_recent_events(limit=500, category="risk")
+   494→            for ev in events:
+   495→                et = str(ev.get("event_type", "") or "")
+   496→                if et == "kill_switch_activated":
+   497→                    activated_count += 1
+   498→                    ts = ev.get("timestamp")
+   499→                    if ts is not None and (last_activated_ts is None or float(ts) > last_activated_ts):
+   500→                        last_activated_ts = float(ts)
+   501→                elif et == "kill_switch_deactivated":
+   502→                    deactivated_count += 1
+   503→                    ts = ev.get("timestamp")
+   504→                    if ts is not None and (last_deactivated_ts is None or float(ts) > last_deactivated_ts):
+   505→                        last_deactivated_ts = float(ts)
+   506→        except Exception as e:
+   507→            log.debug("[live_safety_gate] audit trail inspection failed: %s", e)
+   508→
+   509→        audit_evidence = activated_count >= 1 and deactivated_count >= 1
+   510→        passed = audit_evidence or marker_present
+   511→
+   512→        if passed and audit_evidence:
+   513→            ordered = (
+   514→                last_activated_ts is not None
+   515→                and last_deactivated_ts is not None
+   516→                and last_deactivated_ts >= last_activated_ts
+   517→            )
+   518→            detail = (
+   519→                f"audit trail: {activated_count} activation(s), "
+   520→                f"{deactivated_count} deactivation(s); "
+   521→                f"last deactivate {'followed' if ordered else 'preceded'} last activate"
+   522→            )
+   523→        elif passed and marker_present:
+   524→            detail = (
+   525→                f"operator marker file present at {KILL_SWITCH_TESTED_PATH} "
+   526→                f"(audit trail had {activated_count} activate / {deactivated_count} "
+   527→                f"deactivate — marker is the documented override)"
+   528→            )
+   529→        else:
+   530→            detail = (
+   531→                f"audit trail has {activated_count} activate / {deactivated_count} "
+   532→                f"deactivate event(s); need ≥1 of each. Exercise the kill switch "
+   533→                f"(activate via POST /api/risk/kill-switch, then reset via "
+   534→                f"DELETE /api/risk/kill-switch) or create the marker file at "
+   535→                f"{KILL_SWITCH_TESTED_PATH}."
+   536→            )
+   537→        return {
+   538→            "id": CHECK_KILL_SWITCH_TESTED, "name": name, "passed": passed,
+   539→            "severity": SEVERITY_BLOCKING, "threshold": threshold,
+   540→            "value": {
+   541→                "audit_activated_count": activated_count,
+   542→                "audit_deactivated_count": deactivated_count,
+   543→                "last_activated_at": last_activated_ts,
+   544→                "last_deactivated_at": last_deactivated_ts,
+   545→                "marker_file_present": marker_present,
+   546→                "marker_path": str(KILL_SWITCH_TESTED_PATH),
+   547→            },
+   548→            "detail": detail,
+   549→        }
+   550→    except Exception as e:
+   551→        log.error("[live_safety_gate] kill_switch_tested check failed: %s", e)
+   552→        return _failed(CHECK_KILL_SWITCH_TESTED, name, threshold, f"check raised: {e}")
+   553→
+   554→
+   555→async def _check_risk_limits() -> dict[str, Any]:
+   556→    """Check #9: all risk limits verified healthy (kill switch clear, exposure reconciled, within caps)."""
+   557→    name = "Risk limits verified"
+   558→    threshold = "kill_switch clear AND exposure_reconciled AND within all caps AND no breakers tripped"
+   559→    try:
+   560→        report = await _risk_status_report()
+   561→
+   562→        sub_checks: list[dict[str, Any]] = [
+   563→            {"key": "kill_switch", "ok": not bool(report.get("kill_switch", True)),
+   564→             "value": report.get("kill_switch")},
+   565→            {"key": "kill_switch_durable", "ok": not bool(report.get("kill_switch_durable", True)),
+   566→             "value": report.get("kill_switch_durable")},
+   567→            {"key": "observation_only", "ok": not bool(report.get("observation_only", False)),
+   568→             "value": report.get("observation_only")},
+   569→            {"key": "exposure_reconciled", "ok": bool(report.get("exposure_reconciled", False)),
+   570→             "value": report.get("exposure_reconciled")},
+   571→            {"key": "drawdown_within_live_gate",
+   572→             "ok": float(report.get("drawdown_dollars", 0.0) or 0.0) < MAX_LIVE_DRAWDOWN_USD,
+   573→             "value": report.get("drawdown_dollars"),
+   574→             "threshold": MAX_LIVE_DRAWDOWN_USD},
+   575→            {"key": "drawdown_within_hard_limit",
+   576→             "ok": float(report.get("drawdown_dollars", 0.0) or 0.0) < float(report.get("max_drawdown_limit", 0.0) or 0.0),
+   577→             "value": report.get("drawdown_dollars"),
+   578→             "threshold": report.get("max_drawdown_limit")},
+   579→            {"key": "daily_loss_within_stop",
+   580→             "ok": float(report.get("daily_pnl", 0.0) or 0.0) > float(report.get("daily_loss_limit", 0.0) or 0.0),
+   581→             "value": report.get("daily_pnl"),
+   582→             "threshold": report.get("daily_loss_limit")},
+   583→            {"key": "weekly_loss_within_stop",
+   584→             "ok": float(report.get("weekly_pnl", 0.0) or 0.0) > float(report.get("weekly_loss_limit", 0.0) or 0.0),
+   585→             "value": report.get("weekly_pnl"),
+   586→             "threshold": report.get("weekly_loss_limit")},
+   587→            {"key": "total_exposure_within_cap",
+   588→             "ok": float(report.get("total_exposure", 0.0) or 0.0) <= float(report.get("max_total_exposure", 0.0) or 0.0),
+   589→             "value": report.get("total_exposure"),
+   590→             "threshold": report.get("max_total_exposure")},
+   591→            {"key": "pending_capital_within_cap",
+   592→             "ok": float(report.get("pending_order_capital", 0.0) or 0.0) <= float(report.get("max_pending_order_capital", 0.0) or 0.0),
+   593→             "value": report.get("pending_order_capital"),
+   594→             "threshold": report.get("max_pending_order_capital")},
+   595→            {"key": "open_orders_within_cap",
+   596→             "ok": int(report.get("open_orders", 0) or 0) <= int(report.get("max_open_orders", 0) or 0),
+   597→             "value": report.get("open_orders"),
+   598→             "threshold": report.get("max_open_orders")},
+   599→        ]
+   600→        failed_subs = [s["key"] for s in sub_checks if not s["ok"]]
+   601→        passed = len(failed_subs) == 0
+   602→        if passed:
+   603→            detail = "all risk sub-limits healthy (kill switch clear, exposure reconciled, within every cap)"
+   604→        else:
+   605→            detail = f"risk sub-limits failing: {failed_subs}"
+   606→        return {
+   607→            "id": CHECK_RISK_LIMITS, "name": name, "passed": passed,
+   608→            "severity": SEVERITY_BLOCKING, "threshold": threshold,
+   609→            "value": {
+   610→                "failed_sub_checks": failed_subs,
+   611→                "sub_checks": sub_checks,
+   612→                "kill_switch": report.get("kill_switch"),
+   613→                "observation_only": report.get("observation_only"),
+   614→                "exposure_reconciled": report.get("exposure_reconciled"),
+   615→                "drawdown_dollars": report.get("drawdown_dollars"),
+   616→                "total_exposure": report.get("total_exposure"),
+   617→            },
+   618→            "detail": detail,
+   619→        }
+   620→    except Exception as e:
+   621→        log.error("[live_safety_gate] risk_limits check failed: %s", e)
+   622→        return _failed(CHECK_RISK_LIMITS, name, threshold, f"check raised: {e}")
+   623→
+   624→
+   625→async def _check_api_credentials() -> dict[str, Any]:
+   626→    """Check #10: API credentials configured (wallet key + CLOB API key/secret/passphrase)."""
+   627→    name = "API credentials configured"
+   628→    threshold = "settings.has_credentials AND settings.has_api_keys"
+   629→    try:
+   630→        from config import settings
+   631→
+   632→        has_creds = bool(settings.has_credentials)
+   633→        has_keys = bool(settings.has_api_keys)
+   634→        passed = has_creds and has_keys
+   635→        if passed:
+   636→            detail = "wallet private key + CLOB API key/secret/passphrase all configured"
+   637→        else:
+   638→            missing: list[str] = []
+   639→            if not has_creds:
+   640→                missing.append("POLY_PRIVATE_KEY")
+   641→            if not has_keys:
+   642→                missing.append("POLY_API_KEY/POLY_API_SECRET/POLY_API_PASSPHRASE")
+   643→            detail = f"missing credentials: {missing} — set in .env before going live"
+   644→        return {
+   645→            "id": CHECK_API_CREDENTIALS, "name": name, "passed": passed,
+   646→            "severity": SEVERITY_BLOCKING, "threshold": threshold,
+   647→            "value": {"has_credentials": has_creds, "has_api_keys": has_keys},
+   648→            "detail": detail,
+   649→        }
+   650→    except Exception as e:
+   651→        log.error("[live_safety_gate] api_credentials check failed: %s", e)
+   652→        return _failed(CHECK_API_CREDENTIALS, name, threshold, f"check raised: {e}")
+   653→
+   654→
+   655→# ── FastAPI route registration ───────────────────────────────────────────────
+   656→
+   657→# ── FastAPI request model (module-level so FastAPI resolves it as a body) ───
+   658→# Mirrors the convention in ``api/server.py`` where every Pydantic request model
+   659→# is defined at module scope (e.g. ``ObservationModeRequest``). Defining the
+   660→# model inside ``register_routes`` made FastAPI treat the parameter as a query
+   661→# arg (``loc: ["query","req"]``) instead of a JSON body.
+   662→
+   663→try:
+   664→    from pydantic import BaseModel, Field
+   665→
+   666→    class EnableLiveRequest(BaseModel):
+   667→        """Request body for ``POST /api/live/enable``."""
+   668→
+   669→        confirm: bool = Field(
+   670→            default=False,
+   671→            description="Must be true to authorise live-mode activation (defence against accidental clicks).",
+   672→        )
+   673→        reason: str = Field(
+   674→            default="",
+   675→            description="Operator justification for enabling live trading (recorded in the audit trail).",
+   676→        )
+   677→except Exception:  # pragma: no cover — pydantic is a hard project dep; this only trips in odd unit-test stubs
+   678→    EnableLiveRequest = None  # type: ignore[assignment]
+   679→
+   680→
+   681→# ── FastAPI route registration ───────────────────────────────────────────────
+   682→
+   683→def register_routes(app: Any) -> None:
+   684→    """
+   685→    Append live-safety-gate endpoints to a FastAPI app.
+   686→
+   687→    Endpoints (auth-protected by the caller's existing middleware):
+   688→
+   689→      GET /api/live/readiness
+   690→          Run all 10 God Mode §82 staged checks and return the verdict dict
+   691→          ({passed, checks, passed_count, total_count, blocking_checks,
+   692→          checked_at}). Never 500s — a check that throws records itself as
+   693→          failed.
+   694→
+   695→      POST /api/live/enable
+   696→          Request body: {confirm: bool, reason: str}
+   697→          Attempt to flip the bot into live trading mode. Requires
+   698→          ``confirm=true`` (defence against accidental double-click). Runs
+   699→          ``check_live_readiness`` first; if any check fails, returns HTTP 409
+   700→          with the blocking-check list and the full readiness payload. On
+   701→          success, flips the in-memory mode flags (live_trading_enabled=True,
+   702→          trading_mode="live", paper_trade=False) and logs an audit event.
+   703→
+   704→          NOTE: the in-memory flip is sufficient for ``check_order`` to start
+   705→          admitting live orders, but it does NOT persist across process
+   706→          restarts. For durable activation, set TRADING_MODE=live and
+   707→          LIVE_TRADING_ENABLED=true in .env and restart — the response
+   708→          payload carries this guidance.
+   709→    """
+   710→    from fastapi import HTTPException
+   711→
+   712→    @app.get("/api/live/readiness", tags=["live"])
+   713→    async def _live_readiness():
+   714→        """Run all 10 §82 staged checks; return {passed, checks, blocking_checks, ...}."""
+   715→        return await check_live_readiness()
+   716→
+   717→    @app.post("/api/live/enable", tags=["live"])
+   718→    async def _enable_live(req: "EnableLiveRequest"):
+   719→        """Attempt to enable live trading. Refuses (HTTP 409) if any §82 check fails."""
+   720→        if not req.confirm:
+   721→            raise HTTPException(
+   722→                status_code=400,
+   723→                detail="confirm=true is required to enable live trading (defence against accidental activation).",
+   724→            )
+   725→        readiness = await check_live_readiness()
+   726→        if not readiness["passed"]:
+   727→            # 409 Conflict: the request conflicts with the current safety state.
+   728→            raise HTTPException(
+   729→                status_code=409,
+   730→                detail={
+   731→                    "message": "Live trading NOT enabled — God Mode §82 safety gate failed.",
+   732→                    "passed_count": readiness["passed_count"],
+   733→                    "total_count": readiness["total_count"],
+   734→                    "blocking_checks": readiness["blocking_checks"],
+   735→                    "checks": readiness["checks"],
+   736→                    "guidance": "Resolve every blocking check, then re-POST /api/live/enable.",
+   737→                },
+   738→            )
+   739→        # All 10 checks passed — authorise live trading in-memory.
+   740→        try:
+   741→            from config import settings
+   742→            from core.audit_logger import audit_logger
+   743→            from core.data_store import store
+   744→
+   745→            settings.live_trading_enabled = True
+   746→            settings.trading_mode = "live"
+   747→            settings.paper_trade = False
+   748→            await audit_logger.log_event(
+   749→                category="system",
+   750→                event_type="live_trading_enabled",
+   751→                details=(
+   752→                    f"Live trading enabled via §82 safety gate "
+   753→                    f"(reason={req.reason or 'operator request'}). "
+   754→                    f"In-memory flags flipped — set TRADING_MODE=live + "
+   755→                    f"LIVE_TRADING_ENABLED=true in .env and restart for "
+   756→                    f"durable activation."
+   757→                ),
+   758→            )
+   759→            await store.log_event(
+   760→                f"🔴 LIVE TRADING ENABLED via §82 safety gate — reason: {req.reason or 'operator request'}"
+   761→            )
+   762→            log.warning(
+   763→                "[live_safety_gate] 🔴 LIVE TRADING ENABLED via safety gate — reason=%s",
+   764→                req.reason or "operator request",
+   765→            )
+   766→            return {
+   767→                "enabled": True,
+   768→                "mode": settings.trading_mode,
+   769→                "live_trading_enabled": settings.live_trading_enabled,
+   770→                "paper_trade": settings.paper_trade,
+   771→                "readiness": readiness,
+   772→                "note": (
+   773→                    "In-memory mode flags flipped — check_order will now admit live orders. "
+   774→                    "Set TRADING_MODE=live + LIVE_TRADING_ENABLED=true in .env and restart "
+   775→                    "for durable activation across process restarts."
+   776→                ),
+   777→            }
+   778→        except Exception as e:
+   779→            log.error("[live_safety_gate] live enable failed post-gate: %s", e)
+   780→            raise HTTPException(
+   781→                status_code=500,
+   782→                detail=f"All §82 checks passed but the in-memory mode flip failed: {e}",
+   783→            )
+   784→
+   785→
+   786→# ── Helpers ──────────────────────────────────────────────────────────────────
+   787→
+   788→async def _risk_status_report() -> dict[str, Any]:
+   789→    """Fetch the risk manager's status report, swallowing failures (check #3/#9 use this)."""
+   790→    try:
+   791→        from risk.manager import risk_manager
+   792→        return await risk_manager.status_report()
+   793→    except Exception as e:
+   794→        log.debug("[live_safety_gate] risk_manager.status_report unavailable: %s", e)
+   795→        return {}
+   796→
+   797→
+   798→def _failed(check_id: str, name: str, threshold: str, detail: str) -> dict[str, Any]:
+   799→    """Construct a failed-check payload (used by every check's except branch)."""
+   800→    return {
+   801→        "id": check_id,
+   802→        "name": name,
+   803→        "passed": False,
+   804→        "severity": SEVERITY_BLOCKING,
+   805→        "threshold": threshold,
+   806→        "value": None,
+   807→        "detail": detail,
+   808→    }
+   809→
+   810→
+   811→__all__ = [
+   812→    "check_live_readiness",
+   813→    "get_live_safety_report",
+   814→    "register_routes",
+   815→    "CHECK_ORDER",
+   816→    "CHECK_PAPER_MODE",
+   817→    "CHECK_POSITIVE_EXPECTANCY",
+   818→    "CHECK_MAX_DRAWDOWN",
+   819→    "CHECK_WIN_RATE",
+   820→    "CHECK_CLOSED_TRADES",
+   821→    "CHECK_ML_REAL_DATA",
+   822→    "CHECK_DRIFT_HEALTHY",
+   823→    "CHECK_KILL_SWITCH_TESTED",
+   824→    "CHECK_RISK_LIMITS",
+   825→    "CHECK_API_CREDENTIALS",
+   826→    "PAPER_MODE_MIN_SECONDS",
+   827→    "MIN_CLOSED_TRADES",
+   828→    "MIN_WIN_RATE",
+   829→    "MAX_LIVE_DRAWDOWN_USD",
+   830→    "DRIFT_HEALTHY_STATUS",
+   831→    "KILL_SWITCH_TESTED_PATH",
+   832→]
+
+[showing lines 1-832 of 833; use offset=833 with limit to continue reading]

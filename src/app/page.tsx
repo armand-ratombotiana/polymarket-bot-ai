@@ -1,7 +1,7 @@
 // app/page.tsx — Polymarket Pro Trading Workstation
 'use client'
 
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, useRef } from 'react'
 import { useBot } from '@/hooks/useBot'
 import { useAudio } from '@/hooks/useAudio'
 import Sidebar, { NavSection } from '@/components/Sidebar'
@@ -61,7 +61,7 @@ const KB_MAP: Record<string, NavSection> = {
 
 export default function Dashboard() {
   const [mounted, setMounted] = useState(false)
-  const { snapshot, status, activateKillSwitch, deactivateKillSwitch, cancelAllOrders, cancelOrder, closePosition } = useBot()
+  const { snapshot, status, priceFlashes, activateKillSwitch, deactivateKillSwitch, cancelAllOrders, cancelOrder, closePosition } = useBot()
   const audio = useAudio()
 
   const [uptime, setUptime] = useState(0)
@@ -80,6 +80,17 @@ export default function Dashboard() {
   const [confirmCancelAll, setConfirmCancelAll] = useState(false)
   const [actionLoading, setActionLoading] = useState(false)
 
+  // U13 — Audio cue tracking refs.
+  // `lastTradeIdRef`      → remembers the most recent trade_id we have already
+  //                        played a fill cue for, so each new fill sounds
+  //                        exactly once.
+  // `lastWhaleTradeIdRef` → independently tracks whale-sized fills (size > $5)
+  //                        so that a whale fires BOTH the regular fill cue and
+  //                        the distinct whale-alert cue, without either cue
+  //                        replaying for the same trade.
+  const lastTradeIdRef = useRef<string | null>(null)
+  const lastWhaleTradeIdRef = useRef<string | null>(null)
+
   useEffect(() => {
     setMounted(true)
   }, [])
@@ -90,6 +101,40 @@ export default function Dashboard() {
     const t = setInterval(() => setUptime(Math.floor((Date.now() - startTime) / 1000)), 1000)
     return () => clearInterval(t)
   }, [mounted, startTime])
+
+  // ── U13 — Audible fill cue ─────────────────────────────────────────
+  // Fires `audio.playTradeFill()` whenever `snapshot.recent_trades`
+  // changes and the newest trade has a trade_id we have not yet sounded.
+  // `recent_trades` is appended chronologically (server slices
+  // `store.trades[-50:]`), so the last array element is the most recent
+  // fill. The `lastTradeIdRef` guard prevents replays across snapshot
+  // refreshes / re-renders.
+  useEffect(() => {
+    const trades = snapshot.recent_trades
+    if (!trades || trades.length === 0) return
+    const latest = trades[trades.length - 1]
+    if (!latest || !latest.trade_id) return
+    if (lastTradeIdRef.current !== latest.trade_id) {
+      audio.playTradeFill()
+      lastTradeIdRef.current = latest.trade_id
+    }
+  }, [snapshot.recent_trades, audio])
+
+  // ── U13 — Whale alert ──────────────────────────────────────────────
+  // Fires `audio.playWhaleAlert()` when the newest fill exceeds the
+  // $5 size threshold. Tracked via a separate ref so that a whale fill
+  // also triggers the regular fill cue above (two distinct sounds), and
+  // neither cue replays for the same trade_id.
+  useEffect(() => {
+    const trades = snapshot.recent_trades
+    if (!trades || trades.length === 0) return
+    const latest = trades[trades.length - 1]
+    if (!latest || !latest.trade_id) return
+    if (latest.size > 5 && lastWhaleTradeIdRef.current !== latest.trade_id) {
+      audio.playWhaleAlert()
+      lastWhaleTradeIdRef.current = latest.trade_id
+    }
+  }, [snapshot.recent_trades, audio])
 
   const handleKillSwitch = useCallback(async () => {
     setActionLoading(true)
@@ -228,6 +273,7 @@ export default function Dashboard() {
                   <MarketsPanel
                     books={snapshot.order_books}
                     onSelectMarket={(tokenId, slug) => setChartMarket({ tokenId, slug })}
+                    priceFlashes={priceFlashes}
                   />
                 </div>
                 <div style={{ gridArea: 'pos', minHeight: 0, overflow: 'hidden' }}>
@@ -272,6 +318,7 @@ export default function Dashboard() {
                 <MarketsPanel
                   books={snapshot.order_books}
                   onSelectMarket={(tokenId, slug) => setChartMarket({ tokenId, slug })}
+                  priceFlashes={priceFlashes}
                 />
               </div>
             )}

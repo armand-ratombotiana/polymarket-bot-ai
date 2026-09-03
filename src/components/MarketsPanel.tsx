@@ -9,6 +9,10 @@ import { fmtPrice } from '@/lib/design-tokens'
 interface Props {
   books: OrderBook[]
   onSelectMarket?: (tokenId: string, slug: string) => void
+  // U12 — Per-token price-flash direction map (token_id → 'up' | 'down').
+  // When present, the mid-price cell applies the `.price-up` / `.price-down`
+  // CSS class so a CSS keyframe can briefly tint the cell green/red on tick.
+  priceFlashes?: Record<string, 'up' | 'down'>
 }
 
 function ageSec(ts: number) {
@@ -56,7 +60,7 @@ function ProbabilityGauge({ mid }: { mid: number | null }) {
 
 const CATEGORIES = ['ALL', 'CRYPTO', 'POLITICS', 'ECONOMY', 'SPORTS', 'TECH']
 
-export default function MarketsPanel({ books, onSelectMarket }: Props) {
+export default function MarketsPanel({ books, onSelectMarket, priceFlashes }: Props) {
   const [search, setSearch] = useState('')
   const [selectedCat, setSelectedCat] = useState('ALL')
   const [sortBy, setSortBy] = useState<'mid' | 'spread' | 'age'>('mid')
@@ -226,6 +230,9 @@ export default function MarketsPanel({ books, onSelectMarket }: Props) {
                 const age = ageSec(b.updated_at)
                 const isStale = age > 30
                 const isCopied = copiedToken === b.token_id
+                // U12 — Resolve this row's price-flash direction once per render.
+                // Undefined (no flash active) yields no extra class on the cell.
+                const flashDir = priceFlashes?.[b.token_id]
 
                 return (
                   <tr
@@ -269,8 +276,10 @@ export default function MarketsPanel({ books, onSelectMarket }: Props) {
                       {fmtPrice(b.best_ask)}
                     </td>
 
-                    {/* Implied Probability Gauge */}
-                    <td className="text-right">
+                    {/* Implied Probability Gauge — mid-price cell.
+                        U12: apply .price-up / .price-down when a flash is active
+                        for this token so CSS can animate the cell background. */}
+                    <td className={`text-right${flashDir === 'up' ? ' price-up' : flashDir === 'down' ? ' price-down' : ''}`}>
                       <ProbabilityGauge mid={b.mid} />
                     </td>
 
