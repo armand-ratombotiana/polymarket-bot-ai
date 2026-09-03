@@ -6,7 +6,7 @@
 // or whether the UI is relying on REST polling (amber / "Polling").
 // A transient `onerror` event surfaces red ("WS Error") before the
 // reconnect logic flips back to amber.
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { render, screen, act } from '@testing-library/react'
 import ConnectionStatus from './ConnectionStatus'
 

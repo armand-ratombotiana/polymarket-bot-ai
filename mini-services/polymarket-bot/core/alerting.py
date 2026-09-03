@@ -410,6 +410,74 @@ class AlertEngine:
                     pass
         return results
 
+    @timed_query
+    def get_recent_page(
+        self,
+        limit: int = 50,
+        unacknowledged_only: bool = False,
+        cursor: str | None = None,
+    ) -> "Page":
+        """Cursor-paginated fetch of recent alerts (newest first).
+
+        W16-5 — wraps :func:`core.pagination.paginate_query` against the
+        ``alerts`` table. ``SELECT *`` includes the ``alert_id`` TEXT
+        PRIMARY KEY column (used as the tiebreaker for rows that share a
+        ``timestamp``). The wire payload carries the same shape as
+        :meth:`get_recent` plus the new ``next_cursor`` / ``has_more``
+        fields.
+
+        Args:
+            limit:                Page size (clamped to ``[1, 100]`` by
+                                  :func:`paginate_query`).
+            unacknowledged_only:  Filter to ``acknowledged = 0`` rows.
+            cursor:               Opaque cursor from a previous
+                                  response's ``next_cursor`` field.
+                                  ``None`` returns the first page.
+
+        Returns:
+            :class:`core.pagination.Page` whose ``items`` are the alert
+            rows (newest first) with the JSON ``metadata`` column
+            decoded back to a dict (mirroring
+            :meth:`get_recent`).
+        """
+        from core.pagination import Page, paginate_query
+
+        if unacknowledged_only:
+            base_query = "SELECT * FROM alerts WHERE acknowledged = 0"
+            base_params: tuple = ()
+        else:
+            base_query = "SELECT * FROM alerts WHERE 1=1"
+            base_params = ()
+
+        try:
+            with sqlite3.connect(self._db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                page = paginate_query(
+                    conn,
+                    base_query,
+                    base_params,
+                    cursor=cursor,
+                    limit=limit,
+                    cursor_column="timestamp",
+                    id_column="alert_id",
+                    reverse=True,
+                )
+        except Exception as e:  # noqa: BLE001 — defensive
+            logger.error("[alerting] get_recent_page failed: %s", e)
+            return Page(items=[], next_cursor=None, has_more=False)
+
+        # Decode the JSON metadata column for caller convenience (mirrors
+        # the legacy ``get_recent`` post-processing).
+        for r in page.items:
+            if isinstance(r, dict):
+                raw_meta = r.get("metadata")
+                if isinstance(raw_meta, str):
+                    try:
+                        r["metadata"] = json.loads(raw_meta)
+                    except (TypeError, ValueError):
+                        pass
+        return page
+
     def acknowledge(self, alert_id: str) -> bool:
         """Mark a single alert acknowledged. Returns True if a row was updated."""
         try:
@@ -504,11 +572,29 @@ def register_routes(app: Any) -> None:
 
     @router.get("")
     @router.get("/")
-    async def get_alerts(limit: int = 50, unacknowledged_only: bool = False):
-        """Return recent alerts (newest first) + aggregate stats."""
+    async def get_alerts(
+        limit: int = 50,
+        unacknowledged_only: bool = False,
+        cursor: str | None = None,
+    ):
+        """Return recent alerts (newest first) + aggregate stats.
+
+        W16-5 — supports cursor-based pagination via the optional
+        ``cursor`` query param. When omitted, the first page is
+        returned — fully backward compatible with the pre-pagination
+        wire shape (``{alerts, stats}`` plus the new ``next_cursor`` /
+        ``has_more`` fields).
+        """
+        page = alert_engine.get_recent_page(
+            limit=limit,
+            unacknowledged_only=unacknowledged_only,
+            cursor=cursor,
+        )
         return {
-            "alerts": alert_engine.get_recent(limit, unacknowledged_only),
+            "alerts": page.items,
             "stats": alert_engine.get_stats(),
+            "next_cursor": page.next_cursor,
+            "has_more": page.has_more,
         }
 
     @router.get("/stats")

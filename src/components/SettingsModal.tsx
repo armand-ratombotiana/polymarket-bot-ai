@@ -267,7 +267,7 @@ const SECTION_ORDER: SettingDescriptor['section'][] = [
 ]
 
 export default function SettingsModal({ isOpen, onClose }: Props) {
-  const { preferences, update, reset } = usePreferences()
+  const { preferences, update } = usePreferences()
   const [draft, setDraft] = useState<UserPreferences>(preferences)
   const modalRef = useRef<HTMLDivElement>(null)
   const closeBtnRef = useRef<HTMLButtonElement>(null)
@@ -311,6 +311,7 @@ export default function SettingsModal({ isOpen, onClose }: Props) {
       lastActiveRef.current?.focus?.()
       lastActiveRef.current = null
     }
+    return undefined
   }, [isOpen])
 
   // Focus trap inside the modal.

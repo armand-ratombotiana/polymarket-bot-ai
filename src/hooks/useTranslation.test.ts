@@ -9,7 +9,7 @@
 //     both locales have identical key sets (so a translator can't
 //     accidentally leave the fr.json half-empty).
 
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { renderHook, act } from '@testing-library/react'
 import { useTranslation } from './useTranslation'
 import {

@@ -462,6 +462,7 @@ export default function ShadowInferencePanel() {
       document.addEventListener('visibilitychange', onVisibility)
       return () => document.removeEventListener('visibilitychange', onVisibility)
     }
+    return undefined
   }, [fetchAll])
 
   // Auto-clear toasts after 5s

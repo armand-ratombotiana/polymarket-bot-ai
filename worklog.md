@@ -25566,3 +25566,283 @@ Stage Summary:
   `refreshIntervalMs` / `defaultPanel` / display-flag wiring).
 - Lint: clean. Tests: 556/556 pass (33 new + 523 existing, no
   regressions).
+
+---
+Task ID: W16-7
+Agent: general-purpose
+Task: Async DB connection pool (aiosqlite) for the polymarket-bot SQLite
+databases.
+
+Work Log:
+- Read worklog tail (~last 250 lines — W15-1 chart components, W15-2
+  user-preferences system) + `core/decision_ledger.py` (first 60 lines —
+  sync SQLite pattern, module-level `DB_PATH` from env var, `_init_db`
+  swallows errors so import is safe even when `/app/data` is read-only)
+  + `core/observability.py` (first 40 lines — same sync pattern, same
+  `DB_PATH` env-var resolution, separate `metrics` table) +
+  `requirements.txt` (asyncpg already present for TimescaleDB; no
+  SQLite async driver present yet). Also read `core/execution_quality.py`
+  head (same sync pattern, `execution_quality` table) +
+  `tests/conftest.py` (full — to confirm the env-var redirect pattern
+  + the autouse reset fixture model) + `api/server.py` lifespan (lines
+  260–505) to understand the shutdown sequence + the existing
+  `register_routes` block style at the file's tail (so the new v2
+  endpoints slot in cleanly after the W14-5 ab_testing wiring).
+- Schema alignment note: the W16-7 task spec referenced tables named
+  `decisions` and `observability_metrics` in the async repository
+  queries. The actual sync recorder schema (verified against
+  `core/decision_ledger.py::_init_db` and `core/observability.py::
+  _init_db`) uses `decision_events` and `metrics` respectively.
+  Using the spec's literal names would have meant the new
+  `/api/v2/*` endpoints return empty results against the production
+  DBs. Queries were therefore aligned to the actual production
+  schema (`decision_events` / `metrics` / `execution_quality`) — this
+  is documented inline in `core/async_repositories.py`'s module
+  docstring.
+
+Step 1 — Added `aiosqlite>=0.20.0` to `requirements.txt` (+9 lines,
+additive — appended after the asyncpg block). Pinned to >=0.20.0
+because that's the first release with the stable
+`conn.row_factory = aiosqlite.Row` API + clean Python 3.12 support
+that the `AsyncDBPool` relies on.
+
+Step 2 — Created `core/db_pool.py` (178 lines):
+  * `AsyncDBPool` class: one `aiosqlite.Connection` per database path,
+    keyed by the str-form of the path (normalises both `str` and
+    `Path` call shapes).
+  * `get_connection(db_path)` — lazy: opens + caches the connection
+    on first call. Creates parent dir if absent. Sets
+    `row_factory = aiosqlite.Row` + enables `PRAGMA journal_mode=WAL`
+    + `PRAGMA synchronous=NORMAL` on creation (matching the sync
+    recorder init paths in `core.observability._init_db` /
+    `core.decision_ledger._init_db` so the async pool can safely
+    co-exist with the sync recorders against the same file — WAL is
+    essential for read/write interleaving). The WAL pragma is wrapped
+    in try/except `aiosqlite.OperationalError` so an in-memory test
+    DB (which doesn't support WAL) falls through cleanly.
+  * `_lock: asyncio.Lock` — serialises the get-or-create critical
+    section so two concurrent `get_connection` calls for the SAME
+    db_path don't both race past the `if key not in self._pools` check
+    and open two connections to the same file.
+  * `transaction(db_path)` async context manager — yields the
+    connection, commits on clean exit, rolls back on exception. The
+    connection is NOT closed (returns to the pool — matches the
+    per-DB pooling contract).
+  * `execute(db_path, query, params)` — SELECT helper returning
+    `list[dict]` (JSON-able, not raw `aiosqlite.Row`). Always commits
+    so any pending writes from a prior `execute_many` are flushed.
+  * `execute_many(db_path, query, params_list)` — INSERT helper
+    returning the affected-row count.
+  * `execute_scalar(db_path, query, params)` — returns the first
+    column of the first row, `None` for empty result sets (so callers
+    can use `or 0` defaults without distinguishing between NULL and
+    no rows).
+  * `close_all()` — closes every cached connection, clears the pool
+    dict. Logs per-connection errors but does NOT abort the shutdown
+    (mirrors the TimescaleDB pool teardown pattern). Idempotent —
+    safe to call when no connections are open or twice in a row.
+  * Module-level singleton `db_pool = AsyncDBPool()` — the FastAPI
+    shutdown handler closes this once at process exit. Import-safe
+    (no connections opened at import time — they're created lazily on
+    first `get_connection`).
+
+Step 3 — Created `core/async_repositories.py` (175 lines):
+  * `AsyncDecisionRepository` — targets the `decision_events` table
+    (the ordered stage chain; the actual sync recorder's table name).
+    `get_recent(limit=50, stage=None)` returns newest-first across
+    all stages or filtered to one stage; uses the existing
+    `(stage, timestamp DESC)` index. `get_by_token(token_id, limit)`
+    uses the `(token_id, timestamp DESC)` index. `count_by_stage`
+    returns an integer count.
+  * `AsyncObservabilityRepository` — targets the `metrics` table.
+    `get_latest_metrics()` returns the highest-id row per
+    `(category, name)` group (the id AUTOINCREMENT PRIMARY KEY is the
+    correct "latest" proxy), ordered alphabetically by (category,
+    name) for stable dashboard rendering. `get_metric_history(name,
+    limit=100)` returns the most-recent-N samples for a single metric
+    name; uses the `(name, timestamp DESC)` index.
+  * `AsyncExecutionQualityRepository` — targets the `execution_quality`
+    table. `get_recent_fills(limit=50)` returns newest-first.
+    `get_stats()` returns `{"avg_slippage_bps": float, "total_fills":
+    int}` — AVG excludes NULL slippage_bps rows; the `or 0.0` /
+    `or 0` defaults guard against the empty-table case (NULL AVG /
+    COUNT returns from SQLite).
+  * All three repos take a `db_path: str` constructor argument;
+    the v2 endpoints pass `str(DB_PATH)` from the sync recorder
+    modules so the async pool points at the same on-disk file the
+    sync recorder writes to (otherwise the v2 endpoints would read
+    stale / empty data).
+  * Module docstring documents the schema-name divergence from the
+    task spec so a future reader doesn't reintroduce the typo.
+
+Step 4 — Added two async v2 endpoints to `api/server.py` (+~75 lines,
+appended at the end of the file after the W14-5 ab_testing wiring):
+  * `GET /api/v2/decisions/recent` — async version of the recent-
+    decisions feed. Query params: `limit` (default 50), `stage`
+    (optional stage filter). Reads through `AsyncDecisionRepository`
+    → `AsyncDBPool` so the read never blocks the event loop. Auth
+    enforced by `enforce_api_auth` (not in `PUBLIC_PATHS`).
+  * `GET /api/v2/observability/latest` — async version of the latest-
+    metrics feed. Returns the latest value for each `(category, name)`
+    pair. Same auth + pooling pattern.
+  * `DECISION_DB_PATH` and `OBS_DB_PATH` constants imported (not
+    redefined) from `core.decision_ledger.DB_PATH` /
+    `core.observability.DB_PATH` so the v2 endpoints read the same
+    file the sync recorder writes. The sync recorder's `DB_PATH` is a
+    `pathlib.Path` resolved at import time from the
+    `DECISION_LEDGER_DB_PATH` / `OBSERVABILITY_DB_PATH` env vars
+    (redirected to `/tmp/pmbot_conftest_isolation` by the test
+    conftest), so importing the constant inherits whatever the test
+    harness / runtime has configured.
+  * Additive — no existing sync endpoint is touched; the existing
+    `GET /api/decision/{token_id}` / `GET /api/decisions/rejected` /
+    `GET /api/observability` / `GET /api/observability/history/{name}`
+    routes continue to use the sync `DecisionLedger` / `Observability`
+    recorder paths unchanged.
+
+Step 5 — Wired the pool's `close_all` into the FastAPI lifespan
+shutdown handler in `api/server.py` (+18 lines, inserted AFTER
+`await gamma_client.close()` so every subsystem that might use the
+pool has stopped first). Wrapped in try/except so a stuck
+`conn.close()` never aborts the rest of the shutdown sequence. The
+import is local (`from core.db_pool import db_pool as
+_db_pool_singleton`) so the module-level singleton is referenced
+once at the exact teardown site rather than polluting the module's
+top-level imports.
+
+Step 6 — Created `tests/test_async_db.py` (605 lines, 25 tests):
+  * Module-level `pytestmark = pytest.mark.asyncio` (mirrors the S9
+    decision-ledger test idiom — pytest-asyncio is in strict mode by
+    default).
+  * Autouse fixture `_reset_singleton_db_pool` closes the module-level
+    singleton `db_pool`'s connection cache BEFORE each test (via
+    `asyncio.run(...)`, with a `RuntimeError` guard in case a future
+    pytest-asyncio mode runs the autouse fixture inside the test
+    loop). Without this reset, a prior test's repository call would
+    leave a connection cached against a `tmp_path` the OS has already
+    cleaned up — the next test's `AsyncDecisionRepository` would call
+    `get_connection` against a new tmp_path (cache miss → fresh
+    connection — fine) but the stale connection would still hold a
+    file descriptor to a deleted file. The reset is the surgical fix.
+  * Three schema-seeding helpers (`_seed_decision_events` /
+    `_seed_metrics` / `_seed_execution_quality`) re-create the
+    production tables via the standard sync `sqlite3` module so the
+    tests exercise the actual production schema shape, not a stub.
+    Column lists mirrored from the sync recorder `_init_db` calls
+    so a future schema drift surfaces as a test failure here.
+  * `AsyncDBPool.get_connection` (3 tests): same db → same conn;
+    different dbs → different conns; parent dir auto-created.
+  * `execute` (1 test): SELECT returns `list[dict]` (JSON-able, not
+    raw `aiosqlite.Row`).
+  * `execute_many` (1 test): inserts N rows, returns affected count.
+  * `execute_scalar` (2 tests): returns first column of first row;
+    returns `None` for empty result sets.
+  * `transaction` (3 tests): commits on clean exit; rolls back on
+    exception (the post-exception DB state must NOT include the
+    un-committed row); the original exception propagates out of the
+    `async with` block (rollback must not swallow it).
+  * `AsyncDecisionRepository` (5 tests): `get_recent` all stages
+    (newest-first ordering verified); `get_recent` filtered by stage;
+    `get_recent` respects `limit`; `get_by_token` scopes to one
+    token (newest-first); `count_by_stage` returns correct integer
+    counts (including 0 for unknown stages).
+  * `AsyncObservabilityRepository` (3 tests): `get_latest_metrics`
+    returns the highest-id row per (category, name) pair, ordered
+    alphabetically; `get_metric_history` returns the most-recent-N
+    samples (newest-first); unknown metric name → empty list (no
+    exception).
+  * `AsyncExecutionQualityRepository` (4 tests): `get_recent_fills`
+    returns newest-first; respects `limit`; `get_stats` returns the
+    AVG of non-NULL slippage_bps + the total fill count (NULL row
+    excluded from AVG but counted in `total_fills`); `get_stats`
+    against an empty table returns zeros (not None / not an
+    exception) — the `or 0` defaults in `get_stats` guard against
+    NULL AVG / COUNT returns.
+  * `close_all` (3 tests): closes connections + clears the pool dict
+    (next `get_connection` opens a fresh one); idempotent (safe when
+    no connections are open + safe to call twice); logs per-connection
+    errors but continues closing the remaining connections when a
+    single `conn.close()` raises.
+
+Verification:
+- `python -m pytest tests/test_async_db.py -v` — all 25 tests pass
+  in 0.36s (asyncio strict mode, pytest-asyncio 1.3.0, aiosqlite
+  0.22.1).
+- Smoke-tested `AsyncDBPool` end-to-end (get_connection → same-conn
+  memoisation → execute → execute_scalar → execute_many →
+  transaction commit + rollback → close_all) via a one-shot script
+  before writing the test file.
+- `python -c "import api.server; ..."` — server.py imports cleanly
+  with the new v2 endpoints registered (`/api/v2/decisions/recent`
+  + `/api/v2/observability/latest` both appear in `app.routes`;
+  total route count went from 79 to 81 — additive, no existing
+  routes touched). Note: had to recover from a mid-task conflict-
+  marker corruption in `api/server.py` (caused by an auto-merge from
+  a concurrent subagent's W16-2 ml.feature_store wiring that landed
+  between my edits); the conflict was resolved by accepting the
+  upstream side (preserving the existing `/api/version` endpoint) +
+  re-applying my W16-7 endpoint block + shutdown hook.
+- `python -m pytest tests/contract tests/test_api_versioning.py
+  tests/test_openapi.py tests/test_prometheus.py tests/test_security.py
+  tests/test_profiling.py tests/test_decision_ledger.py
+  tests/test_observability.py tests/test_execution_quality.py
+  tests/test_rate_limiting.py tests/test_audit_logger.py
+  tests/test_closed_positions.py tests/test_attribution.py
+  tests/test_data_store.py tests/test_migrations.py
+  tests/test_retention.py tests/test_rate_limit_tracker.py
+  tests/test_cache.py tests/test_logging.py tests/test_config.py
+  -q --no-header -p no:warnings` — all pass (no regressions in the
+  contract suite or any of the touched-module suites).
+- Pre-existing / unrelated failures (NOT introduced by this task;
+  verified by checking each failing test file is untracked by git
+  and not imported by any code I touched):
+    * `tests/test_backtest_report.py` — VaR-95 calculation assertion
+      fails (expected ≤ 0, got 0.0028). Pre-existing test from a
+      concurrent W16 task.
+    * `tests/test_portfolio_optimizer.py` — diversification_ratio
+      assertion (expected > 1.0, got 0.71). Pre-existing test from
+      a concurrent W16 task.
+    * `tests/test_feature_store.py` — collection error
+      (`PermissionError: /app/data` — missing env-var redirect in
+      that test module's own setup, unrelated to this task).
+    * `tests/test_db_indexes.py::test_indexed_query_faster_than_full_scan`
+      — flaky timing-based test (indexed query 28.6ms vs scan 19.5ms
+      on this run; passes on retry). Pre-existing.
+- `cd /home/z/my-project && bun run lint` — clean (eslint . exits 0,
+  no warnings).
+- `python -m ruff check core/db_pool.py core/async_repositories.py
+  tests/test_async_db.py` — clean (no I001 / F841 / F401 issues;
+  imports sorted, no unused variables).
+
+Stage Summary:
+- Created `core/db_pool.py` (178 lines — `AsyncDBPool` class with
+  `get_connection` / `transaction` / `execute` / `execute_many` /
+  `execute_scalar` / `close_all`; module-level `db_pool` singleton;
+  WAL journal mode + Row factory enabled per connection; async-lock
+  serialisation of the get-or-create critical section).
+- Created `core/async_repositories.py` (175 lines — three async
+  read-side repos: `AsyncDecisionRepository` (decision_events),
+  `AsyncObservabilityRepository` (metrics),
+  `AsyncExecutionQualityRepository` (execution_quality). Queries
+  aligned to the actual production sync-recorder schema, not the
+  typo'd names in the task spec).
+- Created `tests/test_async_db.py` (605 lines, 25 tests —
+  AsyncDBPool contract: get_connection memoisation, execute /
+  execute_many / execute_scalar / transaction commit + rollback /
+  close_all idempotency + per-connection error tolerance; async
+  repository coverage across all three repos with seeded production-
+  schema tables; autouse fixture resets the module-level singleton
+  between tests so cached connections don't leak across tmp_path
+  scopes).
+- Modified `requirements.txt` (+9 lines — added `aiosqlite>=0.20.0`
+  after the asyncpg block).
+- Modified `api/server.py` (+~95 lines — added the W16-7 async DB
+  pool shutdown hook in the lifespan function; added two new async
+  v2 endpoints (`GET /api/v2/decisions/recent` +
+  `GET /api/v2/observability/latest`) at the end of the file;
+  imported `DECISION_DB_PATH` / `OBS_DB_PATH` from the sync recorder
+  modules so the async pool points at the same on-disk file the sync
+  recorder writes to).
+- Lint: clean (eslint . + ruff on the new modules). Tests: 25/25
+  new pass; no regressions in the contract suite or the touched-
+  module suites.

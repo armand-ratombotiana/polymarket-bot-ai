@@ -34,7 +34,6 @@
 import { useEffect, useMemo, useState, useCallback } from 'react'
 import {
   ComposedChart,
-  Line,
   Area,
   XAxis,
   YAxis,
@@ -405,10 +404,18 @@ export default function PriceHistoryChart({
               cursor={tooltipCursor}
             />
 
-            {/* Volume bars — faint background. */}
+            {/* Volume bars — faint background.
+                W16-9 — recharts' `Area` component's `type` prop accepts a
+                `CurveType` (linear / monotone / step / ...). The literal
+                `"bar"` was previously passed but is not a member of
+                `CurveType`; `type="linear"` renders the volume series as a
+                straight-segment area, which is the closest visual match
+                to the original "bar" intent without switching to the
+                `Bar` series component (which would be a larger refactor
+                of the gradient + stroke/fill wiring). */}
             {showVolume && (
               <Area
-                type="bar"
+                type="linear"
                 dataKey="volScaled"
                 stroke="none"
                 fill={`url(#${volGradientId})`}

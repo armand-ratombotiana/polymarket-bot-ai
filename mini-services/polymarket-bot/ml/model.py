@@ -301,6 +301,20 @@ class MarketMLModel:
             for name, imp in zip(FEATURE_NAMES, blended)
         }
 
+        # W16-2 — Register the feature catalog in the ML feature store
+        # (separate SQLite-backed audit layer from timescale_db). The
+        # per-version importance snapshot is recorded below, AFTER the
+        # model version string has been minted by ``model_registry``.
+        # Registration is idempotent (INSERT OR REPLACE on the PK
+        # ``name``), so a retrain that produces the same FEATURE_NAMES
+        # catalog simply refreshes the ``created_at`` timestamp.
+        try:
+            from ml.feature_store import feature_store as _fs
+            for _fname in FEATURE_NAMES:
+                _fs.register_feature(_fname, type="numeric", description="auto-registered")
+        except Exception:
+            log.debug("[ml_model] feature-store register_feature skipped", exc_info=True)
+
         # ── Validation on held-out calibration fold ────────────────────────────
         y_prob = self._blend_probas(X_cal_scaled)
 
@@ -387,6 +401,18 @@ class MarketMLModel:
                 "lgbm": self.lgbm is not None,
             },
         )
+
+        # W16-2 — Record the per-version feature-importance snapshot to
+        # the ML feature store. Done AFTER ``model_registry.register_version``
+        # because the importance table is keyed on the version string the
+        # registry just minted. Defensive try/except — a transient SQLite
+        # hiccup must NOT fail the retrain (mirrors the calibration-fit
+        # try/except above).
+        try:
+            from ml.feature_store import feature_store as _fs
+            _fs.record_importance(version_str, self.feature_importances)
+        except Exception:
+            log.debug("[ml_model] feature-store importance record skipped", exc_info=True)
 
         log.info("[ml_model] Model initialized. Brier=%.4f, AUC=%.4f, ECE=%.4f (features=%d, lgbm=%s)",
                  self.brier_score, self.roc_auc, self.ece, N_FEATURES, self.lgbm is not None)
@@ -627,6 +653,35 @@ class MarketMLModel:
                 timescale_db.record_prediction(features, p_yes, confidence, token_id=token_id)
             except Exception:
                 log.debug("[ml_model] feature-vector record skipped", exc_info=True)
+
+            # W16-2 — Record per-feature values to the ML feature store
+            # (separate from the timescale_db prediction log above).
+            # The feature store indexes per-(token_id, feature_name) value
+            # rows so an operator can audit the input feature distribution
+            # that fed a given prediction via ``GET /api/features`` /
+            # ``GET /api/features/{name}/stats`` / ``GET /api/features/drift``.
+            # Defensive try/except: a transient SQLite hiccup must NEVER
+            # degrade the production predict path (mirrors the
+            # timescale_db / shadow_inference blocks above).
+            try:
+                from ml.feature_store import feature_store
+                # Map the ndarray back to ``{feature_name: value}`` using
+                # ``FEATURE_NAMES`` so the feature_values rows are
+                # addressable by name. Skip the call when the feature
+                # vector length doesn't match the catalog (defensive —
+                # should never happen for a fitted model but guards the
+                # cold-start / load_or_create mismatch path).
+                if features.shape[0] == len(FEATURE_NAMES):
+                    feature_store.record_values(
+                        token_id=token_id or "",
+                        features={
+                            FEATURE_NAMES[i]: float(features[i])
+                            for i in range(len(FEATURE_NAMES))
+                        },
+                        prediction_id=None,
+                    )
+            except Exception:
+                log.debug("[ml_model] feature-store record skipped", exc_info=True)
 
             # T13: run shadow challenger model(s) in parallel with production.
             # The challenger output NEVER affects `p_yes` / `confidence` — it

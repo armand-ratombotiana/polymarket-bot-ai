@@ -172,7 +172,7 @@ describe('AnalyticsPanel', () => {
     vi.mocked(fetch).mockImplementation(
       mockFetchOk({ ...sampleAnalytics, expectancy: -0.42 }),
     )
-    const { container } = render(<AnalyticsPanel />)
+    render(<AnalyticsPanel />)
     await waitFor(() => {
       expect(screen.getByText(`${MINUS}$0.42`)).toBeInTheDocument()
     })
@@ -331,7 +331,7 @@ describe('AnalyticsPanel', () => {
     vi.mocked(fetch).mockImplementation(
       mockFetchOk({ ...sampleAnalytics, expectancy: null }),
     )
-    const { container } = render(<AnalyticsPanel />)
+    render(<AnalyticsPanel />)
     await waitFor(() => {
       // The expectancy KPI card renders a single "—" inside its value span.
       const expectancyLabel = screen.getByText('Expectancy / Trade')

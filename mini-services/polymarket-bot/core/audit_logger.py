@@ -105,6 +105,64 @@ class AuditLogger:
 
         return await asyncio.to_thread(_fetch)
 
+    async def get_recent_events_page(
+        self,
+        limit: int = 100,
+        category: str | None = None,
+        cursor: str | None = None,
+    ) -> "Page":
+        """Cursor-paginated fetch of recent immutable audit logs.
+
+        W16-5 — wraps :func:`core.pagination.paginate_query` against the
+        ``audit_events`` table. The base ``SELECT *`` includes the
+        ``INTEGER PRIMARY KEY`` ``id`` column, which
+        :func:`paginate_query` uses as the tiebreaker for rows that
+        share a timestamp.
+
+        Args:
+            limit:    Page size (clamped to ``[1, 100]`` by
+                      :func:`paginate_query`). The route-level ``Query``
+                      constraint allows up to 1000 for backward compat
+                      with pre-pagination callers; the clamp protects
+                      the database from a hostile caller.
+            category: Optional category filter (``"risk"`` / ``"order"``
+                      / etc.). ``None`` or ``"all"`` returns rows from
+                      every category.
+            cursor:   Opaque cursor from a previous response's
+                      ``next_cursor`` field. ``None`` returns the first
+                      page.
+
+        Returns:
+            :class:`core.pagination.Page` whose ``items`` are the
+            same-shape ``dict`` rows the legacy ``get_recent_events``
+            returns (so the wire payload is unchanged modulo the new
+            ``next_cursor`` / ``has_more`` fields).
+        """
+        from core.pagination import Page, paginate_query
+
+        if category and category != "all":
+            base_query = "SELECT * FROM audit_events WHERE category = ?"
+            base_params: tuple = (category,)
+        else:
+            base_query = "SELECT * FROM audit_events WHERE 1=1"
+            base_params = ()
+
+        def _fetch() -> Page:
+            with sqlite3.connect(self._db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                return paginate_query(
+                    conn,
+                    base_query,
+                    base_params,
+                    cursor=cursor,
+                    limit=limit,
+                    cursor_column="timestamp",
+                    id_column="id",
+                    reverse=True,
+                )
+
+        return await asyncio.to_thread(_fetch)
+
 
 # Global singleton
 audit_logger = AuditLogger()

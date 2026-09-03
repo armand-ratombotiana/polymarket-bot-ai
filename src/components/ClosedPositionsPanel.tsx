@@ -11,7 +11,6 @@ import {
   TrendingDown,
   Timer,
   Target,
-  Shield,
   AlertTriangle,
   ChevronDown,
   ChevronRight,

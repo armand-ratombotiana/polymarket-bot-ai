@@ -155,12 +155,34 @@ class TradeItem(BaseModel):
 
 
 class TradesResponse(BaseModel):
-    """Wrapper for ``GET /api/trades``."""
+    """Wrapper for ``GET /api/trades``.
+
+    The route returns a dict (not a bare list) so callers can read the
+    ``count`` field without an extra round-trip. W16-5 — the route also
+    returns cursor-pagination fields (``next_cursor`` / ``has_more``)
+    so a dashboard can page through the trade history without
+    re-fetching the entire list on every poll. Both fields are
+    Optional / defaulted so the OpenAPI schema documents them but the
+    route still validates even if a future caller forgets to populate
+    them.
+    """
 
     trades: list[TradeItem] = Field(
         default_factory=list, description="Recent trades (newest first)"
     )
     count: int = Field(..., description="Number of trades returned")
+    next_cursor: Optional[str] = Field(
+        None,
+        description=(
+            "Opaque base64 cursor to pass as ?cursor=... on the next "
+            "request to fetch the following page. ``None`` on the last "
+            "page (when ``has_more`` is False). W16-5."
+        ),
+    )
+    has_more: bool = Field(
+        False,
+        description="True when at least one more trade exists beyond this page.",
+    )
 
 
 # ── ML diagnostics ─────────────────────────────────────────────────────────

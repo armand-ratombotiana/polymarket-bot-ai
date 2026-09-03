@@ -16,9 +16,8 @@ function installFetchWrapper() {
   const nativeFetch = window.fetch.bind(window)
   ;(nativeFetch as any).__nativeFetch = nativeFetch
   const wrapped: typeof fetch = async (input, init) => {
-    let urlStr = ''
-    if (typeof input === 'string') { urlStr = input; input = withGatewayPort(input) }
-    else if (input instanceof Request) { urlStr = input.url; const r = withGatewayPort(input.url); if (r !== input.url) input = new Request(r, input) }
+    if (typeof input === 'string') { input = withGatewayPort(input) }
+    else if (input instanceof Request) { const r = withGatewayPort(input.url); if (r !== input.url) input = new Request(r, input) }
     try { return await nativeFetch(input as any, init) } catch (err) { throw err }
   }
   window.fetch = wrapped as typeof fetch

@@ -54,6 +54,22 @@ interface Props {
    * consistently across sibling panels.
    */
   isRealtime?: boolean
+  /**
+   * W15-2 — preference flag. When false, the entire "Unrealized"
+   * column (header `<th>` + every row's `<td>`) is hidden. Traders
+   * who haven't reconciled exposure may want to hide this until
+   * the backend reliably publishes `current_price`. Defaults to `true`
+   * so every existing call site + existing test keeps the prior
+   * behaviour.
+   */
+  showUnrealizedPnl?: boolean
+  /**
+   * W15-2 — preference flag. When false, the `.price-up` /
+   * `.price-down` CSS class is suppressed on the Mark cell (traders
+   * who find the flashing distracting). Defaults to `true` so every
+   * existing call site + existing test keeps the prior behaviour.
+   */
+  showPriceFlashes?: boolean
 }
 
 // W9-6 — wrapped in React.memo with a custom comparator. The component
@@ -71,6 +87,8 @@ function PositionsPanel({
   onClosePosition,
   priceFlashes,
   isRealtime: isRealtimeOverride,
+  showUnrealizedPnl = true,
+  showPriceFlashes = true,
 }: Props) {
   const [filterQuery, setFilterQuery] = useState('')
   const [outcomeFilter, setOutcomeFilter] = useState<'ALL' | 'YES' | 'NO'>('ALL')
@@ -298,8 +316,12 @@ function PositionsPanel({
                 <th scope="col" className="text-right">Cost Basis</th>
                 <th scope="col" className="text-center min-w-[110px]">Cap Limit ($3 Max)</th>
                 <th scope="col" className="text-right">Realized P&amp;L</th>
-                {/* S1 — unrealized mark-to-market P&amp;L column */}
-                <th scope="col" className="text-right">Unrealized</th>
+                {/* S1 — unrealized mark-to-market P&amp;L column.
+                    W15-2: the entire column is hidden when the
+                    `showUnrealizedPnl` preference is false. */}
+                {showUnrealizedPnl && (
+                  <th scope="col" className="text-right">Unrealized</th>
+                )}
                 <th scope="col" className="text-center">Action</th>
               </tr>
             </thead>
@@ -311,7 +333,16 @@ function PositionsPanel({
                 const isNearCap = utilizationPct > 80
                 // W12 — Resolve this row's price-flash direction once per render.
                 // Undefined (no flash active) yields no extra class on the Mark cell.
+                // W15-2 — when the `showPriceFlashes` preference is false the
+                // CSS class is suppressed (the flashDir lookup still runs so the
+                // memo comparator + downstream logic stay simple).
                 const flashDir = priceFlashes?.[p.token_id]
+                const flashClass =
+                  showPriceFlashes && flashDir === 'up'
+                    ? ' price-up'
+                    : showPriceFlashes && flashDir === 'down'
+                      ? ' price-down'
+                      : ''
 
                 return (
                   <tr
@@ -370,8 +401,10 @@ function PositionsPanel({
                     {/* S1 — Mark (current price). Falls back to "—" when the
                         backend hasn't populated current_price yet.
                         W12: apply .price-up / .price-down when a flash is
-                        active for this row's token_id. */}
-                    <td className={`mono text-right text-[#dde1ed] text-xs${flashDir === 'up' ? ' price-up' : flashDir === 'down' ? ' price-down' : ''}`}>
+                        active for this row's token_id.
+                        W15-2: flashClass is empty when the preference is
+                        off so the cell renders plain. */}
+                    <td className={`mono text-right text-[#dde1ed] text-xs${flashClass}`}>
                       {typeof p.current_price === 'number'
                         ? `$${p.current_price.toFixed(3)}`
                         : <span className="text-[#3e4560]">—</span>}
@@ -410,21 +443,26 @@ function PositionsPanel({
 
                     {/* S1 — Unrealized P&amp;L (mark-to-market). Color-coded
                         green/red. Falls back to "—" when unrealized_pnl is
-                        not provided by the backend. */}
-                    <td
-                      className={`mono text-right font-bold text-xs ${
-                        typeof p.unrealized_pnl === 'number'
-                          ? p.unrealized_pnl >= 0
-                            ? 'text-green-400'
-                            : 'text-red-400'
-                          : 'text-[#3e4560]'
-                      }`
-                    }
-                    >
-                      {typeof p.unrealized_pnl === 'number'
-                        ? fmtPnl(p.unrealized_pnl)
-                        : '—'}
-                    </td>
+                        not provided by the backend.
+                        W15-2 — the entire cell is hidden when the
+                        `showUnrealizedPnl` preference is false (matches the
+                        conditional `<th>` header). */}
+                    {showUnrealizedPnl && (
+                      <td
+                        className={`mono text-right font-bold text-xs ${
+                          typeof p.unrealized_pnl === 'number'
+                            ? p.unrealized_pnl >= 0
+                              ? 'text-green-400'
+                              : 'text-red-400'
+                            : 'text-[#3e4560]'
+                        }`
+                      }
+                      >
+                        {typeof p.unrealized_pnl === 'number'
+                          ? fmtPnl(p.unrealized_pnl)
+                          : '—'}
+                      </td>
+                    )}
 
                     {/* Action Button */}
                     <td className="text-center">
@@ -479,6 +517,10 @@ export default memo(PositionsPanel, (prev, next) => {
   if (prev.onSelectMarket !== next.onSelectMarket) return false
   if (prev.onClosePosition !== next.onClosePosition) return false
   if (prev.isRealtime !== next.isRealtime) return false
+  // W15-2 — preference flags are primitive booleans; diff inline so a
+  // preference flip re-renders the table (column show/hide + flash class).
+  if (prev.showUnrealizedPnl !== next.showUnrealizedPnl) return false
+  if (prev.showPriceFlashes !== next.showPriceFlashes) return false
   // priceFlashes is intentionally compared by serialized contents.
   if (JSON.stringify(prev.priceFlashes) !== JSON.stringify(next.priceFlashes)) return false
   return true

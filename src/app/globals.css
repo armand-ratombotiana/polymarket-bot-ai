@@ -2120,3 +2120,103 @@ html { overflow-x: hidden; }
   font-size: 12.5px;
 }
 
+/* ═══════════════════════════════════════════════════════════════════════════
+   W13-5 — COMMAND PALETTE (Cmd+K / Ctrl+K) STYLING
+   ═══════════════════════════════════════════════════════════════════════════
+   The palette is rendered via the shadcn `CommandDialog` wrapper, which
+   composes a Radix Dialog on top of the `cmdk` primitive. The dialog
+   inherits the dashboard dark-theme palette via `--popover` (mapped to
+   `--bg-card` earlier in this file). These rules customize the dialog
+   container width + max-height, and provide the small leading icon
+   column used inside each command row.
+   ───────────────────────────────────────────────────────────────────────── */
+
+/* `.command-palette-dialog` is applied as the DialogContent className
+   (passed through `CommandDialog` → `className`). Width: 92vw on small
+   screens, capped at 640px on larger viewports. The max-height keeps the
+   list from overflowing tall workstations; cmdk already adds
+   `overflow-y-auto` to the list itself. */
+.command-palette-dialog {
+  /* Override the shadcn default `sm:max-w-lg` (32rem = 512px) — the
+     palette benefits from a slightly wider container so the longer
+     "Execution Quality" / "Strategy Registry" labels fit on one line
+     without truncation. */
+  max-width: min(92vw, 640px) !important;
+  /* Tighten the default `p-6` padding — the inner Command component
+     already pads its input + list rows, so the outer dialog padding
+     just adds dead space around the input. */
+  padding: 0 !important;
+  /* Match the dashboard surface palette so the palette reads as part
+     of the workstation rather than a generic shadcn dialog. */
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.55);
+  overflow: hidden;
+}
+
+/* `.cmd-icon` — the small unicode glyph rendered before each command
+   label. Matches the Sidebar's icon column so the two surfaces stay
+   visually consistent. */
+.cmd-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  margin-right: 8px;
+  font-size: 14px;
+  line-height: 1;
+  opacity: 0.75;
+  /* The unicode icons (⊞ ◈ ⊡ etc.) render better at system-ui than
+     at the mono stack the surrounding dialog uses for command labels. */
+  font-family: system-ui, sans-serif;
+}
+
+/* cmdk renders the active (highlighted) item with `data-selected=true`.
+   Override the shadcn default `bg-accent` with the dashboard's selected
+   surface so the highlight matches the rest of the workstation. */
+.command-palette-dialog [cmdk-item][data-selected="true"] {
+  background: var(--bg-selected);
+  color: var(--text-primary);
+}
+.command-palette-dialog [cmdk-item][data-selected="true"] .cmd-icon {
+  opacity: 1;
+  color: var(--color-cyan-fg);
+}
+
+/* The search input wrapper gets the same border treatment as the
+   dashboard's other input fields. */
+.command-palette-dialog [data-slot="command-input-wrapper"] {
+  border-color: var(--border);
+  background: var(--bg-input);
+}
+.command-palette-dialog [data-slot="command-input"] {
+  font-family: var(--font-mono, "JetBrains Mono", monospace);
+  font-size: 13px;
+  color: var(--text-primary);
+}
+.command-palette-dialog [data-slot="command-input"]::placeholder {
+  color: var(--text-dim);
+}
+
+/* Group heading style — slightly larger + uppercase so the hierarchy
+   reads at a glance. */
+.command-palette-dialog [cmdk-group-heading] {
+  color: var(--text-dim) !important;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 10px !important;
+  font-weight: 700;
+}
+
+/* Respect reduced-motion: cmdk animates item entry, but the dialog
+   itself uses Radix's fade/zoom. The dashboard-wide rule already silences
+   most of these; this just confirms the palette honors it. */
+@media (prefers-reduced-motion: reduce) {
+  .command-palette-dialog,
+  .command-palette-dialog * {
+    animation-duration: 0.001ms !important;
+    transition-duration: 0.001ms !important;
+  }
+}
+

@@ -388,6 +388,80 @@ class ClosedPositionsStore:
         return await asyncio.to_thread(_fetch)
 
     @timed_query
+    async def get_closed_positions_page(
+        self,
+        limit: int = 50,
+        strategy: str | None = None,
+        cursor: str | None = None,
+    ) -> "Page":
+        """
+        Cursor-paginated fetch of recent closed positions.
+
+        W16-5 — wraps :func:`core.pagination.paginate_query` against the
+        ``closed_positions`` table. ``SELECT *`` includes the
+        ``INTEGER PRIMARY KEY`` ``id`` column, which
+        :func:`paginate_query` uses as the tiebreaker for rows that
+        share a ``timestamp``.
+
+        Args:
+            limit:    Page size (clamped to ``[1, 100]`` by
+                      :func:`paginate_query`). The route-level ``Query``
+                      constraint allows up to 500 for backward compat
+                      with pre-pagination callers; the clamp protects
+                      the database from a hostile caller.
+            strategy: Optional strategy filter. ``None`` / empty
+                      string returns rows across every strategy.
+            cursor:   Opaque cursor from a previous response's
+                      ``next_cursor`` field. ``None`` returns the
+                      first page.
+
+        Returns:
+            :class:`core.pagination.Page` whose ``items`` carry the
+            same shape as :meth:`get_closed_positions`'s rows (the
+            ``metadata_json`` column is decoded into ``data`` so the
+            wire payload matches the existing contract modulo the new
+            ``next_cursor`` / ``has_more`` fields).
+        """
+        from core.pagination import Page, paginate_query
+
+        if strategy:
+            base_query = "SELECT * FROM closed_positions WHERE strategy = ?"
+            base_params: tuple = (strategy,)
+        else:
+            base_query = "SELECT * FROM closed_positions WHERE 1=1"
+            base_params = ()
+
+        def _fetch() -> Page:
+            try:
+                with sqlite3.connect(self._db_path) as conn:
+                    conn.row_factory = sqlite3.Row
+                    page = paginate_query(
+                        conn,
+                        base_query,
+                        base_params,
+                        cursor=cursor,
+                        limit=limit,
+                        cursor_column="timestamp",
+                        id_column="id",
+                        reverse=True,
+                    )
+            except Exception as e:
+                log.error(
+                    "[closed_positions] get_closed_positions_page failed: %s",
+                    e,
+                )
+                return Page(items=[], next_cursor=None, has_more=False)
+
+            # Decode the ``metadata_json`` column on each row so the wire
+            # payload matches the legacy ``get_closed_positions`` shape.
+            for r in page.items:
+                if isinstance(r, dict) and "metadata_json" in r:
+                    r["data"] = _safe_json(r.pop("metadata_json", None))
+            return page
+
+        return await asyncio.to_thread(_fetch)
+
+    @timed_query
     async def get_closed_stats(self) -> dict[str, Any]:
         """
         Aggregate P&L stats across all recorded closed positions.
@@ -529,10 +603,34 @@ def register_routes(app: Any) -> None:
     async def _list_closed_positions(
         limit: int = Query(50, ge=1, le=500, description="Max positions to return"),
         strategy: str | None = Query(None, description="Filter by strategy name"),
+        cursor: str | None = Query(
+            None,
+            description=(
+                "Opaque base64 cursor from a previous response's "
+                "``next_cursor`` field. Omit for the first page (newest "
+                "positions). W16-5."
+            ),
+        ),
     ):
-        """Return recent closed positions (most recent first)."""
-        rows = await closed_positions.get_closed_positions(limit=limit, strategy=strategy)
-        return {"count": len(rows), "positions": rows}
+        """Return recent closed positions (most recent first).
+
+        W16-5 — supports cursor-based pagination via the optional
+        ``cursor`` query param. When omitted, the first page is
+        returned — fully backward compatible with the pre-pagination
+        wire shape (``{count, positions}`` plus the new
+        ``next_cursor`` / ``has_more`` fields).
+        """
+        page = await closed_positions.get_closed_positions_page(
+            limit=limit,
+            strategy=strategy,
+            cursor=cursor,
+        )
+        return {
+            "count": len(page.items),
+            "positions": page.items,
+            "next_cursor": page.next_cursor,
+            "has_more": page.has_more,
+        }
 
     @app.get("/api/positions/closed/stats", tags=["positions"])
     async def _closed_positions_stats():

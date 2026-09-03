@@ -78,7 +78,8 @@ export default function EquityCurve() {
     )
   }
 
-  // Footer min/max (the chart itself computes its own Y-domain via Recharts).
+  // Calculate min/max for footer display (kept for the summary line below
+  // the chart; the chart itself computes its own Y-domain via Recharts).
   const baseline = 100.0
   const allValues = [...points.map((p) => p.equity), baseline]
   const minEq = Math.min(...allValues)

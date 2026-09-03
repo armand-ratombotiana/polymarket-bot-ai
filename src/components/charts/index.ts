@@ -31,6 +31,16 @@ export type {
   HistoryResolution,
 } from './PriceHistoryChart'
 
+// W16-1 — Risk matrix charts.
+export { default as PnLHeatmap } from './PnLHeatmap'
+export type { PnLHeatmapProps, PnLHeatmapDatum } from './PnLHeatmap'
+
+export { default as CorrelationMatrix } from './CorrelationMatrix'
+export type {
+  CorrelationMatrixProps,
+  CorrelationMatrixPayload,
+} from './CorrelationMatrix'
+
 export {
   chartTheme,
   tooltipStyle,

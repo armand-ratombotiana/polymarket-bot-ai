@@ -44,16 +44,6 @@ import { Sparkline as RechartsSparkline } from '@/components/charts'
 // Types — mirror the JSON shape returned by core/observability.py register_routes
 // ───────────────────────────────────────────────────────────────────────────
 
-/** Backend canonical categories + a generic `other`/`strategy` fallback. */
-type MetricCategoryKey =
-  | 'data_source'
-  | 'bot'
-  | 'execution'
-  | 'ml'
-  | 'system'
-  | 'strategy'
-  | 'other'
-
 interface MetricEntry {
   value: number
   timestamp: number
@@ -230,7 +220,6 @@ const TIME_RANGE_LIMITS: Record<TimeRange, number> = {
   '7d': 1000,
 }
 
-const REFRESH_INTERVAL_MS = 30_000
 const POLL_INTERVAL_MS = 30_000
 
 // ───────────────────────────────────────────────────────────────────────────

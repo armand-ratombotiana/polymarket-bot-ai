@@ -41,7 +41,7 @@ export default function BacktestLabView() {
   const [strategyId, setStrategyId] = useState('ml_random_forest_quant')
   const [capital, setCapital] = useState(100)
   const [days, setDays] = useState(30)
-  const [slippage, setSlippage] = useState(5)
+  const [slippage] = useState(5)
   const [running, setRunning] = useState(false)
   const [result, setResult] = useState<BacktestData | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -262,7 +262,6 @@ export default function BacktestLabView() {
                   d={(() => {
                     const line = getEquitySvgPath()
                     if (!line || !result || !result.equity_curve || result.equity_curve.length < 2) return ''
-                    const pts = result.equity_curve
                     const lastX = 15 + 370
                     const firstX = 15
                     return `${line} L ${lastX},115 L ${firstX},115 Z`

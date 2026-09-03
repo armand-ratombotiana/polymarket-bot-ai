@@ -56,6 +56,7 @@ export default function ConfirmationDialog({
       const t = setTimeout(() => cancelBtnRef.current?.focus(), 50)
       return () => clearTimeout(t)
     }
+    return undefined
   }, [open])
 
   // Keyboard: Escape cancels

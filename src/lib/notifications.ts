@@ -40,8 +40,8 @@ export async function requestPermission(): Promise<NotificationPermission> {
   return result as NotificationPermission
 }
 
-export function showNotification(title: string, options?: NotificationOptions) {
-  if (!isNotificationSupported() || Notification.permission !== 'granted') return
+export function showNotification(title: string, options?: NotificationOptions): Notification | undefined {
+  if (!isNotificationSupported() || Notification.permission !== 'granted') return undefined
   try {
     const notif = new Notification(title, {
       icon: '/icon.svg',
@@ -58,6 +58,7 @@ export function showNotification(title: string, options?: NotificationOptions) {
     return notif
   } catch (e) {
     console.error('Notification error:', e)
+    return undefined
   }
 }
 

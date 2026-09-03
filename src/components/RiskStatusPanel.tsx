@@ -3,7 +3,7 @@
 
 import { useEffect, useState } from 'react'
 import { getApiUrl, apiFetch } from '@/lib/api'
-import { fmtUsd, fmtPnl, fmtPct } from '@/lib/design-tokens'
+import { fmtUsd, fmtPnl } from '@/lib/design-tokens'
 
 interface Reconciliation {
   reconciled: boolean
@@ -81,7 +81,6 @@ function Kpi({ label, value, sub, valueColor, tooltip, warn, danger }: KpiProps)
 function CapitalAllocationBar({ invested, reserved, maxDeployable }: { invested: number; reserved: number; maxDeployable: number }) {
   const investedPct = maxDeployable > 0 ? (invested / maxDeployable) * 100 : 0
   const reservedPct = maxDeployable > 0 ? (reserved / maxDeployable) * 100 : 0
-  const availablePct = Math.max(0, 100 - investedPct - reservedPct)
 
   return (
     <div className="px-3 py-2 bg-[#0e1015] border border-[#1f2335] rounded-lg mx-3 mb-2">
@@ -126,7 +125,7 @@ export default function RiskStatusPanel() {
   const [recon, setRecon] = useState<Reconciliation | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(false)
-  const [lastUpdated, setLastUpdated] = useState<number | null>(null)
+  const [, setLastUpdated] = useState<number | null>(null)
 
   useEffect(() => {
     const fetchAll = async () => {

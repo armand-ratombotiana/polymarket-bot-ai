@@ -22,7 +22,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { apiFetch } from '@/lib/api'
-import { fmtUsd, fmtPct, fmtAge } from '@/lib/design-tokens'
+import { fmtUsd, fmtAge } from '@/lib/design-tokens'
 import {
   AlertDialog,
   AlertDialogAction,

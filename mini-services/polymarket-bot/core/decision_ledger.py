@@ -472,6 +472,69 @@ class DecisionLedger:
         return await asyncio.to_thread(_fetch)
 
     @timed_query
+    async def get_rejections_page(
+        self,
+        limit: int = 50,
+        cursor: str | None = None,
+    ) -> "Page":
+        """Cursor-paginated fetch of recent rejection records.
+
+        W16-5 — wraps :func:`core.pagination.paginate_query` against the
+        ``decision_rejections`` table. The base ``SELECT`` includes the
+        ``INTEGER PRIMARY KEY`` ``id`` column (which the legacy
+        :meth:`get_rejections` SELECT deliberately omitted) so
+        :func:`paginate_query` has a tiebreaker for rows that share a
+        timestamp. The wire payload carries the SAME rejection-schema
+        fields as the legacy method (``timestamp``, ``decision_id``,
+        ``token_id``, ``strategy``, ``predicted_edge``, ``confidence``,
+        ``reason``, ``market_mid``) plus the new ``id`` column (an
+        integer; harmless for callers that ignore unknown fields, and
+        useful for any future caller that wants a stable row identity).
+
+        Args:
+            limit:  Page size (clamped to ``[1, 100]`` by
+                    :func:`paginate_query`). The route-level ``Query``
+                    constraint allows up to 500 for backward compat.
+            cursor: Opaque cursor from a previous response's
+                    ``next_cursor`` field. ``None`` returns the first
+                    page.
+
+        Returns:
+            :class:`core.pagination.Page` whose ``items`` are the
+            rejection rows (most recent first).
+        """
+        from core.pagination import Page, paginate_query
+
+        base_query = (
+            "SELECT id, timestamp, decision_id, token_id, strategy, "
+            "predicted_edge, confidence, reason, market_mid "
+            "FROM decision_rejections WHERE 1=1"
+        )
+
+        def _fetch() -> Page:
+            try:
+                with sqlite3.connect(self._db_path) as conn:
+                    conn.row_factory = sqlite3.Row
+                    return paginate_query(
+                        conn,
+                        base_query,
+                        (),
+                        cursor=cursor,
+                        limit=limit,
+                        cursor_column="timestamp",
+                        id_column="id",
+                        reverse=True,
+                    )
+            except Exception as e:
+                log.error(
+                    "[decision_ledger] get_rejections_page failed: %s",
+                    e,
+                )
+                return Page(items=[], next_cursor=None, has_more=False)
+
+        return await asyncio.to_thread(_fetch)
+
+    @timed_query
     async def get_prediction_history(
         self, token_id: str, limit: int = 10
     ) -> list[dict[str, Any]]:
@@ -585,10 +648,33 @@ def register_routes(app: Any) -> None:
     @app.get("/api/decisions/rejected", tags=["decisions"])
     async def _rejected_decisions(
         limit: int = Query(50, ge=1, le=500, description="Max rejections to return"),
+        cursor: str | None = Query(
+            None,
+            description=(
+                "Opaque base64 cursor from a previous response's "
+                "``next_cursor`` field. Omit for the first page (newest "
+                "rejections). W16-5."
+            ),
+        ),
     ):
-        """Return recent rejected decisions (most recent first)."""
-        rows = await decision_ledger.get_rejections(limit=limit)
-        return {"count": len(rows), "rejections": rows}
+        """Return recent rejected decisions (most recent first).
+
+        W16-5 — supports cursor-based pagination via the optional
+        ``cursor`` query param. When omitted, the first page is
+        returned — fully backward compatible with the pre-pagination
+        wire shape (``{count, rejections}`` plus the new
+        ``next_cursor`` / ``has_more`` fields).
+        """
+        page = await decision_ledger.get_rejections_page(
+            limit=limit,
+            cursor=cursor,
+        )
+        return {
+            "count": len(page.items),
+            "rejections": page.items,
+            "next_cursor": page.next_cursor,
+            "has_more": page.has_more,
+        }
 
 
 def _safe_json(raw: str | None) -> Any:

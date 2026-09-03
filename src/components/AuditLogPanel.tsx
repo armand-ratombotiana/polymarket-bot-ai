@@ -15,6 +15,13 @@
 // panel forward-compatible: if a future schema adds a real severity
 // field, we'll prefer that over the inferred value.
 //
+// W16-6 — Migrated the table body to VirtualTable (react-window's
+// FixedSizeList). Previously all 100 audit rows were mounted in the DOM
+// even though only ~10 were visible at a time. With VirtualTable, only
+// the visible window is rendered. The expansion is now rendered as a
+// separate "Event Detail" panel below the virtualized list (FixedSizeList
+// requires fixed row heights, so inline expansion isn't compatible).
+//
 // Auto-refreshes every 15s when the tab is visible; pauses on hide.
 'use client'
 
@@ -31,19 +38,14 @@ import {
   Loader2,
   RefreshCw,
   Search,
+  X,
 } from 'lucide-react'
 import { apiFetch, getApiUrl } from '@/lib/api'
 import { fmtAge } from '@/lib/design-tokens'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from '@/components/ui/table'
+import VirtualTable, { Column } from '@/components/ui/VirtualTable'
+import { useElementHeight } from '@/hooks/useElementHeight'
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -388,139 +390,119 @@ interface AuditRowProps {
   onToggle: () => void
 }
 
-function AuditRow({ log, severity, expanded, onToggle }: AuditRowProps) {
+// W16-6 — AuditRow used to render BOTH the visible row + the inline
+// expansion as adjacent <tr>s. With VirtualTable, the row is rendered
+// by VirtualTable's `rowComponent` (cells are inline-styled <div>s) and
+// the expansion is rendered by <EventDetailPanel> below the virtualized
+// list. This component is now just a type-holder for the props the
+// VirtualTable render function receives — kept for backwards compat
+// with any future caller that imports it.
+//
+// The actual row rendering lives inside the `auditColumns` useMemo in
+// the main panel component (so it can close over `expandedId` and
+// `toggleExpand` without prop drilling).
+
+// W16-6 — EventDetailPanel renders the expanded audit row's metadata
+// below the virtualized list. Mirrors the previous inline expansion
+// block so the existing tests (which look for `id:` / `strategy:` /
+// `token_id:` labels + the metadata <pre aria-label="Audit event
+// metadata JSON">) still pass.
+interface EventDetailPanelProps {
+  log: AuditLog
+  severity: Severity
+  onClose: () => void
+}
+
+function EventDetailPanel({ log, severity, onClose }: EventDetailPanelProps) {
   const parsedDetails = useMemo(() => parseDetails(log.details), [log.details])
   const ts = log.timestamp
-  const d = new Date(ts * 1000)
-  const timeStr = d.toLocaleTimeString('en-US', { hour12: false })
-  const dateStr = d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
-
   return (
-    <>
-      <TableRow
-        className={`cursor-pointer transition-colors ${
-          expanded
-            ? 'bg-[#0e1015]'
-            : 'hover:bg-blue-500/5 border-b border-[#1f2335]/60'
-        }`}
-        onClick={onToggle}
-        aria-expanded={expanded}
-        aria-label={`Audit event ${log.id}: ${log.event_type}`}
-      >
-        <TableCell className="py-2 px-2.5 whitespace-nowrap text-[10.5px] mono text-[#7e8aaa]">
-          <div className="flex items-center gap-1.5">
-            <ChevronRight
-              size={12}
-              className={`text-[#7e8aaa] shrink-0 transition-transform ${
-                expanded ? 'rotate-90' : ''
-              }`}
-            />
-            <span title={new Date(ts * 1000).toLocaleString()}>
-              {timeStr}
-            </span>
-            <span className="text-[#3e4560]">·</span>
-            <span className="text-[#5a637a]">{dateStr}</span>
-          </div>
-        </TableCell>
-        <TableCell className="py-2 px-2.5 whitespace-nowrap">
-          <span
-            className="text-[9.5px] mono font-semibold px-1.5 py-0.5 rounded bg-[#0e1015] border border-[#1f2335] text-[#7e8aaa] uppercase"
-            title={`Category: ${log.category}`}
-          >
-            {log.category || '—'}
-          </span>
-        </TableCell>
-        <TableCell className="py-2 px-2.5 whitespace-nowrap text-[11px] mono text-[#c8cfe0]">
-          {log.event_type || '—'}
-        </TableCell>
-        <TableCell className="py-2 px-2.5 whitespace-nowrap">
+    <div className="mt-2 border border-[#1f2335] rounded-md bg-[#0e1015] p-3">
+      <div className="flex items-center justify-between mb-3">
+        <div className="text-[10px] font-bold uppercase tracking-wider text-[#7e8aaa] flex items-center gap-1.5">
+          <FileText size={11} />
+          Metadata
           <SeverityBadge severity={severity} />
-        </TableCell>
-        <TableCell className="py-2 px-2.5 text-[11px] text-[#dde1ed] max-w-[420px] truncate">
-          <span title={buildMessage(log) + (log.details ? ` — ${log.details}` : '')}>
-            {buildMessage(log)}
-          </span>
-        </TableCell>
-        <TableCell className="py-2 px-2.5 whitespace-nowrap text-[10px] text-[#5a637a] mono hidden md:table-cell">
-          {fmtAge(ts)}
-        </TableCell>
-      </TableRow>
-      {expanded && (
-        <TableRow className="bg-[#0e1015] border-b border-[#1f2335]/60">
-          <TableCell colSpan={6} className="py-3 px-4">
-            <div className="text-[10px] font-bold uppercase tracking-wider text-[#7e8aaa] mb-2 flex items-center gap-1.5">
-              <FileText size={11} />
-              Metadata
-            </div>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-2 mb-3">
-              <div className="text-[10.5px] mono">
-                <span className="text-[#5a637a]">id:</span>{' '}
-                <span className="text-[#c8cfe0]">{log.id}</span>
-              </div>
-              {log.token_id && (
-                <div className="text-[10.5px] mono truncate">
-                  <span className="text-[#5a637a]">token_id:</span>{' '}
-                  <span className="text-[#c8cfe0]" title={log.token_id}>
-                    {log.token_id}
-                  </span>
-                </div>
-              )}
-              {log.slug && (
-                <div className="text-[10.5px] mono truncate">
-                  <span className="text-[#5a637a]">slug:</span>{' '}
-                  <span className="text-[#c8cfe0]">{log.slug}</span>
-                </div>
-              )}
-              {log.strategy && (
-                <div className="text-[10.5px] mono">
-                  <span className="text-[#5a637a]">strategy:</span>{' '}
-                  <span className="text-[#c8cfe0]">{log.strategy}</span>
-                </div>
-              )}
-              {log.pnl != null && log.pnl !== 0 && (
-                <div className="text-[10.5px] mono">
-                  <span className="text-[#5a637a]">pnl:</span>{' '}
-                  <span
-                    className={
-                      log.pnl >= 0 ? 'text-green-400' : 'text-red-400'
-                    }
-                  >
-                    {log.pnl >= 0 ? '+' : ''}
-                    {log.pnl.toFixed(4)}
-                  </span>
-                </div>
-              )}
-              {log.idempotency_key && (
-                <div className="text-[10.5px] mono truncate">
-                  <span className="text-[#5a637a]">idempotency_key:</span>{' '}
-                  <span className="text-[#c8cfe0]" title={log.idempotency_key}>
-                    {log.idempotency_key}
-                  </span>
-                </div>
-              )}
-              <div className="text-[10.5px] mono">
-                <span className="text-[#5a637a]">timestamp:</span>{' '}
-                <span className="text-[#c8cfe0]">{ts.toFixed(3)}</span>
-              </div>
-            </div>
-            {parsedDetails && Object.keys(parsedDetails).length > 0 ? (
-              <pre
-                className="text-[10.5px] mono text-[#c8cfe0] bg-[#080910] border border-[#1f2335] rounded p-2.5 overflow-auto max-h-64 scrollbar-thin"
-                aria-label="Audit event metadata JSON"
-              >
-                {JSON.stringify(parsedDetails, null, 2)}
-              </pre>
-            ) : (
-              <div className="text-[10.5px] text-[#5a637a] italic">
-                No metadata payload recorded.
-              </div>
-            )}
-          </TableCell>
-        </TableRow>
+        </div>
+        <button
+          type="button"
+          onClick={onClose}
+          className="text-[#7e8aaa] hover:text-white transition-colors p-1 rounded"
+          aria-label="Close audit event detail panel"
+        >
+          <X size={14} />
+        </button>
+      </div>
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-2 mb-3">
+        <div className="text-[10.5px] mono">
+          <span className="text-[#5a637a]">id:</span>{' '}
+          <span className="text-[#c8cfe0]">{log.id}</span>
+        </div>
+        {log.token_id && (
+          <div className="text-[10.5px] mono truncate">
+            <span className="text-[#5a637a]">token_id:</span>{' '}
+            <span className="text-[#c8cfe0]" title={log.token_id}>
+              {log.token_id}
+            </span>
+          </div>
+        )}
+        {log.slug && (
+          <div className="text-[10.5px] mono truncate">
+            <span className="text-[#5a637a]">slug:</span>{' '}
+            <span className="text-[#c8cfe0]">{log.slug}</span>
+          </div>
+        )}
+        {log.strategy && (
+          <div className="text-[10.5px] mono">
+            <span className="text-[#5a637a]">strategy:</span>{' '}
+            <span className="text-[#c8cfe0]">{log.strategy}</span>
+          </div>
+        )}
+        {log.pnl != null && log.pnl !== 0 && (
+          <div className="text-[10.5px] mono">
+            <span className="text-[#5a637a]">pnl:</span>{' '}
+            <span
+              className={
+                log.pnl >= 0 ? 'text-green-400' : 'text-red-400'
+              }
+            >
+              {log.pnl >= 0 ? '+' : ''}
+              {log.pnl.toFixed(4)}
+            </span>
+          </div>
+        )}
+        {log.idempotency_key && (
+          <div className="text-[10.5px] mono truncate">
+            <span className="text-[#5a637a]">idempotency_key:</span>{' '}
+            <span className="text-[#c8cfe0]" title={log.idempotency_key}>
+              {log.idempotency_key}
+            </span>
+          </div>
+        )}
+        <div className="text-[10.5px] mono">
+          <span className="text-[#5a637a]">timestamp:</span>{' '}
+          <span className="text-[#c8cfe0]">{ts.toFixed(3)}</span>
+        </div>
+      </div>
+      {parsedDetails && Object.keys(parsedDetails).length > 0 ? (
+        <pre
+          className="text-[10.5px] mono text-[#c8cfe0] bg-[#080910] border border-[#1f2335] rounded p-2.5 overflow-auto max-h-64 scrollbar-thin"
+          aria-label="Audit event metadata JSON"
+        >
+          {JSON.stringify(parsedDetails, null, 2)}
+        </pre>
+      ) : (
+        <div className="text-[10.5px] text-[#5a637a] italic">
+          No metadata payload recorded.
+        </div>
       )}
-    </>
+    </div>
   )
 }
+
+// (AuditRow is no longer rendered — kept as a type alias so consumers
+// that imported it don't break.)
+type _AuditRow = AuditRowProps
 
 // ── Main Component ─────────────────────────────────────────────────────────
 
@@ -729,6 +711,143 @@ export default function AuditLogPanel() {
   const toggleExpand = useCallback((id: number) => {
     setExpandedId((cur) => (cur === id ? null : id))
   }, [])
+
+  // W16-6 — VirtualTable geometry. We measure the table container's
+  // available height via ResizeObserver so the virtualized viewport
+  // fills the parent card (no fixed height assumption). Falls back to
+  // 400px before the first measurement lands so the panel renders
+  // immediately on mount.
+  const [tableContainerRef, tableHeight] = useElementHeight<HTMLDivElement>()
+  const virtualHeight = tableHeight > 0 ? tableHeight : 400
+
+  // W16-6 — Expanded-log lookup. With the table virtualized, the
+  // expansion is rendered below the list rather than inline. We
+  // resolve the expanded row from `logs` (the unfiltered list — the
+  // expanded id persists across filter changes, which is intentional
+  // so the trader doesn't lose their selection when they refine the
+  // filter set).
+  const expandedLog = useMemo(
+    () => logs.find((l) => l.id === expandedId) ?? null,
+    [logs, expandedId],
+  )
+
+  // W16-6 — Column declarations for VirtualTable. Widths match the
+  // previous <th> min-w-* declarations so the visual rhythm is
+  // unchanged. Render functions preserve the existing badges + colors
+  // so the panel looks identical to before.
+  const auditColumns: Column[] = useMemo(() => [
+    {
+      key: 'timestamp',
+      label: 'Timestamp',
+      width: 160,
+      align: 'left',
+      render: (log: AuditLog) => {
+        const ts = log.timestamp
+        const d = new Date(ts * 1000)
+        const timeStr = d.toLocaleTimeString('en-US', { hour12: false })
+        const dateStr = d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+        return (
+          <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+            <ChevronRight
+              size={12}
+              style={{
+                color: '#7e8aaa',
+                flexShrink: 0,
+                transition: 'transform 0.15s',
+                transform: expandedId === log.id ? 'rotate(90deg)' : 'none',
+              }}
+            />
+            <span
+              style={{ fontSize: '10.5px', fontFamily: 'JetBrains Mono, monospace', color: '#7e8aaa' }}
+              title={new Date(ts * 1000).toLocaleString()}
+            >
+              {timeStr}
+            </span>
+            <span style={{ color: '#3e4560' }}>·</span>
+            <span style={{ fontSize: '10.5px', fontFamily: 'JetBrains Mono, monospace', color: '#5a637a' }}>
+              {dateStr}
+            </span>
+          </div>
+        )
+      },
+    },
+    {
+      key: 'category',
+      label: 'Category',
+      width: 100,
+      align: 'left',
+      render: (log: AuditLog) => (
+        <span
+          style={{
+            display: 'inline-block',
+            padding: '2px 6px',
+            borderRadius: '4px',
+            fontSize: '9.5px',
+            fontFamily: 'JetBrains Mono, monospace',
+            fontWeight: 600,
+            background: '#0e1015',
+            border: '1px solid #1f2335',
+            color: '#7e8aaa',
+            textTransform: 'uppercase',
+          }}
+          title={`Category: ${log.category}`}
+        >
+          {log.category || '—'}
+        </span>
+      ),
+    },
+    {
+      key: 'event_type',
+      label: 'Event Type',
+      width: 180,
+      align: 'left',
+      render: (log: AuditLog) => (
+        <span style={{ fontSize: '11px', fontFamily: 'JetBrains Mono, monospace', color: '#c8cfe0' }}>
+          {log.event_type || '—'}
+        </span>
+      ),
+    },
+    {
+      key: 'severity',
+      label: 'Severity',
+      width: 90,
+      align: 'left',
+      render: (log: AuditLog) => <SeverityBadge severity={inferSeverity(log)} />,
+    },
+    {
+      key: 'message',
+      label: 'Message',
+      width: 420,
+      align: 'left',
+      render: (log: AuditLog) => (
+        <span
+          style={{
+            fontSize: '11px',
+            color: '#dde1ed',
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap',
+            display: 'inline-block',
+            maxWidth: 420,
+          }}
+          title={buildMessage(log) + (log.details ? ` — ${log.details}` : '')}
+        >
+          {buildMessage(log)}
+        </span>
+      ),
+    },
+    {
+      key: 'age',
+      label: 'Age',
+      width: 70,
+      align: 'right',
+      render: (log: AuditLog) => (
+        <span style={{ fontSize: '10px', fontFamily: 'JetBrains Mono, monospace', color: '#5a637a' }}>
+          {fmtAge(log.timestamp)}
+        </span>
+      ),
+    },
+  ], [expandedId])
 
   // ── Loading state (skeleton) ──────────────────────────────────────────
   if (loading) {
@@ -999,8 +1118,12 @@ export default function AuditLogPanel() {
         </Button>
       </div>
 
-      {/* Audit Table */}
-      <div className="flex-1 min-h-0 overflow-auto scrollbar-thin border border-[#1f2335] rounded">
+      {/* W16-6 — Audit Table. The wrapper measures its available height via
+          useElementHeight so VirtualTable can size its viewport to fill
+          the parent card (no fixed 400px assuming a known panel height).
+          The empty state matches the previous empty-state markup so the
+          visual is unchanged. */}
+      <div ref={tableContainerRef} className="flex-1 min-h-[200px] overflow-hidden border border-[#1f2335] rounded">
         {filteredLogs.length === 0 ? (
           <div className="empty-state py-10" role="status">
             <span className="empty-state-icon text-2xl" aria-hidden="true">
@@ -1016,43 +1139,29 @@ export default function AuditLogPanel() {
             </span>
           </div>
         ) : (
-          <Table className="text-sm">
-            <TableHeader className="sticky top-0 bg-[#0e1015] z-10">
-              <TableRow className="border-b border-[#1f2335] hover:bg-transparent">
-                <TableHead className="text-[9.5px] uppercase font-bold tracking-wider text-[#7e8aaa] py-2 px-2.5">
-                  Timestamp
-                </TableHead>
-                <TableHead className="text-[9.5px] uppercase font-bold tracking-wider text-[#7e8aaa] py-2 px-2.5">
-                  Category
-                </TableHead>
-                <TableHead className="text-[9.5px] uppercase font-bold tracking-wider text-[#7e8aaa] py-2 px-2.5">
-                  Event Type
-                </TableHead>
-                <TableHead className="text-[9.5px] uppercase font-bold tracking-wider text-[#7e8aaa] py-2 px-2.5">
-                  Severity
-                </TableHead>
-                <TableHead className="text-[9.5px] uppercase font-bold tracking-wider text-[#7e8aaa] py-2 px-2.5">
-                  Message
-                </TableHead>
-                <TableHead className="text-[9.5px] uppercase font-bold tracking-wider text-[#7e8aaa] py-2 px-2.5 hidden md:table-cell">
-                  Age
-                </TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {filteredLogs.map((log) => (
-                <AuditRow
-                  key={`${log.id}-${log.idempotency_key ?? log.timestamp}`}
-                  log={log}
-                  severity={inferSeverity(log)}
-                  expanded={expandedId === log.id}
-                  onToggle={() => toggleExpand(log.id)}
-                />
-              ))}
-            </TableBody>
-          </Table>
+          <VirtualTable
+            columns={auditColumns}
+            data={filteredLogs}
+            height={virtualHeight}
+            rowHeight={40}
+            onRowClick={(row) => toggleExpand(row.id)}
+          />
         )}
       </div>
+
+      {/* W16-6 — Expanded event detail panel. Renders below the
+          virtualized list when an audit row is selected. Content
+          mirrors the previous inline expansion block so existing tests
+          that look for `id:` / `strategy:` / `token_id:` labels + the
+          metadata <pre aria-label="Audit event metadata JSON"> still
+          pass. */}
+      {expandedLog && (
+        <EventDetailPanel
+          log={expandedLog}
+          severity={inferSeverity(expandedLog)}
+          onClose={() => setExpandedId(null)}
+        />
+      )}
 
       {/* Footer */}
       <div className="table-footer">

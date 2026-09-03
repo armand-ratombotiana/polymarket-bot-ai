@@ -11,7 +11,7 @@
 // (jsdom leaves it hardcoded to `true` by default). The `online` / `offline`
 // window events are dispatched with `new Event('online' | 'offline')`.
 
-import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
+import { describe, it, expect, vi, afterEach } from 'vitest'
 import { render, screen, act } from '@testing-library/react'
 import OfflineIndicator from './OfflineIndicator'
 

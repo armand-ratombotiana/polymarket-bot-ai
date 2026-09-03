@@ -452,7 +452,10 @@ describe('AuditLogPanel', () => {
     expect(screen.queryByLabelText('Audit event metadata JSON')).not.toBeInTheDocument()
 
     // Click the row containing position_close.
-    const row = screen.getByText('position_close').closest('tr')
+    // W16-6 — VirtualTable renders rows as <div role="row"> (not <tr>),
+    // so the selector was updated to match the new DOM. The behavior
+    // under test (click → expand → see metadata JSON) is unchanged.
+    const row = screen.getByText('position_close').closest('[role="row"]')
     expect(row).not.toBeNull()
     await user.click(row as HTMLElement)
 
@@ -475,12 +478,19 @@ describe('AuditLogPanel', () => {
       expect(screen.getByText('position_close')).toBeInTheDocument()
     })
 
-    const row = screen.getByText('position_close').closest('tr')
+    // W16-6 — selector updated for VirtualTable's <div role="row"> rows.
+    const row = screen.getByText('position_close').closest('[role="row"]')
     await user.click(row as HTMLElement)
     expect(screen.getByLabelText('Audit event metadata JSON')).toBeInTheDocument()
 
-    // Click again — collapse.
-    await user.click(row as HTMLElement)
+    // Click again — collapse. We re-query the row because react-window
+    // may replace the underlying DOM node when the AuditLogPanel
+    // re-renders (e.g., the chevron rotation in the timestamp cell
+    // changes the rendered output of the row).
+    const rowAfterExpand = screen
+      .getByText('position_close')
+      .closest('[role="row"]')
+    await user.click(rowAfterExpand as HTMLElement)
     expect(screen.queryByLabelText('Audit event metadata JSON')).not.toBeInTheDocument()
   })
 
@@ -494,7 +504,8 @@ describe('AuditLogPanel', () => {
       expect(screen.getByText('position_close')).toBeInTheDocument()
     })
 
-    const row = screen.getByText('position_close').closest('tr')
+    // W16-6 — selector updated for VirtualTable's <div role="row"> rows.
+    const row = screen.getByText('position_close').closest('[role="row"]')
     await user.click(row as HTMLElement)
 
     // Strategy / token_id / id fields rendered in the metadata block.

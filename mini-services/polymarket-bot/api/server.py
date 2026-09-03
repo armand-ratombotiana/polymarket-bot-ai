@@ -24,7 +24,7 @@ from fastapi import (
     WebSocketDisconnect,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 from slowapi.errors import RateLimitExceeded
 
@@ -502,6 +502,24 @@ async def lifespan(app: FastAPI):
     if settings.paper_trade:
         await paper_sim.stop()
     await gamma_client.close()
+
+    # ── W16-7 — close the async SQLite connection pool ─────────────────────
+    # Closes every aiosqlite.Connection opened by the ``AsyncDBPool``
+    # singleton (``core.db_pool.db_pool``). Safe to call even when no
+    # connections were ever opened (no-op). Placed LAST (after every
+    # subsystem has stopped) so any in-flight v2 endpoint request
+    # has already drained — once the lifespan function returns past
+    # ``yield``, Starlette stops accepting new requests before the
+    # cleanup runs, so no new v2 read can arrive mid-teardown.
+    try:
+        from core.db_pool import db_pool as _db_pool_singleton
+
+        await _db_pool_singleton.close_all()
+    except Exception as _db_pool_close_exc:  # pragma: no cover — defensive
+        log.error(
+            "Async DB pool close failed at shutdown: %s", _db_pool_close_exc
+        )
+
     log.info("API server stopped cleanly")
 
 
@@ -2689,27 +2707,67 @@ async def close_position(request: Request, token_id: str, req: PositionCloseRequ
     description=(
         "Returns the most recent trades (newest first), capped by `limit` "
         "(default 50, max 1000). Each trade carries the fill price, size, "
-        "realised P&L, strategy, and paper flag."
+        "realised P&L, strategy, and paper flag. W16-5 — the route also "
+        "supports cursor-based pagination via the optional `cursor` query "
+        "param: pass the `next_cursor` from a previous response to fetch "
+        "the next page. When `cursor` is omitted, the first page (the "
+        "newest `limit` trades) is returned — fully backward compatible "
+        "with the pre-pagination wire shape."
     ),
 )
-async def get_trades(limit: int = Query(50, ge=1, le=1000)):
-    trades = store.trades[-limit:]
+async def get_trades(
+    limit: int = Query(50, ge=1, le=1000),
+    cursor: str | None = Query(
+        None,
+        description=(
+            "Opaque base64 cursor from a previous response's "
+            "``next_cursor`` field. Omit for the first page (newest "
+            "trades)."
+        ),
+    ),
+):
+    """Recent trade history (newest first) with cursor-based pagination.
+
+    The cursor encodes the ``(timestamp, trade_id)`` boundary of the
+    last trade on the current page. The next request with that cursor
+    returns the page of trades whose ``(timestamp, trade_id)`` pair is
+    strictly less than the boundary — stable across new inserts (a
+    brand-new trade landing at the head of the feed between two
+    paginated requests does not shift the boundary).
+    """
+    # W16-5 — local import keeps FastAPI boot time independent of the
+    # pagination module's import cost (negligible, but consistent with
+    # the existing pattern of lazy-importing feature modules inside
+    # route handlers).
+    from core.pagination import paginate_list
+
+    page = paginate_list(
+        store.trades,
+        cursor=cursor,
+        limit=limit,
+        key_fn=lambda t: (t.timestamp, t.trade_id or ""),
+        reverse=True,
+    )
+
+    trades_serialized = [
+        {
+            "trade_id": t.trade_id,
+            "slug": store.market_slugs.get(t.token_id, ""),
+            "side": t.side.value,
+            "price": t.price,
+            "size": t.size,
+            "pnl": t.pnl,
+            "strategy": t.strategy,
+            "paper": t.paper,
+            "timestamp": t.timestamp,
+        }
+        for t in page.items
+    ]
     return {
-        "trades": [
-            {
-                "trade_id": t.trade_id,
-                "slug": store.market_slugs.get(t.token_id, ""),
-                "side": t.side.value,
-                "price": t.price,
-                "size": t.size,
-                "pnl": t.pnl,
-                "strategy": t.strategy,
-                "paper": t.paper,
-                "timestamp": t.timestamp,
-            }
-            for t in reversed(trades)
-        ],
-        "count": len(trades),
+        "trades": trades_serialized,
+        "count": len(trades_serialized),
+        "next_cursor": page.next_cursor,
+        "has_more": page.has_more,
     }
 
 
@@ -2720,12 +2778,48 @@ async def get_trades(limit: int = Query(50, ge=1, le=1000)):
     description=(
         "Returns the most recent in-memory event-log entries (newest "
         "first). Each entry is a human-readable string emitted by a "
-        "subsystem (paper_sim, settlement, risk gate, etc.)."
+        "subsystem (paper_sim, settlement, risk gate, etc.). W16-5 — "
+        "supports cursor-based pagination via the optional `cursor` "
+        "query param. Because the event log is a bare-string ring "
+        "buffer (no per-entry ids), the cursor is offset-based under "
+        "the hood but uses the same opaque-base64 wire format as the "
+        "other paginated endpoints."
     ),
 )
-async def get_events(n: int = Query(50, ge=1, le=500)):
-    events = await store.get_recent_events(n)
-    return {"events": list(reversed(events)), "count": len(events)}
+async def get_events(
+    n: int = Query(50, ge=1, le=500, description="Page size (max 500)."),
+    cursor: str | None = Query(
+        None,
+        description=(
+            "Opaque base64 cursor from a previous response's "
+            "``next_cursor`` field. Omit for the first page (newest "
+            "events)."
+        ),
+    ),
+):
+    """Recent in-memory events (newest first) with cursor-based pagination.
+
+    The event log is a bounded ring buffer (``store.event_log``, capped
+    at 500 entries by ``store.log_event``). Entries are bare strings of
+    the form ``"[HH:MM:SS] message"`` — there is no per-entry id column
+    to use as a stable cursor, so we fall back to offset-based
+    pagination encoded inside the standard opaque cursor. The wire
+    contract (``{events, count, next_cursor, has_more}``) is identical
+    to every other paginated endpoint.
+    """
+    from core.pagination import paginate_offset
+
+    # ``store.get_recent_events(n)`` returns the most recent ``n``
+    # entries in oldest-first order. Reverse here so the wire payload
+    # is newest-first — the order the dashboard's event feed renders.
+    all_events = list(reversed(await store.get_recent_events(500)))
+    page = paginate_offset(all_events, cursor=cursor, limit=n)
+    return {
+        "events": page.items,
+        "count": len(page.items),
+        "next_cursor": page.next_cursor,
+        "has_more": page.has_more,
+    }
 
 
 # ── Risk Management ───────────────────────────────────────────────────────────
@@ -3261,11 +3355,155 @@ async def run_backtest_simulation(request: Request, req: BacktestRequest):
     }
 
 
+# ── W16-4 — Backtest report generator (JSON + PDF) ───────────────────────────
+# Two sibling routes for the report surface introduced in W16-4:
+#
+#   POST /api/backtest/report       — runs a backtest (same params as
+#                                     ``/api/backtest/run``), then
+#                                     passes the result through
+#                                     ``backtesting.report.generate_report``
+#                                     and returns the JSON-serialisable
+#                                     ``BacktestReport`` dict directly.
+#
+#   POST /api/backtest/report/pdf   — same flow + renders the PDF via
+#                                     ``report_to_pdf`` to a tmp file +
+#                                     streams it back as
+#                                     ``application/pdf`` (FileResponse).
+#
+# Both routes re-use ``BacktestRequest`` (no new request model needed —
+# the report generator accepts whatever the engine emits).
+#
+# Rate-limited at ``HEAVY_LIMIT`` (5/min) — same ceiling as
+# ``/api/backtest/run`` — because each call triggers a fresh
+# archetype Monte-Carlo simulation under the hood. The PDF route's
+# matplotlib chart rendering + reportlab PDF build are wrapped in
+# ``asyncio.to_thread`` so the event loop never blocks on CPU-bound
+# work.
+
+
+@app.post("/api/backtest/report", tags=["backtesting"])
+@limiter.limit(HEAVY_LIMIT)
+async def generate_backtest_report(request: Request, req: BacktestRequest):
+    """Run a backtest and return a comprehensive JSON report.
+
+    The response is the ``dataclasses.asdict`` of a
+    ``backtesting.report.BacktestReport`` — top-level fields:
+    ``report_id``, ``created_at``, ``strategy``, ``period_start``,
+    ``period_end``, ``total_return``, ``annualized_return``,
+    ``sharpe_ratio``, ``sortino_ratio``, ``calmar_ratio``,
+    ``max_drawdown``, ``max_drawdown_duration_days``, ``volatility``,
+    ``downside_deviation``, ``total_trades``, ``winning_trades``,
+    ``losing_trades``, ``win_rate``, ``avg_win``, ``avg_loss``,
+    ``profit_factor``, ``expectancy``, ``avg_hold_time_hours``,
+    ``var_95``, ``cvar_95``, ``beta``, ``alpha``, ``correlation``,
+    ``equity_curve`` (list[float]), ``drawdown_curve`` (list[float]),
+    ``trades`` (list[dict], capped at 100),
+    ``monthly_returns`` (dict[str, float]).
+    """
+    from backtesting.engine import backtest_engine
+    from backtesting.report import generate_report, report_to_json
+
+    result = await asyncio.to_thread(
+        backtest_engine.run_backtest,
+        strategy_id=req.strategy_id,
+        initial_capital=req.initial_capital,
+        days=req.days,
+        fee_bps=req.fee_bps,
+        slippage_bps=req.slippage_bps,
+    )
+    report = await asyncio.to_thread(
+        generate_report, result.to_dict(), req.strategy_id
+    )
+    return {
+        "status": "completed",
+        "report": report_to_json(report),
+    }
+
+
+@app.post("/api/backtest/report/pdf", tags=["backtesting"])
+@limiter.limit(HEAVY_LIMIT)
+async def generate_backtest_report_pdf(request: Request, req: BacktestRequest):
+    """Run a backtest and stream the rendered PDF report back.
+
+    Returns ``application/pdf`` (``Content-Disposition: attachment;
+    filename=backtest-report-<strategy_id>-<report_id>.pdf``). The PDF
+    is built via ``reportlab`` (multi-section A4: title + summary
+    metrics table + matplotlib equity curve chart + monthly returns
+    table + trade distribution table) and stored to a tmp file before
+    being streamed. Returns 503 if ``reportlab`` is not installed.
+    """
+    from backtesting.engine import backtest_engine
+    from backtesting.report import generate_report, report_to_pdf
+
+    result = await asyncio.to_thread(
+        backtest_engine.run_backtest,
+        strategy_id=req.strategy_id,
+        initial_capital=req.initial_capital,
+        days=req.days,
+        fee_bps=req.fee_bps,
+        slippage_bps=req.slippage_bps,
+    )
+    report = await asyncio.to_thread(
+        generate_report, result.to_dict(), req.strategy_id
+    )
+
+    import tempfile
+    from pathlib import Path
+
+    pdf_path = Path(tempfile.gettempdir()) / (
+        f"backtest-report-{req.strategy_id}-{report.report_id}.pdf"
+    )
+    try:
+        await asyncio.to_thread(report_to_pdf, report, pdf_path)
+    except ImportError:
+        raise HTTPException(
+            status_code=503,
+            detail="PDF report generation requires `reportlab` "
+            "(pip install reportlab)",
+        )
+
+    return FileResponse(
+        str(pdf_path),
+        media_type="application/pdf",
+        filename=f"backtest-report-{req.strategy_id}-{report.report_id}.pdf",
+    )
+
+
 @app.get("/api/audit/logs", tags=["audit"])
-async def get_audit_logs(limit: int = Query(100, ge=1, le=1000), category: str | None = Query(None, max_length=100)):
-    """Query immutable SQLite audit trail logs."""
-    logs = await audit_logger.get_recent_events(limit=limit, category=category)
-    return {"logs": logs, "count": len(logs)}
+async def get_audit_logs(
+    limit: int = Query(100, ge=1, le=1000),
+    category: str | None = Query(None, max_length=100),
+    cursor: str | None = Query(
+        None,
+        description=(
+            "Opaque base64 cursor from a previous response's "
+            "``next_cursor`` field. Omit for the first page (newest "
+            "logs). W16-5."
+        ),
+    ),
+):
+    """Query immutable SQLite audit trail logs (newest first).
+
+    W16-5 — supports cursor-based pagination via the optional ``cursor``
+    query param. The cursor encodes the ``(timestamp, id)`` boundary of
+    the last row on the current page; the next request with that cursor
+    returns the page of audit-log rows whose ``(timestamp, id)`` pair is
+    strictly less than the boundary. When ``cursor`` is omitted, the
+    first page (the newest ``limit`` rows) is returned — fully backward
+    compatible with the pre-pagination wire shape (``{logs, count}`` plus
+    the new ``next_cursor`` / ``has_more`` fields).
+    """
+    page = await audit_logger.get_recent_events_page(
+        limit=limit,
+        category=category,
+        cursor=cursor,
+    )
+    return {
+        "logs": page.items,
+        "count": len(page.items),
+        "next_cursor": page.next_cursor,
+        "has_more": page.has_more,
+    }
 
 
 # ── Arbitrage Scanner & Database Explorer ─────────────────────────────────────
@@ -4347,5 +4585,147 @@ async def receive_client_errors(batch: ClientErrorBatch):
 from ml.ab_testing import register_routes as _register_ab_test_routes
 
 _register_ab_test_routes(app)
+
+
+# (W16-2) ml.feature_store — ML feature store (definitions / values /
+# per-version importance snapshots / drift detection). Additive wiring
+# appended at end of file per the W16-2 task spec. Adds five endpoints
+# under ``/api/features`` so an operator can audit the input feature
+# distribution that fed a given prediction + track how per-feature
+# importance moves across model versions:
+#
+#   GET  /api/features                       list all registered feature
+#                                            definitions (name, type,
+#                                            description, min/max bounds)
+#   GET  /api/features/{name}/stats          windowed statistics for a
+#                                            single feature (mean/std/min/
+#                                            max/p25/p50/p75/p95/n_samples)
+#   GET  /api/features/importance            per-version feature-importance
+#                                            history (filter by
+#                                            ``model_version`` / ``feature_name``)
+#   GET  /api/features/drift                drift status (mean-shift test)
+#                                            for every registered feature
+#   POST /api/features/importance           record a per-version importance
+#                                            snapshot (internal — used by
+#                                            ``ml/model.fit_initial``)
+#
+# Same registration pattern as the sibling ``register_routes`` blocks
+# above (alias imported under ``_register_*`` to avoid shadowing other
+# modules' ``register_routes`` symbol). Auth enforced by
+# ``enforce_api_auth`` (none of the five paths are in ``PUBLIC_PATHS``).
+from ml.feature_store import register_routes as _register_feature_store_routes
+
+_register_feature_store_routes(app)
+
+
+# ── (W16-7) Async DB pool — read-side v2 endpoints ──────────────────────────
+# W16-7: async SQLite connection pool (``core/db_pool.AsyncDBPool``) +
+# thin async repository layer (``core.async_repositories``). Additive —
+# no existing sync endpoint is touched. The sync recorders continue to
+# be the source of truth for writes; the new ``/api/v2/*`` endpoints
+# read through the async pool so a dashboard poll doesn't block the
+# event loop on a ``sqlite3.connect`` call.
+#
+# Two new endpoints appended here (auth enforced by ``enforce_api_auth``
+# — neither path is in ``PUBLIC_PATHS``):
+#
+#   GET /api/v2/decisions/recent    async read of recent decision_events
+#                                   (query params: limit, default 50;
+#                                   stage, optional stage filter)
+#   GET /api/v2/observability/latest
+#                                   async read of the latest metric value
+#                                   per (category, name) pair
+#
+# DB_PATH constants are imported (not redefined) from the canonical
+# sync recorder modules — the async pool MUST point at the same on-disk
+# file the sync recorder writes to, otherwise the v2 endpoints would
+# read stale / empty data. The sync recorder modules' ``DB_PATH`` is
+# a ``pathlib.Path`` resolved at import time from the
+# ``DECISION_LEDGER_DB_PATH`` / ``OBSERVABILITY_DB_PATH`` env vars
+# (redirected to ``/tmp/pmbot_conftest_isolation`` by the test
+# conftest), so importing the constant inherits whatever the test
+# harness / runtime has configured.
+from core.decision_ledger import DB_PATH as DECISION_DB_PATH  # noqa: E402
+from core.observability import DB_PATH as OBS_DB_PATH  # noqa: E402
+
+
+@app.get(
+    "/api/v2/decisions/recent",
+    tags=["decisions"],
+    summary="Recent decisions (async)",
+    description=(
+        "Async version of the recent-decisions feed. Reads through the "
+        "W16-7 ``AsyncDBPool`` (one aiosqlite.Connection per DB) so the "
+        "read never blocks the event loop. Returns the most-recent N "
+        "rows from ``decision_events`` (newest first), optionally "
+        "filtered by ``stage``."
+    ),
+)
+async def get_decisions_async(limit: int = 50, stage: str | None = None):
+    """Async version using the async DB pool."""
+    from core.async_repositories import AsyncDecisionRepository
+
+    repo = AsyncDecisionRepository(str(DECISION_DB_PATH))
+    decisions = await repo.get_recent(limit=limit, stage=stage)
+    return {"decisions": decisions, "count": len(decisions)}
+
+
+@app.get(
+    "/api/v2/observability/latest",
+    tags=["observability"],
+    summary="Latest observability metrics (async)",
+    description=(
+        "Async version of the latest-metrics feed. Reads through the "
+        "W16-7 ``AsyncDBPool`` so the read never blocks the event "
+        "loop. Returns the latest value for each ``(category, name)`` "
+        "pair recorded by the sync ``core.observability`` collector."
+    ),
+)
+async def get_observability_async():
+    """Async version using the async DB pool."""
+    from core.async_repositories import AsyncObservabilityRepository
+
+    repo = AsyncObservabilityRepository(str(OBS_DB_PATH))
+    metrics = await repo.get_latest_metrics()
+    return {"metrics": metrics, "count": len(metrics)}
+
+
+# The async DB pool is closed in the lifespan shutdown handler (see
+# the ``await _db_pool_singleton.close_all()`` block in ``async def
+# lifespan`` above the ``yield``).
+
+
+# (W16-3) core.portfolio_optimizer — multi-strategy Kelly-criterion
+# portfolio optimizer. Additive wiring appended at end of file per the
+# W16-3 task spec. Adds four endpoints under ``/api/portfolio`` so an
+# operator can run the Kelly optimizer across a list of opportunities
+# (POSTed from the dashboard), suggest rebalancing actions against the
+# current open positions, and read / mutate the optimizer's live config
+# (Kelly fraction, max single bet, max total exposure, min edge, min
+# confidence, operating capital) WITHOUT a restart:
+#
+#   POST /api/portfolio/optimize    run the Kelly optimizer on a list of
+#                                    opportunities; returns the selected
+#                                    bets + portfolio metrics (total
+#                                    allocated / expected return / risk /
+#                                    diversification ratio / violations)
+#   POST /api/portfolio/rebalance   suggest rebalancing actions (add /
+#                                    reduce / close / hold) given the
+#                                    current open positions + the latest
+#                                    opportunity set
+#   GET  /api/portfolio/config       return the live optimizer config
+#   PUT  /api/portfolio/config       partial-update the optimizer config
+#                                    (mutates the singleton in place so
+#                                    the next optimize call picks up the
+#                                    new Kelly fraction / max exposure)
+#
+# Same registration pattern as the sibling ``register_routes`` blocks
+# above (alias imported under ``_register_*`` to avoid shadowing other
+# modules' ``register_routes`` symbol). Auth enforced by
+# ``enforce_api_auth`` (none of the four paths are in ``PUBLIC_PATHS``).
+from core.portfolio_optimizer import register_routes as _register_portfolio_optimizer_routes
+
+_register_portfolio_optimizer_routes(app)
+
 
 

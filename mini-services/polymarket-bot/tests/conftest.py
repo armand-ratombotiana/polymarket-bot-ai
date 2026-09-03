@@ -96,6 +96,12 @@ _ENV_REDIRECTS: dict[str, str] = {
     # otherwise try to mkdir ``/app/data`` (read-only in the sandbox) and
     # crash the import — same defensive pattern as FLAGS_DB_PATH above.
     "AB_TEST_DB_PATH": str(_TMP_ROOT / "ab_tests.db"),
+    # W16-2 — ML feature store SQLite db. Module-level singleton
+    # ``ml.feature_store.feature_store`` is constructed at import time and
+    # would otherwise try to mkdir ``/app/data`` (read-only in the
+    # sandbox) and crash the import — same defensive pattern as
+    # FLAGS_DB_PATH / AB_TEST_DB_PATH above.
+    "FEATURE_STORE_DB": str(_TMP_ROOT / "feature_store.db"),
     # Force the canonical trading mode to paper + live disabled so risk-gate
     # tests don't short-circuit at the shadow / live-trading gates inside
     # ``InstitutionalRiskEngine.check_order``.

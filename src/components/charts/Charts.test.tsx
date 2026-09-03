@@ -18,7 +18,6 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen } from '@testing-library/react'
-import type { ReactNode } from 'react'
 
 // Stub ResponsiveContainer so children render directly with the height prop.
 // We spread any extra props onto the wrapper div so width="100%" passes through.
@@ -44,7 +43,6 @@ import ReliabilityDiagram from './ReliabilityDiagram'
 import { chartTheme, pnlColor, utilizationColor, tooltipStyle } from './theme'
 
 // Re-export for the JSX below.
-import * as React from 'react'
 
 const sampleEquityData = [
   { timestamp: 1700000000000, equity: 100 },

@@ -209,7 +209,7 @@ describe('CommandPalette', () => {
 
   function CmdKHarness() {
     const [open, setOpen] = useState(false)
-    const [lastNav, setLastNav] = useState<NavSection | null>(null)
+    const [, setLastNav] = useState<NavSection | null>(null)
 
     // ── Exact copy of the useEffect added in app/page.tsx (W13-5) ──
     useEffect(() => {

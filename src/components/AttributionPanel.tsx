@@ -13,13 +13,6 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { apiFetch } from '@/lib/api'
 import { fmtUsd, fmtPnl, fmtPct, fmtInt } from '@/lib/design-tokens'
 import {
-  Card,
-  CardContent,
-  CardHeader,
-  CardTitle,
-} from '@/components/ui/card'
-import { Badge } from '@/components/ui/badge'
-import {
   Tabs,
   TabsList,
   TabsTrigger,
@@ -808,7 +801,7 @@ export default function AttributionPanel() {
                     1
                   )
 
-                  return items.map((it, i) => {
+                  return items.map((it) => {
                     const prev = cumulative
                     cumulative += it.pnl
                     const startPct = (Math.min(prev, cumulative) / scaleMax) * 100

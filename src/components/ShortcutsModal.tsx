@@ -65,6 +65,7 @@ export default function ShortcutsModal({ isOpen, onClose }: Props) {
       lastActiveRef.current?.focus?.()
       lastActiveRef.current = null
     }
+    return undefined
   }, [isOpen])
 
   // W9-7 — Focus trap: keep Tab focus cycling within the modal while open.
