@@ -1,7 +1,7 @@
 {
   "bankroll_baseline": 100.0,
   "daily_pnl": 0.9623366110156785,
-  "paper_balance": 111.83116220816044,
+  "paper_balance": 111.72438254714349,
   "peak_equity": 100.96233661101567,
   "equity_history": [
     {
@@ -71,6 +71,11 @@
     },
     {
       "timestamp": 1788409967.5405052,
+      "equity": 100.96,
+      "pnl": 0.96
+    },
+    {
+      "timestamp": 1788415099.168576,
       "equity": 100.96,
       "pnl": 0.96
     }
@@ -152,6 +157,17 @@
       "strategy": "signal_trader",
       "opened_at": 1788409517.939602,
       "last_updated": 1788409517.939604
+    },
+    "54134749238039582347172858759895976555687419083634742024776556313602473928126": {
+      "token_id": "54134749238039582347172858759895976555687419083634742024776556313602473928126",
+      "market_slug": "",
+      "yes_shares": 5.084745762711865,
+      "avg_entry_price": 0.021,
+      "total_invested": 0.10677966101694918,
+      "realised_pnl": 0.0,
+      "strategy": "market_maker",
+      "opened_at": 1788415099.1685688,
+      "last_updated": 1788415099.1685727
     }
   },
   "trades": [
@@ -297,6 +313,17 @@
       "strategy": "market_maker",
       "paper": true,
       "timestamp": 1788409967.5404894
+    },
+    {
+      "trade_id": "paper-fill-ca89fd65",
+      "token_id": "54134749238039582347172858759895976555687419083634742024776556313602473928126",
+      "side": "BUY",
+      "price": 0.021,
+      "size": 5.084745762711865,
+      "pnl": 0.0,
+      "strategy": "market_maker",
+      "paper": true,
+      "timestamp": 1788415099.1685467
     }
   ]
 }

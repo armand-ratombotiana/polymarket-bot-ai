@@ -545,6 +545,16 @@ class MarketMLModel:
             except Exception:
                 log.debug("[ml_model] feature-vector record skipped", exc_info=True)
 
+            # T13: run shadow challenger model(s) in parallel with production.
+            # The challenger output NEVER affects `p_yes` / `confidence` — it
+            # is recorded in the shadow-inference ring buffer for offline
+            # disagreement analysis. Bare try/except so a missing or raising
+            # challenger cannot degrade the production predict() path.
+            try:
+                from ml.shadow_inference import shadow_inference; shadow_inference.run_shadow(features, token_id, p_yes)
+            except Exception:
+                log.debug("[ml_model] shadow inference skipped", exc_info=True)
+
             return p_yes, confidence
         except Exception as e:
             log.debug("[ml_model] Predict error: %s", e)

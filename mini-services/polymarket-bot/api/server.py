@@ -252,6 +252,28 @@ async def lifespan(app: FastAPI):
     #     Triggers a model retrain once ≥50 real labels are accumulated.
     from core.label_backfill import label_backfill_engine
     await label_backfill_engine.start()
+    # ── T13: Register shadow challenger model(s) ───────────────────────────
+    #     Registers a simple logistic-baseline challenger with the shadow
+    #     inference engine. The challenger is invoked in parallel with
+    #     every production `MLModel.predict()` call (see `ml/model.py`)
+    #     but its output never affects trading decisions — disagreements
+    #     are logged for offline retraining / promotion analysis.
+    #     Wrapped in bare try/except so a missing / failing module can
+    #     never block server startup.
+    try:
+        from ml.shadow_inference import shadow_inference
+
+        def _logistic_baseline(features):
+            pe = float(features[24]) if len(features) > 24 else 0.0
+            return max(0.01, min(0.99, 0.5 + pe * 0.3))
+
+        shadow_inference.register_shadow_model(
+            "logistic_baseline",
+            _logistic_baseline,
+            description="Simple logistic baseline",
+        )
+    except Exception:
+        pass
     watchdog.beat("label_backfill")
     await store.log_event("🏷️  Label Backfill Service active (45s startup grace → daily cycle, retrain ≥50 labels)")
 
@@ -2119,3 +2141,114 @@ from core.attribution import register_routes as _register_attribution_routes
 
 _register_closed_positions_routes(app)
 _register_attribution_routes(app)
+
+
+# T2 — God Mode §82 Live Trading Safety Gate.
+# NOTE: the wiring for ``core/live_safety_gate.py`` lives in the T14 block
+# further below (search for ``(T2) core.live_safety_gate``), which was added
+# by the T14 subagent in anticipation of this module landing. It is NOT
+# re-registered here to avoid a duplicate-route FastAPI error. The T14 block
+# imports ``register_routes`` under the alias ``_register_live_safety_routes``
+# and invokes it against the shared ``app`` — same pattern as the other
+# feature-module registrations in this file.
+
+
+# T5 — Capital allocation endpoint.
+# Registered last (additive — no existing routes touched). Appends:
+#   GET /api/capital/allocation   USD position size in [0, $3] for a signal
+# Decouples signal generation (strategies) from capital sizing: the signal
+# tuple (strategy, edge, confidence, liquidity, existing_exposure, drawdown,
+# strategy_performance) is mapped to a USD size via a saturating Michaelis–
+# Menten edge curve, smoothstep confidence gate, and Brier / drawdown /
+# correlation / performance / liquidity multipliers. Same pattern as the
+# observability / decision-ledger / attribution registrations above.
+from core.capital_allocator import register_routes as _register_capital_allocator_routes
+
+_register_capital_allocator_routes(app)
+
+
+# T14 — Wire the remaining new route modules (additive — appended at end).
+#
+# Each block below mirrors the registration pattern established by the
+# R11 / S14 / S13 / S15 / T5 blocks above: a top-level ``register_routes``
+# function imported from a feature module and invoked against the shared
+# FastAPI ``app``. The four modules that already exist (T1 shadow_trading,
+# T2 live_safety_gate, T6 retention, T8 ml.routes) are wired unconditionally
+# to match the existing style; the still-pending T3 ``ml.validation`` module
+# is wrapped in a try/except ImportError so the server stays importable until
+# the T3 subagent lands it — the wiring then auto-activates on next import.
+#
+# T5 (``core.capital_allocator``) is intentionally NOT re-wired here: the T5
+# block above already imports and invokes its ``register_routes`` (under the
+# alias ``_register_capital_allocator_routes``); re-registering under the
+# alias requested in the T14 spec (``_register_capital_routes``) would either
+# double-register the same paths (FastAPI 4xx / duplicate-route error) or
+# silently mask an upstream bug — both worse than leaving the existing
+# wiring alone. The T14 spec's alias request is satisfied by the existing
+# T5 alias to within import-path equivalence.
+
+
+# (T1) core.shadow_trading — shadow-trading inspection endpoints.
+# Additive: appends ``GET /api/shadow/trades`` (recent counterfactual trades,
+# filterable by strategy) and ``GET /api/shadow/comparison`` (shadow-vs-live
+# side-by-side comparison). Same registration pattern as the decision-ledger
+# block above — auth is enforced by the caller's existing ``enforce_api_auth``
+# middleware (neither path is in ``PUBLIC_PATHS``).
+from core.shadow_trading import register_routes as _register_shadow_routes
+
+_register_shadow_routes(app)
+
+
+# (T2) core.live_safety_gate — live-trading safety gate inspection / control.
+# Additive: appends ``GET /api/live/readiness`` (pre-trade readiness checklist
+# with the 9 gate conditions evaluated against current state) and
+# ``POST /api/live/enable`` (durable + in-memory live-trading enable with
+# audit log + kill-switch interlock). Mirrors the shadow-trading pattern.
+from core.live_safety_gate import register_routes as _register_live_safety_routes
+
+_register_live_safety_routes(app)
+
+
+# (T3) ml.validation — ML model validation / backtest endpoints.
+# Defensive: the module is not yet present in this workspace (T3 subagent
+# in flight). Wrapped in try/except ImportError so server.py stays
+# importable; the wiring auto-activates on the next server restart once
+# the T3 module lands. Logs a single WARNING per startup while pending so
+# operators can see the gap without crashing the whole API surface.
+try:
+    from ml.validation import register_routes as _register_ml_validation_routes
+
+    _register_ml_validation_routes(app)
+except ImportError as _e_ml_validation:  # noqa: PERF203 — single guard clause
+    log.warning(
+        "[server] ml.validation not yet available; routes skipped "
+        "(will auto-wire once the module lands): %s",
+        _e_ml_validation,
+    )
+
+
+# (T5) core.capital_allocator — see T5 block above (lines ~2146–2157).
+# Already wired under the alias ``_register_capital_allocator_routes``;
+# not re-registered here to avoid duplicate-route conflicts.
+
+
+# (T6) core.retention — retention policy inspection / control endpoints.
+# Additive: appends ``POST /api/system/prune`` (deletes rows older than the
+# per-target retention horizon across observability / decision_ledger /
+# execution_quality / audit_events / all). Body schema is documented inline
+# in ``core/retention.py``. Same registration pattern as the observability
+# block above.
+from core.retention import register_routes as _register_retention_routes
+
+_register_retention_routes(app)
+
+
+# (T8) ml.routes — ML model-governance endpoints (version registry + rollback).
+# Additive: appends ``GET /api/ml/versions`` (full registered-model lineage,
+# newest first, with metrics + active flag) and ``POST /api/ml/rollback``
+# (point-in-time rollback of ``active_version`` to a previously-registered
+# version, with best-effort audit log). Same pattern as the shadow-trading
+# registration above; auth enforced by ``enforce_api_auth``.
+from ml.routes import register_routes as _register_ml_version_routes
+
+_register_ml_version_routes(app)

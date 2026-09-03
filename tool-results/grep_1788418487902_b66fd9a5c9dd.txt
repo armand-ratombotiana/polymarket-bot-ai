@@ -1,0 +1,252 @@
+/home/z/my-project/mini-services/polymarket-bot/execution/smart_router.py:5:  - Smart Order Routing (SOR) with dynamic liquidity scanning
+/home/z/my-project/mini-services/polymarket-bot/execution/smart_router.py:217:        liquidity depth at each book level. Larger slices are executed into deeper
+/home/z/my-project/mini-services/polymarket-bot/strategies/market_maker.py:14:  - Submits continuous two-sided liquidity and auto-manages order lifecycle
+/home/z/my-project/mini-services/polymarket-bot/strategies/registry.py:38:    StrategyMeta("mm_grid_liquidity", "Grid Trading Liquidity", "market_making", "Multi-level layered limit orders with step-ladder profit taking", "Medium", False),
+/home/z/my-project/mini-services/polymarket-bot/core/analysis_engine.py:53:        # Use real market data from discovery catalog so volume/liquidity features are accurate.
+/home/z/my-project/mini-services/polymarket-bot/core/analysis_engine.py:58:                "slug": slug, "volume24hr": 0.0, "volume": 0.0, "liquidity": 0.0
+/home/z/my-project/mini-services/polymarket-bot/core/analysis_engine.py:61:            mkt_data = {"slug": slug, "volume24hr": 0.0, "volume": 0.0, "liquidity": 0.0}
+/home/z/my-project/mini-services/polymarket-bot/core/analysis_engine.py:125:            reasons.append(f"Insufficient order book liquidity (${total_depth_usdc:.0f} < $200)")
+/home/z/my-project/mini-services/polymarket-bot/core/analysis_engine.py:153:            "total_liquidity_usdc": round(total_depth_usdc, 2),
+/home/z/my-project/mini-services/polymarket-bot/core/attribution.py:13:  - Does *liquidity* at signal time matter
+/home/z/my-project/mini-services/polymarket-bot/core/attribution.py:14:    (thin markets → wider slippage)?                  → ``by_liquidity_level``
+/home/z/my-project/mini-services/polymarket-bot/core/attribution.py:50:  - **liquidity_level**:      ``thin`` (<$1k), ``low`` [$1k, $10k),
+/home/z/my-project/mini-services/polymarket-bot/core/attribution.py:116:def classify_liquidity(liquidity: float | None) -> str:
+/home/z/my-project/mini-services/polymarket-bot/core/attribution.py:117:    if liquidity is None:
+/home/z/my-project/mini-services/polymarket-bot/core/attribution.py:119:    if liquidity < 1_000:
+/home/z/my-project/mini-services/polymarket-bot/core/attribution.py:121:    if liquidity < 10_000:
+/home/z/my-project/mini-services/polymarket-bot/core/attribution.py:123:    if liquidity < 50_000:
+/home/z/my-project/mini-services/polymarket-bot/core/attribution.py:125:    if liquidity < 200_000:
+/home/z/my-project/mini-services/polymarket-bot/core/attribution.py:320:async def attribute_by_liquidity_level() -> list[dict[str, Any]]:
+/home/z/my-project/mini-services/polymarket-bot/core/attribution.py:321:    """Group closed positions by market liquidity level at signal time."""
+/home/z/my-project/mini-services/polymarket-bot/core/attribution.py:325:        lambda r: classify_liquidity(r.get("liquidity")),
+/home/z/my-project/mini-services/polymarket-bot/core/attribution.py:362:            "by_liquidity_level":     [ ... ],
+/home/z/my-project/mini-services/polymarket-bot/core/attribution.py:369:                "liquidity_level":     [...labels],
+/home/z/my-project/mini-services/polymarket-bot/core/attribution.py:382:            attribute_by_liquidity_level(),
+/home/z/my-project/mini-services/polymarket-bot/core/attribution.py:394:        "by_liquidity_level": by_liq,
+/home/z/my-project/mini-services/polymarket-bot/core/attribution.py:401:            "liquidity_level": LIQUIDITY_LEVELS,
+/home/z/my-project/mini-services/polymarket-bot/core/attribution.py:424:        probability / liquidity / holding-period / direction dimensions."""
+/home/z/my-project/mini-services/polymarket-bot/core/attribution.py:435:    "attribute_by_liquidity_level",
+/home/z/my-project/mini-services/polymarket-bot/core/attribution.py:441:    "classify_liquidity",
+/home/z/my-project/mini-services/polymarket-bot/core/db/migrations/001_initial_enterprise_schemas.sql:137:    liquidity DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+/home/z/my-project/mini-services/polymarket-bot/core/db/migrations/001_initial_enterprise_schemas.sql:161:    liquidity DOUBLE PRECISION DEFAULT 0.0,
+/home/z/my-project/mini-services/polymarket-bot/core/db/migrations/001_initial_enterprise_schemas.sql:359:    max_drawdown_pct DOUBLE PRECISION NOT NULL DEFAULT 0.15,
+/home/z/my-project/mini-services/polymarket-bot/core/db/migrations/001_initial_enterprise_schemas.sql:360:    min_liquidity_usd DOUBLE PRECISION NOT NULL DEFAULT 50.0,
+/home/z/my-project/mini-services/polymarket-bot/core/market_db.py:5:  1. market_snapshots: rolling price, volume, liquidity, and spread history
+/home/z/my-project/mini-services/polymarket-bot/core/market_db.py:60:                    liquidity REAL
+/home/z/my-project/mini-services/polymarket-bot/core/market_db.py:119:        liquidity: float = 0.0,
+/home/z/my-project/mini-services/polymarket-bot/core/market_db.py:130:                        (timestamp, token_id, slug, best_bid, best_ask, mid, spread, volume_24h, liquidity)
+/home/z/my-project/mini-services/polymarket-bot/core/market_db.py:133:                        (ts, token_id, slug, best_bid, best_ask, mid, spread, volume_24h, liquidity),
+/home/z/my-project/mini-services/polymarket-bot/core/market_discovery.py:7:          volume_24h, total_volume, liquidity, end_date, status, orderbook_supported.
+/home/z/my-project/mini-services/polymarket-bot/core/market_discovery.py:146:                    "liquidity": float(m.get("liquidity") or 0.0),
+/home/z/my-project/mini-services/polymarket-bot/core/closed_positions.py:11:bucket, probability band, liquidity level, holding period, trade direction).
+/home/z/my-project/mini-services/polymarket-bot/core/closed_positions.py:36:        liquidity       REAL,                        -- market liquidity at signal time (USD)
+/home/z/my-project/mini-services/polymarket-bot/core/closed_positions.py:78:    "liquidity",
+/home/z/my-project/mini-services/polymarket-bot/core/closed_positions.py:122:                        liquidity       REAL,
+/home/z/my-project/mini-services/polymarket-bot/core/closed_positions.py:163:        ``market_mid``, ``liquidity``); everything else lands in
+/home/z/my-project/mini-services/polymarket-bot/core/closed_positions.py:195:            "p_yes", "market_mid", "liquidity", "metadata_json",
+/home/z/my-project/mini-services/polymarket-bot/core/closed_positions.py:214:            _safe_float(attr_values.get("liquidity")),
+/home/z/my-project/mini-services/polymarket-bot/core/closed_positions.py:418:          ``predicted_edge``, ``p_yes``, ``market_mid``, ``liquidity``) plus
+/home/z/my-project/mini-services/polymarket-bot/core/portfolio.py:7:  capital-at-risk, drawdown, correlation, uncertainty, and time in positions.
+/home/z/my-project/mini-services/polymarket-bot/core/portfolio.py:151:def _max_drawdown(series: list[float]) -> float:
+/home/z/my-project/mini-services/polymarket-bot/core/portfolio.py:186:    max_drawdown = _max_drawdown(series)
+/home/z/my-project/mini-services/polymarket-bot/core/portfolio.py:210:        "max_drawdown": round(max_drawdown, 2),
+/home/z/my-project/mini-services/polymarket-bot/core/portfolio.py:217:    Strategy Score = Expected Net P&L − penalties (exposure, drawdown,
+/home/z/my-project/mini-services/polymarket-bot/core/portfolio.py:218:    correlation, uncertainty, liquidity, execution-risk, capital-time).
+/home/z/my-project/mini-services/polymarket-bot/core/portfolio.py:223:    drawdown_penalty = stats["max_drawdown"] * 0.5
+/home/z/my-project/mini-services/polymarket-bot/core/portfolio.py:230:        - drawdown_penalty
+/home/z/my-project/mini-services/polymarket-bot/core/label_backfill.py:27:    liquidity) so ``ml.features.extract_features()`` produces a usable
+/home/z/my-project/mini-services/polymarket-bot/core/label_backfill.py:384:        # 3. Spread is inversely related to market liquidity (more liquidity → tighter).
+/home/z/my-project/mini-services/polymarket-bot/core/label_backfill.py:385:        liquidity = float(
+/home/z/my-project/mini-services/polymarket-bot/core/label_backfill.py:386:            market.get("liquidity") or market.get("liquidityNum") or 0.0
+/home/z/my-project/mini-services/polymarket-bot/core/label_backfill.py:388:        if liquidity > 100_000.0:
+/home/z/my-project/mini-services/polymarket-bot/core/label_backfill.py:390:        elif liquidity > 10_000.0:
+/home/z/my-project/mini-services/polymarket-bot/core/label_backfill.py:392:        elif liquidity > 1_000.0:
+/home/z/my-project/mini-services/polymarket-bot/core/timescale_db.py:84:                        liquidity REAL
+/home/z/my-project/mini-services/polymarket-bot/core/timescale_db.py:188:                        daily_loss_stop_usd, weekly_loss_stop_usd, max_drawdown_pct
+/home/z/my-project/mini-services/polymarket-bot/core/timescale_db.py:255:        liquidity: float = 0.0,
+/home/z/my-project/mini-services/polymarket-bot/core/timescale_db.py:266:                    time, token_id, slug, best_bid, best_ask, mid, spread, volume_24h, liquidity, bids_json, asks_json
+/home/z/my-project/mini-services/polymarket-bot/core/timescale_db.py:270:            pg_params=(dt, token_id, slug, best_bid, best_ask, mid, spread, volume_24h, liquidity, json.dumps(bids_json) if bids_json else None, json.dumps(asks_json) if asks_json else None),
+/home/z/my-project/mini-services/polymarket-bot/core/timescale_db.py:272:                INSERT INTO market_snapshots (timestamp, token_id, slug, best_bid, best_ask, mid, spread, volume_24h, liquidity)
+/home/z/my-project/mini-services/polymarket-bot/core/timescale_db.py:275:            sqlite_params=(ts, token_id, slug, best_bid, best_ask, mid, spread, volume_24h, liquidity),
+/home/z/my-project/mini-services/polymarket-bot/core/data_store.py:370:            # the legacy $10k/$200-era peak would fabricate a false drawdown.
+/home/z/my-project/mini-services/polymarket-bot/core/data_store.py:375:                    "re-based to current equity $%.2f (no fabricated drawdown).",
+/home/z/my-project/mini-services/polymarket-bot/core/deep_analysis.py:122:            "description": "Balanced liquidity and tight spread; oscillations around fair value",
+/home/z/my-project/mini-services/polymarket-bot/core/deep_analysis.py:153:                # Use minimal market dict; volume/liquidity fallback to 0 clips gracefully
+/home/z/my-project/mini-services/polymarket-bot/core/deep_analysis.py:155:                    {"slug": slug, "volume24hr": 0.0, "volume": 0.0, "liquidity": 0.0},
+/home/z/my-project/mini-services/polymarket-bot/core/fundamental_ingest.py:31:    "all-time-high", "adoption", "inflows", "stimulus", "lowering", "liquidity", "bull",
+/home/z/my-project/mini-services/polymarket-bot/ml/vector_store.py:69:            "liquidity": float(market.get("liquidity") or 0.0),
+/home/z/my-project/mini-services/polymarket-bot/ml/model.py:68:    X[:, 11] = rng.uniform(0.00, 1.00, n)  # liquidity_log
+/home/z/my-project/mini-services/polymarket-bot/ml/features.py:74:    "liquidity_log",
+/home/z/my-project/mini-services/polymarket-bot/ml/features.py:208:    liquidity = float(market.get("liquidity") or market.get("liquidityNum") or 0.0)
+/home/z/my-project/mini-services/polymarket-bot/ml/features.py:212:    liq_log = min(math.log10(liquidity + 1.0) / 7.0, 1.0)
+/home/z/my-project/mini-services/polymarket-bot/backtesting/engine.py:33:        max_drawdown_pct: float,
+/home/z/my-project/mini-services/polymarket-bot/backtesting/engine.py:54:        self.max_drawdown_pct = max_drawdown_pct
+/home/z/my-project/mini-services/polymarket-bot/backtesting/engine.py:77:            "max_drawdown_pct": round(self.max_drawdown_pct, 2),
+/home/z/my-project/mini-services/polymarket-bot/backtesting/engine.py:116:        equity_curve: list[dict[str, float]] = [{"step": 0, "equity": capital, "drawdown": 0.0}]
+/home/z/my-project/mini-services/polymarket-bot/backtesting/engine.py:215:                    "drawdown": round(dd, 2),
+/home/z/my-project/mini-services/polymarket-bot/backtesting/engine.py:261:            max_drawdown_pct=max_dd,
+/home/z/my-project/mini-services/polymarket-bot/tests/test_failure_injection.py:250:        "liquidity": 5_000.0,
+/home/z/my-project/mini-services/polymarket-bot/tests/test_failure_injection.py:372:    # Adversarial market dict: no volume, no liquidity, no slug, no tokens.
+/home/z/my-project/mini-services/polymarket-bot/tests/test_failure_injection.py:466:        size=-5.0,  # negative — below the 0.5 minimum-liquidity threshold
+/home/z/my-project/mini-services/polymarket-bot/tests/test_features.py:60:        "liquidity": 5_000.0,
+/home/z/my-project/mini-services/polymarket-bot/tests/test_features.py:294:            "zero_volume_and_liquidity",
+/home/z/my-project/mini-services/polymarket-bot/tests/test_features.py:296:            {"volume24hr": 0.0, "volume": 0.0, "liquidity": 0.0},
+/home/z/my-project/mini-services/polymarket-bot/tests/test_risk_manager.py:17:      the drawdown would always be negative and the MDD breaker would never
+/home/z/my-project/mini-services/polymarket-bot/tests/test_risk_manager.py:336:      drawdown_dollars = $108.00 - $100.00 = $8.00 ≥ $8.00     ← MDD trips
+/home/z/my-project/mini-services/polymarket-bot/tests/test_risk_manager.py:339:    ``current_equity`` would be $200.00, ``drawdown_dollars`` would be
+/home/z/my-project/mini-services/polymarket-bot/tests/test_risk_manager.py:347:    # operating baseline + daily PnL flat — i.e. no drawdown to trip on.
+/home/z/my-project/mini-services/polymarket-bot/tests/test_risk_manager.py:352:        "Baseline sanity check failed — a $1.50 paper order with no drawdown "
+/home/z/my-project/mini-services/polymarket-bot/tests/test_risk_manager.py:375:        "making current_equity=$200 and drawdown always negative (the "
+/home/z/my-project/mini-services/polymarket-bot/tests/test_risk_manager.py:379:    assert "Max drawdown" in reason
+/home/z/my-project/mini-services/polymarket-bot/tests/test_risk_manager.py:388:    # the drawdown would have been -$92, and the order would have been
+/home/z/my-project/mini-services/polymarket-bot/api/server.py:623:    max_drawdown_dollars = max(0.0, store.peak_equity - equity)
+/home/z/my-project/mini-services/polymarket-bot/api/server.py:624:    max_drawdown_pct = (max_drawdown_dollars / store.peak_equity) if store.peak_equity > 0 else 0.0
+/home/z/my-project/mini-services/polymarket-bot/api/server.py:652:        "max_drawdown_dollars": round(max_drawdown_dollars, 2),
+/home/z/my-project/mini-services/polymarket-bot/api/server.py:653:        "max_drawdown_pct": round(max_drawdown_pct, 4),
+/home/z/my-project/mini-services/polymarket-bot/api/server.py:761:    # liquidity|liquidityNum, endDate|end_date_iso|endDateIso). The catalog
+/home/z/my-project/mini-services/polymarket-bot/api/server.py:770:    # liquidity key already matches; bridge endDate aliases just in case.
+/home/z/my-project/mini-services/polymarket-bot/api/server.py:866:        "liquidity": catalog_record.get("liquidity"),
+/home/z/my-project/mini-services/polymarket-bot/api/server.py:2115:# (strategy / confidence bucket / edge bucket / probability band / liquidity
+/home/z/my-project/mini-services/polymarket-bot/risk/manager.py:24:  - Max drawdown from high-water mark: USD 8.00 (Hard Circuit Breaker)
+/home/z/my-project/mini-services/polymarket-bot/risk/manager.py:185:            # hard ceiling). Using BANKROLL_CEILING here made drawdown always
+/home/z/my-project/mini-services/polymarket-bot/risk/manager.py:203:                drawdown_dollars = peak_equity_dec - current_equity
+/home/z/my-project/mini-services/polymarket-bot/risk/manager.py:204:                if drawdown_dollars >= MAX_DRAWDOWN_LIMIT:
+/home/z/my-project/mini-services/polymarket-bot/risk/manager.py:205:                    await self._trigger_kill_switch(f"Max Drawdown stop breach (${drawdown_dollars:.2f} >= ${MAX_DRAWDOWN_LIMIT:.2f})")
+/home/z/my-project/mini-services/polymarket-bot/risk/manager.py:206:                    return False, f"Max drawdown limit reached (${MAX_DRAWDOWN_LIMIT:.2f})"
+/home/z/my-project/mini-services/polymarket-bot/risk/manager.py:277:                return False, f"Order size {order.size} is below minimum liquidity threshold"
+/home/z/my-project/mini-services/polymarket-bot/risk/manager.py:379:        drawdown_dollars = max(store.peak_equity - current_eq, 0.0)
+/home/z/my-project/mini-services/polymarket-bot/risk/manager.py:404:            "drawdown_dollars": round(drawdown_dollars, 2),
+/home/z/my-project/mini-services/polymarket-bot/risk/manager.py:405:            "max_drawdown_limit": float(MAX_DRAWDOWN_LIMIT),
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:9:      "liquidity": 2199006.46463
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:17:      "liquidity": 2199006.46463
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:25:      "liquidity": 2171676.01184
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:33:      "liquidity": 2171676.01184
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:41:      "liquidity": 2275824.20707
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:49:      "liquidity": 2275824.20707
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:57:      "liquidity": 625863.9066
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:65:      "liquidity": 625863.9066
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:73:      "liquidity": 589242.6904
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:81:      "liquidity": 589242.6904
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:89:      "liquidity": 1784547.9404
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:97:      "liquidity": 1784547.9404
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:105:      "liquidity": 1251552.79516
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:113:      "liquidity": 1251552.79516
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:121:      "liquidity": 479656.69678
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:129:      "liquidity": 479656.69678
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:137:      "liquidity": 201877.3598
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:145:      "liquidity": 201877.3598
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:153:      "liquidity": 1244824.53011
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:161:      "liquidity": 1244824.53011
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:169:      "liquidity": 863174.14542
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:177:      "liquidity": 863174.14542
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:185:      "liquidity": 254889.10897
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:193:      "liquidity": 254889.10897
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:201:      "liquidity": 140115.37574
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:209:      "liquidity": 140115.37574
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:217:      "liquidity": 1519990.07784
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:225:      "liquidity": 1519990.07784
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:233:      "liquidity": 194711.6548
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:241:      "liquidity": 194711.6548
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:249:      "liquidity": 354268.395
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:257:      "liquidity": 354268.395
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:265:      "liquidity": 263731.76948
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:273:      "liquidity": 263731.76948
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:281:      "liquidity": 1203955.79538
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:289:      "liquidity": 1203955.79538
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:297:      "liquidity": 1060304.90745
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:305:      "liquidity": 1060304.90745
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:313:      "liquidity": 20114.46107
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:321:      "liquidity": 20114.46107
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:329:      "liquidity": 126202.31955
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:337:      "liquidity": 126202.31955
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:345:      "liquidity": 235104.84677
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:353:      "liquidity": 235104.84677
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:361:      "liquidity": 11305.88716
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:369:      "liquidity": 11305.88716
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:377:      "liquidity": 264032.49036
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:385:      "liquidity": 264032.49036
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:393:      "liquidity": 263348.98151
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:401:      "liquidity": 263348.98151
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:409:      "liquidity": 261159.26802
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:417:      "liquidity": 261159.26802
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:425:      "liquidity": 254349.27936
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:433:      "liquidity": 254349.27936
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:441:      "liquidity": 2037756.83557
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:449:      "liquidity": 2037756.83557
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:457:      "liquidity": 932577.8749
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:465:      "liquidity": 932577.8749
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:473:      "liquidity": 224877.2591
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:481:      "liquidity": 224877.2591
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:489:      "liquidity": 229575.0683
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:497:      "liquidity": 229575.0683
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:505:      "liquidity": 230317.22317
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:513:      "liquidity": 230317.22317
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:521:      "liquidity": 106648.54169
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:529:      "liquidity": 106648.54169
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:537:      "liquidity": 273923.87371
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:545:      "liquidity": 273923.87371
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:553:      "liquidity": 28360.4027
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:561:      "liquidity": 28360.4027
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:569:      "liquidity": 50104.03119
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:577:      "liquidity": 50104.03119
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:585:      "liquidity": 19018.2235
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:593:      "liquidity": 19018.2235
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:601:      "liquidity": 57113.1645
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:609:      "liquidity": 57113.1645
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:617:      "liquidity": 37124.63578
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:625:      "liquidity": 37124.63578
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:633:      "liquidity": 160255.89894
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:641:      "liquidity": 160255.89894
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:649:      "liquidity": 712063.63382
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:657:      "liquidity": 712063.63382
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:665:      "liquidity": 32042.37575
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:673:      "liquidity": 32042.37575
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:681:      "liquidity": 12080.0567
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:689:      "liquidity": 12080.0567
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:697:      "liquidity": 18374.7123
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:705:      "liquidity": 18374.7123
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:713:      "liquidity": 24067.0487
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:721:      "liquidity": 24067.0487
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:729:      "liquidity": 68048.01
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:737:      "liquidity": 68048.01
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:745:      "liquidity": 545708.38899
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:753:      "liquidity": 545708.38899
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:761:      "liquidity": 131890.71101
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:769:      "liquidity": 131890.71101
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:777:      "liquidity": 682091.28463
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:785:      "liquidity": 682091.28463
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:793:      "liquidity": 60848.42802
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:801:      "liquidity": 60848.42802
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:809:      "liquidity": 500650.92021
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:817:      "liquidity": 500650.92021
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:825:      "liquidity": 213803.47197
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:833:      "liquidity": 213803.47197
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:841:      "liquidity": 195522.71143
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:849:      "liquidity": 195522.71143
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:857:      "liquidity": 252506.9759
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:865:      "liquidity": 252506.9759
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:873:      "liquidity": 98128.5677
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:881:      "liquidity": 98128.5677
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:889:      "liquidity": 17709.75858
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:897:      "liquidity": 17709.75858
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:905:      "liquidity": 83004.9955
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:913:      "liquidity": 83004.9955
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:921:      "liquidity": 942961.23425
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:929:      "liquidity": 942961.23425
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:937:      "liquidity": 2234883.90448
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:945:      "liquidity": 2234883.90448
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:953:      "liquidity": 27286.4523
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:961:      "liquidity": 27286.4523
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:969:      "liquidity": 183743.69383
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:977:      "liquidity": 183743.69383
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:985:      "liquidity": 326842.09566
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:993:      "liquidity": 326842.09566
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:1001:      "liquidity": 338222.36908
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:1009:      "liquidity": 338222.36908
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:1017:      "liquidity": 379237.77073
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:1025:      "liquidity": 379237.77073
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:1033:      "liquidity": 463993.03584
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:1041:      "liquidity": 463993.03584
+/home/z/my-project/mini-services/polymarket-bot/data/vector_index.json:1049:      "liquidity": 354108.36733
+
+[Showing results with pagination = limit: 250]

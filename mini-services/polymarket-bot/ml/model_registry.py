@@ -114,6 +114,107 @@ class ModelRegistry:
             "versions": [v.to_dict() for v in self.versions],
         }
 
+    # ── T8: Version lineage inspection + operator-initiated rollback ──────────
+    # Additive surface — no existing method altered. ``list_versions`` returns
+    # the full lineage with metrics; ``rollback`` re-points ``active_version``
+    # to a previously registered version. Both are consumed by the new
+    # ``ml/routes.py`` HTTP surface (``GET /api/ml/versions`` and
+    # ``POST /api/ml/rollback``).
+
+    def list_versions(self) -> list[dict[str, Any]]:
+        """
+        Return every registered model version with its full metric payload,
+        newest-first (the order in which ``register_version`` inserts).
+
+        Each entry is the :meth:`ModelVersionRecord.to_dict` output enriched
+        with an ``is_active`` flag so callers can immediately identify the
+        currently promoted version without a separate ``active_version``
+        lookup. This is the read-side counterpart to ``rollback`` and is
+        surfaced verbatim by ``GET /api/ml/versions``.
+
+        Returns:
+            list[dict]: One dict per registered version. Never ``None``;
+            empty only when the registry has never been seeded (which, by
+            construction in ``_load_from_disk``, cannot happen — the
+            baseline ``v1.0.0`` is always present).
+        """
+        return [
+            {**v.to_dict(), "is_active": v.version == self.active_version}
+            for v in self.versions
+        ]
+
+    def rollback(self, version: str) -> bool:
+        """
+        Roll the active model version back to a previously registered version.
+
+        Looks up ``version`` in the registered lineage. If found, sets
+        ``active_version`` to it, persists the change to disk via
+        :meth:`_save_to_disk`, and returns ``True``. If the version is not
+        registered, returns ``False`` and leaves all state untouched.
+
+        Semantics & safety notes:
+
+        - The target **must** already be in the registry lineage — rollback
+          cannot resurrect an un-registered or pruned version. This is the
+          "if it exists" guard from the T8 contract.
+        - A rollback to a ``REJECTED`` model is permitted (operator-explicit
+          override) but emits a ``WARNING`` log so the safety-gate bypass
+          is observable in the audit trail. ``register_version`` blocks
+          *automatic* promotion of rejected models; ``rollback`` is the
+          human-in-the-loop escape hatch.
+        - This method only re-points the registry's ``active_version``
+          pointer and persists the JSON registry. It does **NOT** swap the
+          in-memory ensemble weights / calibrated estimators — that is the
+          responsibility of the model loader / training orchestrator, which
+          reads ``active_version`` on its next reload cycle. The two-step
+          contract (re-point → reload) is intentional: it keeps the
+          registry a pure metadata store with no dependency on the heavy
+          ML objects, mirroring the existing ``register_version`` design.
+
+        Args:
+            version: Target version string (e.g. ``"v1.155.0"``). Must
+                match a previously registered ``ModelVersionRecord.version``.
+
+        Returns:
+            bool: ``True`` if the active version was (or already is) set to
+            ``version``; ``False`` if ``version`` is not in the lineage.
+        """
+        target = next((v for v in self.versions if v.version == version), None)
+        if target is None:
+            log.warning(
+                "[model_registry] ❌ Rollback FAILED: version %s not found "
+                "in registry lineage (%d versions registered)",
+                version, len(self.versions),
+            )
+            return False
+
+        previous = self.active_version
+        if previous == version:
+            log.info(
+                "[model_registry] ℹ️ Rollback no-op: version %s is already active",
+                version,
+            )
+            return True
+
+        if target.status == "REJECTED":
+            log.warning(
+                "[model_registry] ⚠️ Rollback to REJECTED model %s "
+                "(Brier=%.4f, AUC=%.4f) — safety gate bypass is "
+                "operator-explicit",
+                version, target.brier_score, target.roc_auc,
+            )
+
+        self.active_version = version
+        self._save_to_disk()
+        log.info(
+            "[model_registry] ⏪ Rolled back active_version: %s → %s "
+            "(Brier=%.4f, AUC=%.4f, ECE=%.4f, Sharpe=%.2f, n_samples=%d, status=%s)",
+            previous, version,
+            target.brier_score, target.roc_auc, target.ece,
+            target.sharpe_ratio, target.n_samples, target.status,
+        )
+        return True
+
     def _save_to_disk(self) -> None:
         REGISTRY_FILE.parent.mkdir(parents=True, exist_ok=True)
         try:
