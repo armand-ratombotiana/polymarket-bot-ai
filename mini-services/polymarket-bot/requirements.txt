@@ -1,9 +1,9 @@
 # Polymarket Bot — Python Dependencies
 
 # ── API Server ────────────────────────────────────────────────────────────────
-fastapi>=0.111.0,<1.0.0
-uvicorn[standard]>=0.29.0,<1.0.0
-python-multipart>=0.0.9
+fastapi>=0.141.1,<1.0.0
+uvicorn[standard]>=0.52.4,<1.0.0
+python-multipart>=0.0.32
 
 # ── Rate limiting (slowapi — FastAPI/Starlette rate-limit middleware) ─────────
 # W10-4: per-route rate limits (120/min read, 30/min write, 5/min heavy) with a
