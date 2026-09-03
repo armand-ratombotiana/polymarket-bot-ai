@@ -18,6 +18,15 @@ from dataclasses import dataclass
 
 from config import settings
 from core.book_poller import book_poller
+# V2 — Capital allocator sizing. The allocator is now the single source
+# of truth for position size in `_ml_signal`; the previous inline Kelly
+# sizing is preserved as a comment at the call site (see "Keep old Kelly
+# as comment" in the V2 task spec). The allocator is a pure, stateless,
+# synchronous function with no import-time side effects, so a top-level
+# import here is safe (unlike `core.decision_ledger` /
+# `core.market_discovery` which remain lazy-imported inside methods to
+# defer their DB / singleton initialization).
+from core.capital_allocator import allocate_capital
 from core.clob_client import OrderArgs
 from core.data_store import BANKROLL_BASELINE, OrderBook, Side, store
 from core.gamma_client import gamma_client
@@ -141,9 +150,9 @@ class SignalTraderStrategy(BaseStrategy):
         # U9 — Observability: best-effort scan telemetry (additive; never breaks the scan).
         try:
             from core.observability import record_metric
-            record_metric("strategy", "signal_trader.evaluations", len(catalog_items))
-            record_metric("strategy", "signal_trader.signals", len(signals))
-            record_metric("strategy", "signal_trader.rejected", len(catalog_items) - len(signals))
+            asyncio.create_task(record_metric("strategy", "signal_trader.evaluations", len(catalog_items)))
+            asyncio.create_task(record_metric("strategy", "signal_trader.signals", len(signals)))
+            asyncio.create_task(record_metric("strategy", "signal_trader.rejected", len(catalog_items) - len(signals)))
         except: pass
 
         if not signals:
@@ -336,9 +345,54 @@ class SignalTraderStrategy(BaseStrategy):
         kelly_f = max(0.0, kelly_numerator / max(payout_ratio, 0.01))
         kelly_f = min(0.3, kelly_f * KELLY_FRACTION)  # capped at 30% max
 
-        # Scale against the USD 100 operating capital, hard-capped by the
-        # per-market ceiling ($3) so Kelly never overrides dollar limits.
-        size_usdc = max(0.5, min(float(MAX_POSITION_PER_MARKET), BANKROLL_BASELINE * kelly_f))
+        # V2 — Capital allocator sizing (replaces the inline Kelly below).
+        # The allocator is the single source of truth for position size,
+        # combining the Michaelis-Menten saturating edge curve with
+        # smoothstep / saturating multipliers for confidence, calibration
+        # (Brier), drawdown, existing exposure, performance, and book
+        # liquidity. Returns 0.0 when any safety gate trips (no edge, no
+        # liquidity, MDD breach, concentration breach, confidence below
+        # floor) — in that case we record a rejection in the decision
+        # ledger and bail so no order is submitted for an un-sized signal.
+        #
+        # OLD inline Kelly sizing — preserved as a comment per V2 spec
+        # (do NOT remove; kept for diff-ability and as a fallback
+        # reference if the allocator ever needs to be bypassed):
+        #   size_usdc = max(0.5, min(float(MAX_POSITION_PER_MARKET), BANKROLL_BASELINE * kelly_f))
+        size_usdc = allocate_capital(
+            strategy=self.name,
+            edge=kelly_numerator,
+            confidence=confidence,
+            liquidity={
+                'best_bid_size': book.bids[0].size if book.bids else 0,
+                'best_ask_size': book.asks[0].size if book.asks else 0,
+                'mid': mid,
+            },
+            existing_exposure=store.positions.get(
+                token_id,
+                type(store.positions.get(token_id, None)).__new__(
+                    type(store.positions.get(token_id, None))
+                ) if token_id in store.positions else None,
+            ).total_invested if token_id in store.positions else 0.0,
+            drawdown=max(0.0, store.peak_equity - (BANKROLL_BASELINE + store.daily_pnl)),
+            strategy_performance={},
+        )
+
+        # V2 — Allocator-zero rejection path. When the allocator returns 0
+        # the signal is not actionable under the current portfolio
+        # conditions (no edge, no liquidity, MDD breach, existing-exposure
+        # breach, sub-floor confidence, etc.). Record the rejection in the
+        # decision ledger so the originating PREDICTION chain ends in a
+        # documented "no trade" verdict rather than silently dropping, then
+        # bail. The `<= 0.0` guard also catches any negative sentinel a
+        # buggy allocator might emit; the canonical rejection sentinel is
+        # exactly `0.0`.
+        if size_usdc <= 0.0:
+            self._emit_rejection(
+                token_id, dec_id, kelly_numerator, confidence,
+                "capital_allocator_zero", mid,
+            )
+            return None
 
         reason_str = f"ML Prob={p_yes:.1%} (Kelly {kelly_f*100:.1f}%, edge={kelly_numerator*100:.1f}%)"
 

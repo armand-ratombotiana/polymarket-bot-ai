@@ -128,6 +128,26 @@ class SettlementEngine:
                     f"🏆 Settlement: {slug} YES -> {'WINNER ($1.00)' if resolved_yes else '$0.00'} | PnL: ${pnl:+.2f}"
                 )
 
+                # V11 — Mirror the settled YES position into the closed-positions
+                # journal so the round-trip is queryable for attribution /
+                # post-hoc analytics. Wrapped in try/except so a journal hiccup
+                # can never break the trading pipeline.
+                try:
+                    from core.closed_positions import closed_positions
+                    from ml.model import ml_model
+                    await closed_positions.record_closed_position(
+                        token_id=yes_token,
+                        strategy=getattr(pos_yes, 'strategy', 'settlement'),
+                        entry_price=pos_yes.avg_entry_price,
+                        exit_price=1.0 if resolved_yes else 0.0,
+                        shares=shares,
+                        pnl=pnl,
+                        holding_seconds=time.time() - getattr(pos_yes, 'opened_at', time.time()),
+                        model_version=getattr(ml_model, '_last_trained', 'unknown'),
+                    )
+                except Exception:
+                    pass
+
             # 2. Settle NO token (if present)
             if no_token:
                 pos_no = store.positions.get(no_token)
@@ -164,6 +184,25 @@ class SettlementEngine:
                     await store.log_event(
                         f"🏆 Settlement: {slug} NO -> {'WINNER ($1.00)' if resolved_no else '$0.00'} | PnL: ${pnl_no:+.2f}"
                     )
+
+                    # V11 — Mirror the settled NO position into the closed-positions
+                    # journal (mirrors the YES branch above). Wrapped in try/except
+                    # so a journal hiccup can never break the trading pipeline.
+                    try:
+                        from core.closed_positions import closed_positions
+                        from ml.model import ml_model
+                        await closed_positions.record_closed_position(
+                            token_id=no_token,
+                            strategy=getattr(pos_no, 'strategy', 'settlement'),
+                            entry_price=pos_no.avg_entry_price,
+                            exit_price=1.0 if resolved_no else 0.0,
+                            shares=shares_no,
+                            pnl=pnl_no,
+                            holding_seconds=time.time() - getattr(pos_no, 'opened_at', time.time()),
+                            model_version=getattr(ml_model, '_last_trained', 'unknown'),
+                        )
+                    except Exception:
+                        pass
 
         self._settled_tokens.add(yes_token)
         if no_token:

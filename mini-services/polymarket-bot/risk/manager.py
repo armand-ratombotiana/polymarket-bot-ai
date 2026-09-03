@@ -126,6 +126,51 @@ class InstitutionalRiskEngine:
     async def check_order(self, order: Order) -> tuple[bool, str]:
         """
         Validate order against all institutional risk constraints before submission.
+
+        On any rejection (any ``return False, reason`` path inside the
+        delegated ``_check_order_impl``), records a counterfactual shadow
+        trade via ``core.shadow_trading.record_shadow_trade`` so the shadow
+        trading journal captures "what would have been traded" entries for
+        every risk-rejected order (God Mode §75). The recording is
+        fire-and-forget (``asyncio.create_task``) and wrapped in
+        ``try/except: pass`` so it can never alter the rejection return
+        value or block the caller — the trading pipeline never blocks on
+        shadow-journal writes (mirrors the contract on
+        ``core.decision_ledger.record`` and
+        ``core.closed_positions.record_closed_position``).
+        """
+        result = await self._check_order_impl(order)
+        if not result[0]:
+            # Order rejected — record counterfactual shadow trade so the
+            # shadow journal captures "what would have been traded" entries
+            # on every risk rejection. Fire-and-forget: schedules the
+            # coroutine on the event loop without blocking the return path.
+            try:
+                from core.shadow_trading import record_shadow_trade
+                import asyncio
+                asyncio.create_task(record_shadow_trade(
+                    decision_id=getattr(order, 'decision_id', ''),
+                    token_id=order.token_id,
+                    strategy=order.strategy,
+                    side=order.side.value if hasattr(order.side, 'value') else str(order.side),
+                    price=order.price,
+                    size=order.size,
+                    predicted_edge=0.0,
+                    confidence=0.0,
+                ))
+            except Exception:
+                pass
+        return result
+
+    async def _check_order_impl(self, order: Order) -> tuple[bool, str]:
+        """
+        Validate order against all institutional risk constraints before submission.
+
+        Internal implementation — the public ``check_order`` wrapper delegates
+        here and records a shadow trade on any rejection path. The existing
+        rejection logic is preserved verbatim under this private name so the
+        shadow-trade recording could be added as a single additive wrapper
+        (no existing gate logic modified).
         """
         async with self._lock:
             # 0. Shadow mode gate: shadow = evaluation only, no orders at all.
@@ -249,6 +294,25 @@ class InstitutionalRiskEngine:
                     ))
                     if (group_exp + order_cost) > MAX_CORRELATED_EXPOSURE:
                         return False, f"Correlated exposure cap exceeded (${group_exp + order_cost:.2f} > ${MAX_CORRELATED_EXPOSURE:.2f})"
+
+            # 6e. Mark-to-market exposure cap ($25 max). The section-5 cap
+            # above is enforced on cost-basis exposure (`store.total_exposure()`),
+            # which does NOT move when an open position's market value rises.
+            # A profitable position can therefore silently widen true risk past
+            # the $25 ceiling simply because its mark has appreciated. This gate
+            # re-checks the same $25 cap on a mark-to-market basis so unrealized
+            # gains cannot outflank the cap. Best-effort: if
+            # `core.portfolio.compute_mark_to_market_exposure` is unavailable or
+            # raises, the gate is skipped (fail-open) — section 5 still enforces
+            # the cost-basis $25 cap, so coverage never regresses below baseline.
+            try:
+                from core.portfolio import compute_mark_to_market_exposure
+                mtm = await compute_mark_to_market_exposure()
+                mtm_total = mtm.get('total_exposure_mark', 0.0)
+                if mtm_total + order_cost > Decimal('25.0'):
+                    return False, f'Mark-to-market exposure ${mtm_total:.2f} + order ${order_cost:.2f} exceeds $25.00 cap'
+            except:
+                pass
 
             # 7. Max Open Positions Count (8) — only active positions count
             if order.side == Side.BUY:

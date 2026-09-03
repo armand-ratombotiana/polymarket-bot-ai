@@ -90,7 +90,7 @@ class MarketMakerStrategy(BaseStrategy):
                 # U9 — Observability: count markets with at least one resting quote (additive).
                 try:
                     from core.observability import record_metric
-                    record_metric("strategy", "market_maker.quotes_active", sum(1 for q in self._quotes.values() if any(q.get(s) for s in ["BUY","SELL"])))
+                    asyncio.create_task(record_metric("strategy", "market_maker.quotes_active", sum(1 for q in self._quotes.values() if any(q.get(s) for s in ["BUY","SELL"]))))
                 except: pass
             except Exception as e:
                 log.error("[market_maker] Error in quote loop: %s", e)

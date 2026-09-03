@@ -120,9 +120,9 @@ class ArbScannerStrategy(BaseStrategy):
         # U9 — Observability: best-effort scan telemetry (additive; never breaks the scan).
         try:
             from core.observability import record_metric
-            record_metric("strategy", "arb_scanner.pairs_scanned", len(self._pairs))
-            record_metric("strategy", "arb_scanner.opportunities", len(opportunities))
-            record_metric("strategy", "arb_scanner.rejected", len(self._pairs) - len(opportunities))
+            asyncio.create_task(record_metric("strategy", "arb_scanner.pairs_scanned", len(self._pairs)))
+            asyncio.create_task(record_metric("strategy", "arb_scanner.opportunities", len(opportunities)))
+            asyncio.create_task(record_metric("strategy", "arb_scanner.rejected", len(self._pairs) - len(opportunities)))
         except: pass
 
         if opportunities:

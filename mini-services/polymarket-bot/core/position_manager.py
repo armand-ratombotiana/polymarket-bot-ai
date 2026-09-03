@@ -99,8 +99,50 @@ class PositionManager:
                     size=pos.yes_shares,
                     strategy="position_manager_tp",
                 )
-                await paper_sim.create_order(exit_order)
-                managed.active_exit_order_id = exit_order.order_id
+                # V3 — Risk gate: exit orders must clear the same institutional
+                # risk constraints as entries. Previously exits bypassed
+                # risk_manager.check_order entirely, letting TP/SL closes slip
+                # past circuit breakers (kill switch, daily loss stop, max
+                # drawdown, observation-only mode, weekly loss stop). The gate
+                # is best-effort: a rejection (or any unexpected exception) is
+                # logged + audited and the exit order is skipped for this
+                # evaluation cycle (will be retried on the next loop tick if
+                # the trigger still holds).
+                strat = exit_order.strategy
+                try:
+                    from risk.manager import risk_manager
+                    allowed, reason = await risk_manager.check_order(exit_order)
+                    if not allowed:
+                        log.warning(
+                            "[position_manager] 🚫 TP exit order for %s rejected by risk gate: %s",
+                            pos.token_id[:12], reason,
+                        )
+                        await audit_logger.log_event(
+                            category="risk",
+                            event_type="EXIT_RISK_GATE_REJECTED",
+                            details=f"TP exit order rejected by risk gate: {reason}",
+                            token_id=pos.token_id,
+                            slug=store.market_slugs.get(pos.token_id),
+                            pnl=pos.realised_pnl,
+                            strategy=strat,
+                        )
+                        continue
+                    # Signature supports strategy + decision_id kwargs (paper/
+                    # simulator.py:create_order). Passing them preserves
+                    # strategy attribution and decision-ledger linkage on the
+                    # resulting paper Order (which the simulator constructs
+                    # internally and would otherwise default to "").
+                    await paper_sim.create_order(
+                        exit_order,
+                        strategy=strat,
+                        decision_id=exit_order.decision_id,
+                    )
+                    managed.active_exit_order_id = exit_order.order_id
+                except Exception as exit_err:
+                    log.warning(
+                        "[position_manager] TP exit submission failed for %s: %s",
+                        pos.token_id[:12], exit_err,
+                    )
 
             # Check Stop-Loss Trigger
             elif mid <= managed.stop_loss_price:
@@ -131,8 +173,50 @@ class PositionManager:
                     size=pos.yes_shares,
                     strategy="position_manager_sl",
                 )
-                await paper_sim.create_order(exit_order)
-                managed.active_exit_order_id = exit_order.order_id
+                # V3 — Risk gate: exit orders must clear the same institutional
+                # risk constraints as entries. Previously exits bypassed
+                # risk_manager.check_order entirely, letting TP/SL closes slip
+                # past circuit breakers (kill switch, daily loss stop, max
+                # drawdown, observation-only mode, weekly loss stop). The gate
+                # is best-effort: a rejection (or any unexpected exception) is
+                # logged + audited and the exit order is skipped for this
+                # evaluation cycle (will be retried on the next loop tick if
+                # the trigger still holds).
+                strat = exit_order.strategy
+                try:
+                    from risk.manager import risk_manager
+                    allowed, reason = await risk_manager.check_order(exit_order)
+                    if not allowed:
+                        log.warning(
+                            "[position_manager] 🚫 SL exit order for %s rejected by risk gate: %s",
+                            pos.token_id[:12], reason,
+                        )
+                        await audit_logger.log_event(
+                            category="risk",
+                            event_type="EXIT_RISK_GATE_REJECTED",
+                            details=f"SL exit order rejected by risk gate: {reason}",
+                            token_id=pos.token_id,
+                            slug=store.market_slugs.get(pos.token_id),
+                            pnl=pos.realised_pnl,
+                            strategy=strat,
+                        )
+                        continue
+                    # Signature supports strategy + decision_id kwargs (paper/
+                    # simulator.py:create_order). Passing them preserves
+                    # strategy attribution and decision-ledger linkage on the
+                    # resulting paper Order (which the simulator constructs
+                    # internally and would otherwise default to "").
+                    await paper_sim.create_order(
+                        exit_order,
+                        strategy=strat,
+                        decision_id=exit_order.decision_id,
+                    )
+                    managed.active_exit_order_id = exit_order.order_id
+                except Exception as exit_err:
+                    log.warning(
+                        "[position_manager] SL exit submission failed for %s: %s",
+                        pos.token_id[:12], exit_err,
+                    )
 
     async def start(self) -> None:
         if self._running:

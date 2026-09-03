@@ -166,6 +166,16 @@ class DecisionLedger:
             # Skip silently — a missing decision_id means the caller didn't
             # participate in the unified ledger (e.g. legacy / manual orders).
             return
+        # V14: auto-stamp ``model_version`` on every PREDICTION stage event
+        # so the audit trail records which ML model produced each
+        # prediction. A caller-supplied ``model_version`` kwarg (e.g. for
+        # replay / back-fill of historical events) is preserved verbatim.
+        # Resolution is lazy + best-effort: if the registry can't be
+        # imported (e.g. read-only sandbox where ``_load_from_disk`` would
+        # raise ``PermissionError``), the helper returns ``"unknown"`` and
+        # the trade-decision pipeline keeps flowing.
+        if stage == STAGE_PREDICTION and "model_version" not in data:
+            data["model_version"] = _resolve_active_model_version()
         ts = time.time()
         payload = json.dumps(data, default=str) if data else None
 
@@ -363,6 +373,75 @@ class DecisionLedger:
 
         return await asyncio.to_thread(_fetch)
 
+    async def get_prediction_history(
+        self, token_id: str, limit: int = 10
+    ) -> list[dict[str, Any]]:
+        """
+        Return the most recent PREDICTION-stage events for ``token_id``.
+
+        Surfaces the model-version lineage per token: every row carries the
+        same shape as :meth:`get_chain_by_token` (with the decoded ``data``
+        payload) PLUS a top-level convenience field ``model_version`` lifted
+        out of ``data`` for fast dashboard / audit filtering without a
+        second ``data["model_version"]`` lookup.
+
+        Pre-V14 rows (or callers that bypassed the auto-stamp by passing
+        ``model_version=None``) surface with ``model_version=None`` rather
+        than being filtered out — preserving a complete prediction history
+        for the token even across the V14 cutover.
+
+        Args:
+            token_id: Polymarket condition token id to filter on. An empty
+                ``token_id`` returns ``[]`` (mirrors the empty-input guard
+                used by :meth:`get_chain_by_token`).
+            limit: Maximum number of PREDICTION events to return. Defaults
+                to 10 (the recent-predictions use case surfaced by the
+                operator dashboard). Clamped to ``int`` for SQL safety.
+
+        Returns:
+            list[dict]: Most-recent-first PREDICTION events. Empty list on
+            any persistence error or when no PREDICTION events exist for
+            ``token_id``.
+        """
+        if not token_id:
+            return []
+
+        def _fetch() -> list[dict[str, Any]]:
+            try:
+                with sqlite3.connect(self._db_path) as conn:
+                    conn.row_factory = sqlite3.Row
+                    cursor = conn.cursor()
+                    cursor.execute(
+                        """
+                        SELECT timestamp, decision_id, stage, token_id,
+                               strategy, pnl, data_json
+                        FROM decision_events
+                        WHERE token_id = ? AND stage = ?
+                        ORDER BY timestamp DESC
+                        LIMIT ?
+                        """,
+                        (token_id, STAGE_PREDICTION, int(limit)),
+                    )
+                    rows = [dict(r) for r in cursor.fetchall()]
+            except Exception as e:
+                log.error(
+                    "[decision_ledger] get_prediction_history failed token=%s: %s",
+                    token_id,
+                    e,
+                )
+                return []
+            for r in rows:
+                r["data"] = _safe_json(r.get("data_json"))
+                # Lift ``model_version`` out of the decoded payload so callers
+                # can filter / group without a second dict lookup. Defaults
+                # to ``None`` when absent (pre-V14 rows or callers that
+                # explicitly passed ``model_version=None``).
+                data = r.get("data") or {}
+                r["model_version"] = data.get("model_version")
+            return rows
+
+        return await asyncio.to_thread(_fetch)
+
 
 # Module-level singleton (mirrors the ``audit_logger`` / ``timescale_db``
 # convention so importers can grab the instance at module import time).
@@ -421,6 +500,48 @@ def _safe_json(raw: str | None) -> Any:
         return json.loads(raw)
     except Exception:
         return None
+
+
+def _resolve_active_model_version() -> str:
+    """
+    Lazily import the ML model registry and return its currently-active
+    version string.
+
+    Returns ``"unknown"`` on ANY failure (import error, missing attribute,
+    registry-init exception, etc.) so callers — chiefly
+    :meth:`DecisionLedger.record` when stamping PREDICTION events — never
+    block the trading pipeline on a registry hiccup.
+
+    Why lazy / per-call (not at module import time):
+
+      - ``core.decision_ledger`` is imported very early in the boot
+        sequence (the singleton ``decision_ledger = DecisionLedger()`` is
+        constructed at module import). Importing ``ml.model_registry``
+        eagerly here would force the registry's disk-backed seed file
+        (``/app/data/model_registry.json``) to be loaded — or, if the
+        file is absent, force ``_load_from_disk`` to call
+        ``register_version("v1.0.0", ...)`` which in turn calls
+        ``_save_to_disk`` (``REGISTRY_FILE.parent.mkdir(...)``). In a
+        read-only sandbox that mkdir raises ``PermissionError`` OUTSIDE
+        the save's try/except — crashing the entire decision_ledger
+        module import. Deferring the import to call time confines the
+        blast radius to a single ``record()`` invocation (which then
+        falls back to ``"unknown"``).
+      - It also avoids an import-cycle risk: ``ml.model_registry`` lives
+        under the ``ml/`` package which itself may transitively import
+        ``core/`` modules in a future refactor.
+    """
+    try:
+        from ml.model_registry import model_registry  # lazy import — avoids
+        # circular-import / read-only-sandbox blast radius at module load.
+        return model_registry.active_version
+    except Exception as e:
+        log.warning(
+            "[decision_ledger] could not resolve active model_version "
+            "(defaulting to 'unknown'): %s",
+            e,
+        )
+        return "unknown"
 
 
 __all__ = [

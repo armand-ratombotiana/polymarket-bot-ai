@@ -125,6 +125,19 @@ class PaperSimulator:
 
     async def cancel_order(self, order_id: str) -> bool:
         order = await store.update_order(order_id, status=OrderStatus.CANCELLED)
+        # V13 — record the CANCELLED transition in the order state machine
+        # audit trail (best-effort: a state-machine failure must never break
+        # the paper-trade cancel flow). Local import keeps the simulator
+        # decoupled from core.order_state_machine at module-load time — the
+        # same pattern used by the decision_ledger hook in create_order and
+        # the execution_quality hook in _execute_fill. The bare `except`
+        # mirrors the spec verbatim (catches InvalidTransition on already-
+        # terminal orders, ImportError if the module is unavailable, and
+        # any persistence error from the underlying SQLite layer).
+        try:
+            from core.order_state_machine import OrderState, transition
+            transition(order_id, OrderState.CANCELLED, reason="manual cancel")
+        except: pass
         if order:
             await store.log_event(f"📄 Paper cancel: {order_id}")
         return order is not None

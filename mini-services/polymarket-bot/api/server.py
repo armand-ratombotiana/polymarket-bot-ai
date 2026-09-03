@@ -2252,3 +2252,16 @@ _register_retention_routes(app)
 from ml.routes import register_routes as _register_ml_version_routes
 
 _register_ml_version_routes(app)
+
+
+# (V12) risk.routes — risk-inspection endpoint (paused-strategy visibility).
+# Additive: appends ``GET /api/risk/strategies/paused`` (returns currently
+# paused strategies from ``risk_manager._strategy_cooldowns`` — the V12
+# spec's ``_paused_strategies`` equivalent — with ``seconds_remaining``,
+# plus the registered-running strategies that are NOT currently paused).
+# Same registration pattern as the ml.routes / shadow_trading /
+# live_safety_gate / retention / capital_allocator blocks above; auth
+# enforced by ``enforce_api_auth`` (path not in ``PUBLIC_PATHS``).
+from risk.routes import register_routes as _register_risk_routes
+
+_register_risk_routes(app)
