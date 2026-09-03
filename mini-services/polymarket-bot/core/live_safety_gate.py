@@ -45,6 +45,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from fastapi import Request
+
 log = logging.getLogger(__name__)
 
 # ── God Mode §82 thresholds ─────────────────────────────────────────────────
@@ -706,8 +708,22 @@ def register_routes(app: Any) -> None:
           restarts. For durable activation, set TRADING_MODE=live and
           LIVE_TRADING_ENABLED=true in .env and restart — the response
           payload carries this guidance.
+
+    Rate limiting (W10-4)
+    ---------------------
+    ``POST /api/live/enable`` is rate-limited at ``3/minute`` — the strictest
+    tier in the W10-4 policy (one-shot escalation, no operator should be
+    able to spam the gate into flipping live mode). The shared ``limiter``
+    singleton is imported lazily from ``api.rate_limit`` (a tiny shared
+    module that exists specifically to break what would otherwise be a
+    circular import between this module and ``api.server``). The
+    ``request: Request`` parameter is required by slowapi's decorator at
+    function-definition time even when the limiter is disabled (e.g. in
+    the test suite).
     """
     from fastapi import HTTPException
+
+    from api.rate_limit import LIVE_ENABLE_LIMIT, limiter
 
     @app.get("/api/live/readiness", tags=["live"])
     async def _live_readiness():
@@ -715,7 +731,8 @@ def register_routes(app: Any) -> None:
         return await check_live_readiness()
 
     @app.post("/api/live/enable", tags=["live"])
-    async def _enable_live(req: "EnableLiveRequest"):
+    @limiter.limit(LIVE_ENABLE_LIMIT)
+    async def _enable_live(request: Request, req: "EnableLiveRequest"):
         """Attempt to enable live trading. Refuses (HTTP 409) if any §82 check fails."""
         if not req.confirm:
             raise HTTPException(

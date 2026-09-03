@@ -1,0 +1,209 @@
+# Release workflow — Polymarket Trading Bot Platform
+#
+# Triggered by pushing a semantic-version tag (`v*.*.*`, e.g. v1.2.3, v0.3.0-rc1).
+#
+# What this workflow does:
+#   1. Builds the frontend production bundle (Next.js standalone).
+#   2. Builds the backend Python wheel (no Dockerfile in repo — builds wheel only).
+#   3. Creates a GitHub Release with auto-generated changelog.
+#
+# What it does NOT do:
+#   - Does NOT publish to any registry (npm, PyPI, GHCR).
+#   - Does NOT push Docker images anywhere.
+# This is a build-and-release pipeline for a public repo with no secrets.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write # required to create a GitHub Release + upload assets
+
+jobs:
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Job 1: Build frontend production bundle
+  # ─────────────────────────────────────────────────────────────────────────────
+  build-frontend:
+    name: Build frontend
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history — release notes use commit range
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: latest
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: bun
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build (Next.js standalone)
+        run: bun run build
+        env:
+          NEXT_TELEMETRY_DISABLED: "1"
+
+      - name: Verify standalone output
+        run: |
+          test -f .next/standalone/server.js || { \
+            echo "::error::Build did not produce .next/standalone/server.js"; \
+            exit 1; \
+          }
+
+      - name: Tarball the standalone build
+        run: |
+          tar -czf polymarket-frontend-${{ github.ref_name }}.tar.gz \
+            -C .next standalone
+          tar -czf polymarket-static-${{ github.ref_name }}.tar.gz \
+            -C .next static
+          tar -czf polymarket-public-${{ github.ref_name }}.tar.gz \
+            public
+
+      - name: Upload frontend build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-release-${{ github.ref_name }}
+          path: |
+            polymarket-frontend-${{ github.ref_name }}.tar.gz
+            polymarket-static-${{ github.ref_name }}.tar.gz
+            polymarket-public-${{ github.ref_name }}.tar.gz
+          if-no-files-found: error
+          retention-days: 30
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Job 2: Build backend (Python wheel)
+  # ─────────────────────────────────────────────────────────────────────────────
+  build-backend:
+    name: Build backend wheel
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: mini-services/polymarket-bot
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            mini-services/polymarket-bot/requirements.txt
+            mini-services/polymarket-bot/pyproject.toml
+
+      - name: Install build tooling
+        run: |
+          python -m pip install --upgrade pip
+          pip install build wheel
+
+      - name: Build wheel
+        run: |
+          # If pyproject.toml defines a PEP 517 build backend, `python -m build`
+          # produces a wheel under dist/. If not, fall back to a plain wheel
+          # build of any top-level package. Either way, we collect artifacts
+          # under dist/.
+          if [ -f pyproject.toml ]; then
+            python -m build --wheel --outdir dist/
+          else
+            echo "::warning::No pyproject.toml found — skipping wheel build"
+            mkdir -p dist
+          fi
+
+      - name: List build artifacts
+        if: always()
+        run: |
+          echo "Backend dist/ contents:"
+          ls -la dist/ || echo "(no dist/ produced)"
+
+      - name: Upload backend wheel artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-release-${{ github.ref_name }}
+          path: mini-services/polymarket-bot/dist/
+          if-no-files-found: warn
+          retention-days: 30
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Job 3: Create GitHub Release (depends on both builds succeeding)
+  # ─────────────────────────────────────────────────────────────────────────────
+  release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: [build-frontend, build-backend]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history — for changelog generation
+
+      - name: Download frontend artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-release-${{ github.ref_name }}
+          path: release-assets/frontend
+
+      - name: Download backend artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: backend-release-${{ github.ref_name }}
+          path: release-assets/backend
+        continue-on-error: true # backend wheel is best-effort (no pyproject → no wheel)
+
+      - name: Flatten release assets
+        run: |
+          mkdir -p release-assets/staged
+          find release-assets -type f \( \
+            -name "*.tar.gz" -o -name "*.whl" -o -name "*.tar.bz2" \
+          \) -exec cp -v {} release-assets/staged/ \;
+          ls -la release-assets/staged/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          generate_release_notes: true
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          files: release-assets/staged/*
+          body: |
+            ## Polymarket Trading Bot Platform — ${{ github.ref_name }}
+
+            ### Artifacts
+            - **Frontend standalone**: `polymarket-frontend-${{ github.ref_name }}.tar.gz`
+            - **Frontend static assets**: `polymarket-static-${{ github.ref_name }}.tar.gz`
+            - **Public assets**: `polymarket-public-${{ github.ref_name }}.tar.gz`
+            - **Backend wheel**: `polymarket_bot-*.whl` (if present)
+
+            ### Install
+            ```bash
+            # Frontend
+            tar -xzf polymarket-frontend-${{ github.ref_name }}.tar.gz
+            node standalone/server.js
+
+            # Backend
+            pip install polymarket_bot-*.whl
+            ```
+
+            ---
+            *Built from commit ${{ github.sha }}*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

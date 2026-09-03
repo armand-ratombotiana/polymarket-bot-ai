@@ -1,0 +1,45 @@
+# ── Python build artefacts ───────────────────────────────────────────────────
+__pycache__
+**/__pycache__
+*.pyc
+*.pyo
+*.pyd
+
+# ── Runtime data (mounted as a volume in compose; never bake into image) ──────
+data/
+data/**
+
+# ── Test suite (excluded from production image) ──────────────────────────────
+tests/
+tests/**
+.pytest_cache
+.coverage
+htmlcov/
+
+# ── Logs & runtime ────────────────────────────────────────────────────────────
+*.log
+server.log
+
+# ── VCS / metadata ───────────────────────────────────────────────────────────
+.git
+.gitignore
+
+# ── Local env (NEVER bake secrets) ────────────────────────────────────────────
+.env
+.env.local
+.env.*.local
+
+# ── IDE / OS ──────────────────────────────────────────────────────────────────
+.vscode
+.idea
+.DS_Store
+Thumbs.db
+
+# ── Docker / Compose (don't ship compose inside image) ───────────────────────
+Dockerfile
+.dockerignore
+
+# ── Misc project files not needed at runtime ─────────────────────────────────
+README.md
+CONTRIBUTING.md
+*.md

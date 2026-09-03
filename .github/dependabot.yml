@@ -1,0 +1,112 @@
+# Dependabot configuration — Polymarket Trading Bot Platform
+#
+# Monitors three ecosystems on a weekly schedule, opening at most 5 PRs
+# at a time per ecosystem (the GitHub default; we cap to 5 total by
+# setting `open-pull-requests-limit: 5` on each).
+#
+# Ecosystems monitored:
+#   1. npm          — root project (Next.js 16, React 19, etc.)
+#   2. pip          — Python polymarket-bot service
+#   3. github-actions — workflow action versions (actions/checkout@v4, etc.)
+#
+# All updates go through PRs — nothing auto-merged (safe default for a
+# public repo with no secrets).
+
+version: 2
+
+updates:
+  # ── npm: root monorepo (frontend) ───────────────────────────────────────────
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: America/New_York
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "frontend"
+    commit-message:
+      prefix: "deps(npm)"
+      include: "scope"
+    # Group minor + patch updates to keep PR noise low; major bumps get
+    # individual PRs (default Dependabot behaviour).
+    groups:
+      react-ecosystem:
+        patterns:
+          - "react"
+          - "react-dom"
+          - "@types/react*"
+      radix-ui:
+        patterns:
+          - "@radix-ui/*"
+      tailwind:
+        patterns:
+          - "tailwindcss"
+          - "@tailwindcss/*"
+          - "tw-animate-css"
+          - "tailwindcss-animate"
+      tanstack:
+        patterns:
+          - "@tanstack/*"
+      testing:
+        patterns:
+          - "vitest"
+          - "@testing-library/*"
+          - "jsdom"
+    # Keep dev tooling fresh but don't propose changes to peer-pinned
+    # framework majors automatically — they need a coordinated upgrade.
+    ignore:
+      - dependency-name: "next"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "react"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "react-dom"
+        update-types: ["version-update:semver-major"]
+
+  # ── pip: polymarket-bot Python service ──────────────────────────────────────
+  - package-ecosystem: pip
+    directory: /mini-services/polymarket-bot
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: America/New_York
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "backend"
+    commit-message:
+      prefix: "deps(pip)"
+      include: "scope"
+    groups:
+      fastapi-stack:
+        patterns:
+          - "fastapi"
+          - "uvicorn*"
+          - "python-multipart"
+      ml-stack:
+        patterns:
+          - "scikit-learn"
+          - "numpy"
+          - "lightgbm"
+      pydantic:
+        patterns:
+          - "pydantic*"
+
+  # ── github-actions: workflow action versions ───────────────────────────────
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: America/New_York
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "ci"
+    commit-message:
+      prefix: "deps(ci)"
+      include: "scope"

@@ -1,0 +1,112 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# Polymarket Bot Platform — full stack orchestration.
+#
+# Services:
+#   - frontend : Next.js 16 standalone (Bun runtime)            :3000
+#   - backend  : FastAPI / uvicorn (Python 3.12)                :8080
+#   - caddy    : reverse-proxy + XTransformPort gateway         :81
+#
+# Volumes (persisted):
+#   - backend-data  → /app/data              (SQLite DBs, model.pkl, vector_store.npz, …)
+#   - caddy-data    → /data                  (Caddy cert + state store)
+#   - caddy-config  → /config                (Caddy autosave config)
+#
+# Usage:
+#   docker compose build
+#   docker compose up -d
+#   docker compose logs -f
+#
+# Production override: replace `./Caddyfile` mount with `./Caddyfile.prod`
+# and set the server name (`yourdomain.com`) accordingly.
+# ──────────────────────────────────────────────────────────────────────────────
+
+services:
+  # ── Frontend ────────────────────────────────────────────────────────────────
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: polymarket-frontend
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    env_file:
+      - .env
+    environment:
+      # Override the SQLite path so the production DB lives on a volume.
+      # (Local dev uses /home/z/my-project/db/custom.db; containers can't see that.)
+      - NODE_ENV=production
+      - NEXT_TELEMETRY_DISABLED=1
+      - PORT=3000
+      - HOSTNAME=0.0.0.0
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - polymarket-net
+
+  # ── Backend ─────────────────────────────────────────────────────────────────
+  backend:
+    build:
+      context: ./mini-services/polymarket-bot
+      dockerfile: Dockerfile
+    container_name: polymarket-backend
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    env_file:
+      - ./mini-services/polymarket-bot/.env
+    environment:
+      # Force data dir inside the container; matches volume mount below.
+      - MARKET_DB_PATH=/app/data/market.db
+      - AUDIT_DB_PATH=/app/data/audit_trail.db
+      - STORE_STATE_PATH=/app/data/store_state.json
+      - KILL_SWITCH_PATH=/app/data/kill_switch
+      - KILL_SWITCH_REASON_PATH=/app/data/kill_switch_reason
+      - MODEL_REGISTRY_PATH=/app/data/model_registry.json
+      - VECTOR_STORE_PATH=/app/data/vector_store.npz
+      - MODEL_PATH=/app/data/model.pkl
+      - DECISION_LEDGER_DB_PATH=/app/data/decision_ledger.db
+    volumes:
+      # Persist all SQLite DBs + model artefacts + store_state across restarts.
+      - backend-data:/app/data
+    networks:
+      - polymarket-net
+
+  # ── Caddy Gateway ───────────────────────────────────────────────────────────
+  # Replicates the dev-time Caddyfile contract: any request carrying
+  # `?XTransformPort=<port>` is forwarded to `backend:<port>`; all other
+  # requests hit the Next.js frontend on :3000.
+  caddy:
+    image: caddy:2-alpine
+    container_name: polymarket-caddy
+    restart: unless-stopped
+    ports:
+      - "81:81"
+      # Uncomment for HTTPS in production:
+      # - "443:443"
+      # - "80:80"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - frontend
+      - backend
+    networks:
+      - polymarket-net
+
+# ── Volumes ──────────────────────────────────────────────────────────────────
+volumes:
+  backend-data:
+    driver: local
+  caddy-data:
+    driver: local
+  caddy-config:
+    driver: local
+
+# ── Network ───────────────────────────────────────────────────────────────────
+networks:
+  polymarket-net:
+    driver: bridge
+    name: polymarket-net

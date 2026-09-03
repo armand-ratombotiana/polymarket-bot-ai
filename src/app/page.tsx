@@ -7,6 +7,23 @@ import { useAudio } from '@/hooks/useAudio'
 import Sidebar, { NavSection } from '@/components/Sidebar'
 import TopStatusBar from '@/components/TopStatusBar'
 import ConfirmationDialog from '@/components/ConfirmationDialog'
+// W10-3 — Panel-level Error Boundary. Wrap each `activeSection` render case
+// in <PanelErrorBoundary> so a render crash in one panel (e.g. malformed API
+// payload causing a TypeError during render) is contained: only the affected
+// panel shows a recoverable fallback; every other sidebar section keeps
+// working. The root-level <ErrorBoundary> in src/app/layout.tsx is the
+// outermost safety net for any error that escapes these per-panel wrappers.
+import PanelErrorBoundary from '@/components/PanelErrorBoundary'
+
+// W10-8 — Framer Motion panel transitions. The page-area is wrapped in
+// `<AnimatePresence mode="wait">` so when `activeSection` changes, the
+// outgoing panel fades out (200ms) before the new panel fades in. This
+// eliminates the abrupt "pop" when switching tabs and matches the
+// existing visual rhythm of the dashboard (which already animates value
+// flashes + skeleton shimmers at ~0.15–1.5s). `FadeIn` is a thin
+// wrapper around `motion.div` that animates only opacity + transform
+// (no layout properties) for GPU-accelerated 60fps transitions.
+import { AnimatePresence, FadeIn } from '@/components/ui/motion'
 
 // Command Center
 import RiskStatusPanel from '@/components/RiskStatusPanel'
@@ -358,9 +375,17 @@ export default function Dashboard() {
 
           {/* ── Page content ─────────────────────────────────────────── */}
           <div className="page-area" aria-live="polite" aria-atomic="false">
+            {/* W10-8 — AnimatePresence (mode="wait") holds the outgoing panel
+                in the DOM until its fade-out (200ms) completes, then mounts
+                the incoming panel which fades in. The `key={activeSection}`
+                on FadeIn is what AnimatePresence uses to detect the swap —
+                without a key change, no exit/enter animation fires. */}
+            <AnimatePresence mode="wait">
+              <FadeIn key={activeSection}>
 
             {/* ── 1. Command Center ──────────────────────────────────── */}
             {activeSection === 'command' && (
+              <PanelErrorBoundary label="Command Center">
               <div className="command-center-layout">
                 <div style={{ gridArea: 'risk', minHeight: 0 }}>
                   <RiskStatusPanel />
@@ -407,10 +432,12 @@ export default function Dashboard() {
                   <MLPanel snapshotMl={snapshot?.ml} />
                 </div>
               </div>
+              </PanelErrorBoundary>
             )}
 
             {/* ── 2. Markets — Live Books ─────────────────────────────── */}
             {activeSection === 'markets-books' && (
+              <PanelErrorBoundary label="Live Order Books">
               <div style={{ height: '100%', overflow: 'hidden' }}>
                 <MarketsPanel
                   books={snapshot.order_books}
@@ -418,20 +445,24 @@ export default function Dashboard() {
                   priceFlashes={priceFlashes}
                 />
               </div>
+              </PanelErrorBoundary>
             )}
 
             {/* ── 3. Markets — Screener ──────────────────────────────── */}
             {activeSection === 'markets-screener' && (
+              <PanelErrorBoundary label="Market Screener">
               <div style={{ height: '100%', overflow: 'hidden' }}>
                 <MarketScreener
                   onSelectMarket={handleSelectMarketForChart}
                   onQuickTrade={(tokenId, slug) => setSelectedMarket({ tokenId, slug })}
                 />
               </div>
+              </PanelErrorBoundary>
             )}
 
             {/* ── 4. Portfolio — Positions ───────────────────────────── */}
             {activeSection === 'portfolio-positions' && (
+              <PanelErrorBoundary label="Positions">
               <div style={{ height: '100%', overflow: 'hidden' }}>
                 <PositionsPanel
                   positions={snapshot.positions}
@@ -441,10 +472,12 @@ export default function Dashboard() {
                   priceFlashes={priceFlashes}
                 />
               </div>
+              </PanelErrorBoundary>
             )}
 
             {/* ── Portfolio — Orders ─────────────────────────────────── */}
             {activeSection === 'portfolio-orders' && (
+              <PanelErrorBoundary label="Open Orders">
               <div style={{ height: '100%', overflow: 'hidden' }}>
                 <OrdersPanel
                   orders={snapshot.open_orders}
@@ -452,17 +485,21 @@ export default function Dashboard() {
                   onCancelAll={handleOpenCancelAllDialog}
                 />
               </div>
+              </PanelErrorBoundary>
             )}
 
             {/* ── Portfolio — Trades ─────────────────────────────────── */}
             {activeSection === 'portfolio-trades' && (
+              <PanelErrorBoundary label="Recent Trades">
               <div style={{ height: '100%', overflow: 'hidden' }}>
                 <TradesPanel trades={snapshot.recent_trades} />
               </div>
+              </PanelErrorBoundary>
             )}
 
             {/* ── 5. Strategies — Registry ──────────────────────────── */}
             {activeSection === 'strategies-registry' && (
+              <PanelErrorBoundary label="Strategy Registry">
               <div className="workstation-split-layout">
                 <div style={{ overflow: 'hidden' }}>
                   <StrategyMatrix />
@@ -471,17 +508,21 @@ export default function Dashboard() {
                   <LeaderboardPanel />
                 </div>
               </div>
+              </PanelErrorBoundary>
             )}
 
             {/* ── 6. Strategies — Arbitrage ─────────────────────────── */}
             {activeSection === 'strategies-arbitrage' && (
+              <PanelErrorBoundary label="Arbitrage Matrix">
               <div style={{ height: '100%', overflow: 'hidden' }}>
                 <ArbitrageMatrixView onSelectMarket={(m) => setChartMarket(m)} />
               </div>
+              </PanelErrorBoundary>
             )}
 
             {/* ── 7. Intelligence — Deep Analysis ───────────────────── */}
             {activeSection === 'intelligence-analysis' && (
+              <PanelErrorBoundary label="Deep Analysis">
               <div style={{ height: '100%', overflow: 'hidden' }}>
                 {/* W13 — One-click Trade button on each "Top Alpha Opportunities" row
                     mounts the DepthChartModal (depth book + trade ticket) for that
@@ -491,17 +532,21 @@ export default function Dashboard() {
                   onSelectMarket={(tokenId, slug) => setSelectedMarket({ tokenId, slug })}
                 />
               </div>
+              </PanelErrorBoundary>
             )}
 
             {/* ── Intelligence — AI/ML Engine ────────────────────────── */}
             {activeSection === 'intelligence-aiml' && (
+              <PanelErrorBoundary label="AI / ML Engine">
               <div style={{ height: '100%', overflow: 'hidden' }}>
                 <AIMLCommandCenter />
               </div>
+              </PanelErrorBoundary>
             )}
 
             {/* ── Intelligence — Copilot ─────────────────────────────── */}
             {activeSection === 'intelligence-copilot' && (
+              <PanelErrorBoundary label="AI Copilot">
               <div className="workstation-split-layout">
                 <div style={{ overflow: 'hidden' }}>
                   <AICopilotPanel onSelectMarket={(m) => setChartMarket(m)} />
@@ -511,24 +556,30 @@ export default function Dashboard() {
                   <MLPanel snapshotMl={snapshot?.ml} />
                 </div>
               </div>
+              </PanelErrorBoundary>
             )}
 
             {/* ── Intelligence — Shadow Inference (W8-10) ───────────── */}
             {activeSection === 'intelligence-shadow' && (
+              <PanelErrorBoundary label="Shadow Inference">
               <div style={{ height: '100%', overflow: 'auto' }} className="scrollbar-thin">
                 <ShadowInferencePanel />
               </div>
+              </PanelErrorBoundary>
             )}
 
             {/* ── Intelligence — ML Validation (W8-10) ───────────────── */}
             {activeSection === 'intelligence-validation' && (
+              <PanelErrorBoundary label="ML Validation">
               <div style={{ height: '100%', overflow: 'auto' }} className="scrollbar-thin">
                 <MLValidationPanel />
               </div>
+              </PanelErrorBoundary>
             )}
 
             {/* ── 8. Analytics — Performance ────────────────────────── */}
             {activeSection === 'analytics-performance' && (
+              <PanelErrorBoundary label="Performance Analytics">
               <div className="workstation-split-layout">
                 <div style={{ overflow: 'hidden', display: 'flex', flexDirection: 'column', gap: '10px' }}>
                   <EquityCurve />
@@ -538,84 +589,109 @@ export default function Dashboard() {
                   <LeaderboardPanel />
                 </div>
               </div>
+              </PanelErrorBoundary>
             )}
 
             {/* ── Analytics — Backtest Lab ───────────────────────────── */}
             {activeSection === 'analytics-backtest' && (
+              <PanelErrorBoundary label="Backtest Lab">
               <div style={{ height: '100%', overflow: 'hidden' }}>
                 <BacktestLabView />
               </div>
+              </PanelErrorBoundary>
             )}
 
             {/* ── Analytics — Attribution (W8-10) ─────────────────────── */}
             {activeSection === 'analytics-attribution' && (
+              <PanelErrorBoundary label="Attribution">
               <div style={{ height: '100%', overflow: 'auto' }} className="scrollbar-thin">
                 <AttributionPanel />
               </div>
+              </PanelErrorBoundary>
             )}
 
             {/* ── Analytics — Execution Quality (W8-10) ──────────────── */}
             {activeSection === 'analytics-execution' && (
+              <PanelErrorBoundary label="Execution Quality">
               <div style={{ height: '100%', overflow: 'auto' }} className="scrollbar-thin">
                 <ExecutionQualityPanel />
               </div>
+              </PanelErrorBoundary>
             )}
 
             {/* ── Analytics — Closed Positions (W8-10) ───────────────── */}
             {activeSection === 'analytics-closed' && (
+              <PanelErrorBoundary label="Closed Positions">
               <div style={{ height: '100%', overflow: 'auto' }} className="scrollbar-thin">
                 <ClosedPositionsPanel />
               </div>
+              </PanelErrorBoundary>
             )}
 
             {/* ── Capital — Allocator (W8-10) ────────────────────────── */}
             {activeSection === 'capital-allocator' && (
+              <PanelErrorBoundary label="Capital Allocator">
               <div style={{ height: '100%', overflow: 'auto' }} className="scrollbar-thin">
                 <CapitalAllocatorPanel />
               </div>
+              </PanelErrorBoundary>
             )}
 
             {/* ── System — Health ────────────────────────────────────── */}
             {activeSection === 'system-health' && (
+              <PanelErrorBoundary label="System Health">
               <div style={{ height: '100%', overflow: 'auto' }} className="scrollbar-thin">
                 <SystemHealthView />
               </div>
+              </PanelErrorBoundary>
             )}
 
             {/* ── System — Data Explorer ─────────────────────────────── */}
             {activeSection === 'system-database' && (
+              <PanelErrorBoundary label="Database Explorer">
               <div style={{ height: '100%', overflow: 'hidden' }}>
                 <DatabaseExplorerView />
               </div>
+              </PanelErrorBoundary>
             )}
 
             {/* ── System — Observability (W8-10) ─────────────────────── */}
             {activeSection === 'system-observability' && (
+              <PanelErrorBoundary label="Observability">
               <div style={{ height: '100%', overflow: 'auto' }} className="scrollbar-thin">
                 <ObservabilityPanel />
               </div>
+              </PanelErrorBoundary>
             )}
 
             {/* ── System — Retention (W8-10) ────────────────────────── */}
             {activeSection === 'system-retention' && (
+              <PanelErrorBoundary label="Retention">
               <div style={{ height: '100%', overflow: 'auto' }} className="scrollbar-thin">
                 <RetentionPanel />
               </div>
+              </PanelErrorBoundary>
             )}
 
             {/* ── System — Decision Ledger (W8-10) ──────────────────── */}
             {activeSection === 'system-decisions' && (
+              <PanelErrorBoundary label="Decision Ledger">
               <div style={{ height: '100%', overflow: 'auto' }} className="scrollbar-thin">
                 <DecisionLedgerPanel />
               </div>
+              </PanelErrorBoundary>
             )}
 
             {/* ── System — Live Safety Gate (W8-10) ─────────────────── */}
             {activeSection === 'system-safety' && (
+              <PanelErrorBoundary label="Live Safety Gate">
               <div style={{ height: '100%', overflow: 'auto' }} className="scrollbar-thin">
                 <LiveSafetyGatePanel />
               </div>
+              </PanelErrorBoundary>
             )}
+              </FadeIn>
+            </AnimatePresence>
           </div>
         </main>
       </div>

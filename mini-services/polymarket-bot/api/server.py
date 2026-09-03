@@ -23,6 +23,16 @@ from fastapi import (
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
+from slowapi.errors import RateLimitExceeded
+
+from api.rate_limit import (
+    ARBITRAGE_LIMIT,
+    HEAVY_LIMIT,
+    READ_LIMIT,
+    TRADE_LIMIT,
+    WRITE_LIMIT,
+    limiter,
+)
 
 from config import settings
 from core.audit_logger import audit_logger
@@ -481,6 +491,64 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ── Rate limiting (W10-4 — slowapi) ────────────────────────────────────────────
+# The shared ``limiter`` singleton (keyed on the client IP via
+# ``get_remote_address``) lives in ``api/rate_limit.py`` so it can be imported
+# by BOTH this module (for the routes defined inline here) AND
+# ``core/live_safety_gate.py`` (for ``POST /api/live/enable``) without a
+# circular import. ``app.state.limiter`` is slowapi's documented integration
+# point — the decorator wrapper inspects it to find the limiter instance.
+app.state.limiter = limiter
+
+
+async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
+    """JSON 429 handler for ``slowapi.errors.RateLimitExceeded``.
+
+    Replaces slowapi's default ``_rate_limit_exceeded_handler`` (which
+    returns ``{"detail": ..., "type": "rate_limited_exceeded"}``) with the
+    project's standard envelope shape ``{"detail": ..., "retry_after": N}``
+    so the frontend's existing error-display logic can render a "retry in Ns"
+    countdown without a per-status-code special case.
+
+    The ``Retry-After`` value is derived from the failing limit's granularity
+    window (e.g. 60s for "5/minute") via ``exc.limit.limit.get_expiry()``.
+    The exact reset time would require querying the storage backend's
+    ``get_window_stats`` (returns (reset_at, remaining)), but in practice the
+    upper-bound granularity is what clients need to back off — and it's
+    available without a storage round-trip. ``X-RateLimit-Limit`` carries
+    the canonical "<amount>/<granularity>" form (e.g. "5/minute") so clients
+    can show the limit alongside the countdown.
+    """
+    # ``exc.limit`` is a ``slowapi.wrappers.Limit`` whose ``.limit`` attribute
+    # is the underlying ``limits.RateLimitItem`` (e.g. "5 per 1 minute").
+    rate_limit_item = getattr(getattr(exc, "limit", None), "limit", None)
+    if rate_limit_item is not None:
+        retry_after_secs = int(rate_limit_item.get_expiry())
+        amount = int(getattr(rate_limit_item, "amount", 0))
+        # ``RateLimitItem.GRANULARITY`` is a ``limits.limits.Granularity``
+        # namedtuple ``(seconds=60, name='minute')`` — use ``.name`` for the
+        # canonical "5/minute" string form.
+        granularity_obj = getattr(rate_limit_item, "GRANULARITY", None)
+        granularity_name = getattr(granularity_obj, "name", "minute")
+        limit_str = f"{amount}/{granularity_name}"
+    else:
+        retry_after_secs = 60
+        limit_str = "100/minute"
+    return JSONResponse(
+        status_code=429,
+        content={
+            "detail": "Rate limit exceeded",
+            "retry_after": retry_after_secs,
+        },
+        headers={
+            "Retry-After": str(retry_after_secs),
+            "X-RateLimit-Limit": limit_str,
+        },
+    )
+
+
+app.add_exception_handler(RateLimitExceeded, rate_limit_handler)
+
 
 @app.middleware("http")
 async def enforce_api_auth(request: Request, call_next):
@@ -569,6 +637,24 @@ async def request_logging_middleware(request: Request, call_next):
     return response
 
 
+# ── Rate-limit policy header middleware (W10-4) ──────────────────────────────
+# Adds an informational ``X-RateLimit-Policy`` header to EVERY response so
+# clients (and operators inspecting traffic) can see the policy at a glance
+# without having to consult the docs. The header summarises the 4-tier policy:
+#   * 120/min read — generous, allows polling
+#   * 30/min write — stricter
+#   * 5/min heavy  — very strict (ML retrain, backtest)
+#   * 20/min auth-sensitive routes (trade, orders, position-close)
+# Per-route ``Retry-After`` / ``X-RateLimit-Limit`` headers are added by the
+# custom ``rate_limit_handler`` exception handler ONLY when a limit is hit;
+# this middleware is the always-on informational channel.
+@app.middleware("http")
+async def rate_limit_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["X-RateLimit-Policy"] = "120/min read, 30/min write, 5/min heavy"
+    return response
+
+
 # ── Global exception handler ─────────────────────────────────────────────────
 # Catches any exception that escapes a route handler (FastAPI's own
 # ``HTTPException`` is handled separately by FastAPI's built-in handler and
@@ -628,12 +714,14 @@ class StrategyConfigUpdate(BaseModel):
 # ── System Endpoints ──────────────────────────────────────────────────────────
 
 @app.get("/api/health", tags=["system"])
-async def health():
+@limiter.limit(READ_LIMIT)
+async def health(request: Request):
     return {"status": "ok", "timestamp": time.time(), "paper": settings.paper_trade}
 
 
 @app.get("/api/status", tags=["system"])
-async def status():
+@limiter.limit(READ_LIMIT)
+async def status(request: Request):
     from core.safety import kill_switch_file_exists
     report = await risk_manager.status_report()
     return {
@@ -650,7 +738,8 @@ async def status():
 
 
 @app.get("/api/snapshot", tags=["system"])
-async def get_snapshot():
+@limiter.limit(READ_LIMIT)
+async def get_snapshot(request: Request):
     return await _build_snapshot()
 
 
@@ -1141,7 +1230,8 @@ async def update_config(cfg: StrategyConfigUpdate):
 # ── Markets & Order Book Depth ────────────────────────────────────────────────
 
 @app.get("/api/markets", tags=["markets"])
-async def get_markets(limit: int = Query(50, ge=1, le=500), search: str | None = Query(None, max_length=200)):
+@limiter.limit(READ_LIMIT)
+async def get_markets(request: Request, limit: int = Query(50, ge=1, le=500), search: str | None = Query(None, max_length=200)):
     try:
         if search:
             items = await gamma_client.search_markets(search, limit=limit)
@@ -1210,7 +1300,8 @@ async def get_market_depth(token_id: str):
 
 
 @app.get("/api/orderbooks", tags=["markets"])
-async def get_orderbooks():
+@limiter.limit(READ_LIMIT)
+async def get_orderbooks(request: Request):
     books = []
     async with store._lock:
         for tid, book in store.order_books.items():
@@ -1231,7 +1322,8 @@ async def get_orderbooks():
 # ── Trading & Orders ──────────────────────────────────────────────────────────
 
 @app.post("/api/trade", tags=["trading"])
-async def place_manual_trade(req: ManualTradeRequest):
+@limiter.limit(TRADE_LIMIT)
+async def place_manual_trade(request: Request, req: ManualTradeRequest):
     side = Side.BUY if req.side.upper() == "BUY" else Side.SELL
     size_shares = req.size_usdc / req.price
 
@@ -1297,7 +1389,8 @@ async def get_orders():
 
 
 @app.delete("/api/orders", tags=["trading"])
-async def cancel_all_orders():
+@limiter.limit(TRADE_LIMIT)
+async def cancel_all_orders(request: Request):
     if settings.paper_trade:
         n = await paper_sim.cancel_all()
     else:
@@ -1310,7 +1403,8 @@ async def cancel_all_orders():
 
 
 @app.delete("/api/orders/{order_id}", tags=["trading"])
-async def cancel_order(order_id: str):
+@limiter.limit(TRADE_LIMIT)
+async def cancel_order(request: Request, order_id: str):
     if settings.paper_trade:
         ok = await paper_sim.cancel_order(order_id)
     else:
@@ -1323,7 +1417,8 @@ async def cancel_order(order_id: str):
 
 
 @app.get("/api/positions", tags=["trading"])
-async def get_positions():
+@limiter.limit(READ_LIMIT)
+async def get_positions(request: Request):
     positions = []
     async with store._lock:
         for tid, pos in store.positions.items():
@@ -1352,7 +1447,8 @@ class PositionCloseRequest(BaseModel):
 
 
 @app.post("/api/positions/{token_id}/close", tags=["trading"])
-async def close_position(token_id: str, req: PositionCloseRequest):
+@limiter.limit(TRADE_LIMIT)
+async def close_position(request: Request, token_id: str, req: PositionCloseRequest):
     """
     One-click marketable close of an open position.
 
@@ -1604,14 +1700,16 @@ async def get_events(n: int = Query(50, ge=1, le=500)):
 # ── Risk Management ───────────────────────────────────────────────────────────
 
 @app.post("/api/kill-switch/activate", tags=["risk"])
-async def activate_kill_switch():
+@limiter.limit(HEAVY_LIMIT)
+async def activate_kill_switch(request: Request):
     await risk_manager.activate_kill_switch("Manual via UI")
     await store.log_event("🛑 KILL SWITCH activated — all trading halted")
     return {"status": "activated", "kill_switch": True}
 
 
 @app.post("/api/kill-switch/deactivate", tags=["risk"])
-async def deactivate_kill_switch():
+@limiter.limit(HEAVY_LIMIT)
+async def deactivate_kill_switch(request: Request):
     await risk_manager.deactivate_kill_switch()
     await store.log_event("▶ Kill switch deactivated — trading resumed")
     return {"status": "deactivated", "kill_switch": False}
@@ -1692,7 +1790,8 @@ async def get_ml_metrics():
 
 
 @app.post("/api/ml/retrain", tags=["ml"])
-async def retrain_ml_model():
+@limiter.limit(HEAVY_LIMIT)
+async def retrain_ml_model(request: Request):
     """Trigger manual re-training and re-calibration of the ML ensemble."""
     await asyncio.to_thread(ml_model.fit_initial)
     await asyncio.to_thread(ml_model.save)
@@ -1744,7 +1843,8 @@ async def get_training_orchestrator_stats():
 
 
 @app.post("/api/ml/learn", tags=["ml"])
-async def ml_learn(token_id: str = Query(..., min_length=1, max_length=200), resolved_yes: bool = True):
+@limiter.limit(HEAVY_LIMIT)
+async def ml_learn(request: Request, token_id: str = Query(..., min_length=1, max_length=200), resolved_yes: bool = True):
     """Feed a resolved ground-truth outcome into the online SGD learner.
 
     1. Backfills outcome labels in both DB backends (TimescaleDB + SQLite).
@@ -1880,7 +1980,8 @@ class BacktestRequest(BaseModel):
 
 
 @app.post("/api/backtest/run", tags=["backtesting"])
-async def run_backtest_simulation(req: BacktestRequest):
+@limiter.limit(HEAVY_LIMIT)
+async def run_backtest_simulation(request: Request, req: BacktestRequest):
     """Run quantitative simulation across historical ticks for any registered strategy."""
     from backtesting.engine import backtest_engine
     result = await asyncio.to_thread(
@@ -1924,7 +2025,8 @@ class ArbitrageExecuteRequest(BaseModel):
 
 
 @app.post("/api/arbitrage/execute", tags=["arbitrage"])
-async def execute_arbitrage(req: ArbitrageExecuteRequest):
+@limiter.limit(ARBITRAGE_LIMIT)
+async def execute_arbitrage(request: Request, req: ArbitrageExecuteRequest):
     """
     Execute a dual-leg Dutch-book arbitrage. Both legs pass the same risk gate
     and are hard-capped by the per-market ceiling. Live execution is only
@@ -2510,4 +2612,17 @@ log.info(
     "; ".join(_X9_AUDIT_MISSING) if _X9_AUDIT_MISSING else "<none>",
     _X9_HTTP_ROUTE_COUNT,
 )
+
+
+# (W10-7) core.alerting — threshold-based alerting system. Additive wiring
+# appended at end of file per the W10-7 task spec. Adds six alerting
+# endpoints under ``/api/alerts/*`` (list + stats + acknowledge-one +
+# acknowledge-all + evaluate-now). Same registration pattern as the
+# sibling ``register_routes`` blocks above (alias imported under
+# ``_register_*`` to avoid shadowing other modules' ``register_routes``
+# symbol). Auth enforced by ``enforce_api_auth`` (path not in
+# ``PUBLIC_PATHS``).
+from core.alerting import register_routes as _register_alerting_routes
+
+_register_alerting_routes(app)
 

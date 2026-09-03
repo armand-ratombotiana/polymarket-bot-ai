@@ -1558,3 +1558,430 @@ html { overflow-x: hidden; }
   background-clip: padding-box;
 }
 ::-webkit-scrollbar-corner       { background: transparent; }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   W10-3 — ERROR BOUNDARY STYLES
+   Three error surfaces, each with its own visual language but all sharing
+   the dark workstation design tokens:
+   1. `.error-boundary-fallback`   — root-level fallback (full viewport)
+      Used by <ErrorBoundary> in src/app/layout.tsx when ANY client error
+      escapes the per-panel <PanelErrorBoundary> wrappers in page.tsx.
+   2. `.panel-error-boundary`      — panel-level fallback (fills parent)
+      Used by <PanelErrorBoundary> wrappers in page.tsx. Designed to fit
+      inside the existing panel grid cell so the dashboard layout doesn't
+      collapse when a single panel crashes.
+   3. `.error-page` / `.not-found-page` — App Router route fallbacks
+      Used by src/app/error.tsx (uncaught route-segment error) and
+      src/app/not-found.tsx (404). Both are full-viewport centered cards.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* ── (1) Root-level fallback ────────────────────────────────────────────── */
+.error-boundary-fallback {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-critical, 60);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-4, 1rem);
+  padding: var(--space-6, 1.5rem);
+  background: var(--bg-overlay, rgba(4, 5, 10, 0.92));
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  text-align: center;
+  overflow: auto;
+}
+.error-boundary-fallback .error-boundary-icon {
+  font-size: 42px;
+  line-height: 1;
+  color: var(--color-red-fg, #f87171);
+  filter: drop-shadow(0 0 12px rgba(239, 68, 68, 0.35));
+  animation: error-boundary-pulse 2.4s var(--easing-std, cubic-bezier(0.4, 0, 0.2, 1)) infinite;
+}
+.error-boundary-fallback .error-boundary-title {
+  font-size: 20px;
+  font-weight: 800;
+  color: var(--text-primary, #dde1ed);
+  letter-spacing: -0.01em;
+}
+.error-boundary-fallback .error-boundary-message {
+  font-size: 13px;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  color: var(--color-red-fg, #f87171);
+  background: var(--color-red-bg, rgba(239, 68, 68, 0.10));
+  border: 1px solid var(--color-red-bd, rgba(239, 68, 68, 0.25));
+  border-radius: var(--radius-md, 6px);
+  padding: 8px 14px;
+  max-width: 720px;
+  word-break: break-word;
+  white-space: pre-wrap;
+}
+.error-boundary-fallback .error-boundary-hint {
+  font-size: 12px;
+  color: var(--color-amber-fg, #fbbf24);
+  max-width: 520px;
+  line-height: 1.55;
+}
+.error-boundary-fallback .error-boundary-actions {
+  display: flex;
+  gap: var(--space-2, 0.5rem);
+  flex-wrap: wrap;
+  justify-content: center;
+}
+.error-boundary-fallback .error-boundary-stack {
+  width: 100%;
+  max-width: 900px;
+  margin-top: var(--space-2, 0.5rem);
+  font-size: 12px;
+  color: var(--text-secondary, #7e8aaa);
+}
+.error-boundary-fallback .error-boundary-stack > summary {
+  cursor: pointer;
+  user-select: none;
+  padding: 6px 10px;
+  border: 1px solid var(--border, #1f2335);
+  border-radius: var(--radius-sm, 4px);
+  background: var(--bg-card-alt, #111420);
+  display: inline-block;
+  font-weight: 600;
+  list-style: none;          /* hide default disclosure triangle — we use ▸/▾ */
+}
+.error-boundary-fallback .error-boundary-stack > summary::-webkit-details-marker {
+  display: none;
+}
+.error-boundary-fallback .error-boundary-stack > summary:hover {
+  border-color: var(--border-hover, #2d3450);
+  color: var(--text-primary, #dde1ed);
+}
+.error-boundary-fallback .error-boundary-stack-content {
+  margin-top: 8px;
+  padding: 10px 12px;
+  background: var(--bg-base, #080910);
+  border: 1px solid var(--border, #1f2335);
+  border-radius: var(--radius-sm, 4px);
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--text-mono, #c8cfe0);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 320px;
+  overflow: auto;
+}
+.error-boundary-fallback .error-boundary-stack-label {
+  display: inline-block;
+  margin-bottom: 4px;
+  font-weight: 700;
+  color: var(--color-amber-fg, #fbbf24);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-size: 10.5px;
+}
+
+/* ── (2) Panel-level fallback ───────────────────────────────────────────── */
+.panel-error-boundary {
+  height: 100%;
+  width: 100%;
+  min-height: 160px;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: center;
+  gap: var(--space-3, 0.75rem);
+  padding: var(--space-4, 1rem);
+  background: var(--color-red-bg, rgba(239, 68, 68, 0.08));
+  border: 1px solid var(--color-red-bd, rgba(239, 68, 68, 0.30));
+  border-radius: var(--radius-lg, 8px);
+  box-shadow: inset 0 0 0 1px rgba(239, 68, 68, 0.05);
+}
+.panel-error-boundary-body {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3, 0.75rem);
+}
+.panel-error-boundary-icon {
+  font-size: 22px;
+  line-height: 1;
+  color: var(--color-red-fg, #f87171);
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+.panel-error-boundary-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.panel-error-boundary-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-primary, #dde1ed);
+  letter-spacing: -0.01em;
+}
+.panel-error-boundary-message {
+  font-size: 11.5px;
+  color: var(--color-red-fg, #f87171);
+  line-height: 1.5;
+  word-break: break-word;
+  white-space: pre-wrap;
+  max-height: 6em;
+  overflow: auto;
+}
+.panel-error-boundary-actions {
+  display: flex;
+  gap: var(--space-2, 0.5rem);
+  justify-content: flex-end;
+  flex-wrap: wrap;
+}
+
+/* ── (3) App Router route-level fallbacks ─────────────────────────────────── */
+.error-page,
+.not-found-page {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-critical, 60);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-4, 1rem);
+  padding: var(--space-6, 1.5rem);
+  background: var(--bg-surface, #0e1015);
+  background-image:
+    radial-gradient(at 0% 0%, rgba(239, 68, 68, 0.05) 0px, transparent 40%),
+    radial-gradient(at 100% 100%, rgba(6, 182, 212, 0.03) 0px, transparent 40%);
+  text-align: center;
+  overflow: auto;
+}
+.error-page .error-page-icon {
+  font-size: 42px;
+  line-height: 1;
+  color: var(--color-red-fg, #f87171);
+  filter: drop-shadow(0 0 12px rgba(239, 68, 68, 0.35));
+  animation: error-boundary-pulse 2.4s var(--easing-std, cubic-bezier(0.4, 0, 0.2, 1)) infinite;
+}
+.error-page .error-page-title {
+  font-size: 20px;
+  font-weight: 800;
+  color: var(--text-primary, #dde1ed);
+  letter-spacing: -0.01em;
+}
+.error-page .error-page-message {
+  font-size: 13px;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  color: var(--color-red-fg, #f87171);
+  background: var(--color-red-bg, rgba(239, 68, 68, 0.10));
+  border: 1px solid var(--color-red-bd, rgba(239, 68, 68, 0.25));
+  border-radius: var(--radius-md, 6px);
+  padding: 8px 14px;
+  max-width: 720px;
+  word-break: break-word;
+}
+.error-page .error-page-digest {
+  font-size: 11px;
+  color: var(--text-secondary, #7e8aaa);
+  letter-spacing: 0.02em;
+}
+.error-page .error-page-actions {
+  display: flex;
+  gap: var(--space-2, 0.5rem);
+  flex-wrap: wrap;
+  justify-content: center;
+  margin-top: var(--space-2, 0.5rem);
+}
+
+.not-found-page .not-found-page-code {
+  font-size: 72px;
+  font-weight: 800;
+  letter-spacing: -0.04em;
+  line-height: 1;
+  color: var(--color-amber-fg, #fbbf24);
+  text-shadow: 0 0 24px rgba(245, 158, 11, 0.25);
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+}
+.not-found-page .not-found-page-title {
+  font-size: 20px;
+  font-weight: 800;
+  color: var(--text-primary, #dde1ed);
+  letter-spacing: -0.01em;
+}
+.not-found-page .not-found-page-message {
+  font-size: 13px;
+  color: var(--text-secondary, #7e8aaa);
+  max-width: 480px;
+  line-height: 1.6;
+}
+.not-found-page .not-found-page-actions {
+  display: flex;
+  gap: var(--space-2, 0.5rem);
+  flex-wrap: wrap;
+  justify-content: center;
+  margin-top: var(--space-2, 0.5rem);
+}
+
+/* ── Pulsing alert keyframe (shared by root + route error icons) ─────────── */
+@keyframes error-boundary-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%      { opacity: 0.7; transform: scale(1.06); }
+}
+/* Reduced-motion users get a static icon (no pulsing). */
+@media (prefers-reduced-motion: reduce) {
+  .error-boundary-fallback .error-boundary-icon,
+  .error-page .error-page-icon {
+    animation: none;
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   W10-8 — UI POLISH LAYER (Framer Motion skeletons, hover lift, sonner vars)
+   ═══════════════════════════════════════════════════════════════════════════
+   All rules below are NEW, appended at end-of-file so they layer on top of
+   the cascade without touching any earlier rule block. They consume the
+   existing `--bg-*` / `--text-*` / `--border` / `--radius-*` / `--space-*`
+   design tokens so the shimmer + hover effects automatically match the
+   dashboard's dark theme (and any future light-theme override).
+   ─────────────────────────────────────────────────────────────────────────── */
+
+/* ── Shimmer gradient (shared by all skeleton line/cell variants) ──────── */
+/* Re-uses the existing `@keyframes skeleton-shimmer` (defined above at
+   line ~1229). The 3-stop linear-gradient slides left → right; the
+   `background-size: 200% 100%` makes the gradient twice as wide as the
+   element so the bright band passes fully across before repeating.
+   `--bg-elevated` falls back to `--bg-card-alt` (the cooler card
+   variant) — defined inline here in case a future theme forgets to
+   declare `--bg-elevated`. */
+:root {
+  --bg-elevated: var(--bg-card-alt, #111420);
+}
+
+.skeleton-line-sm,
+.skeleton-line-md,
+.skeleton-cell {
+  background: linear-gradient(
+    90deg,
+    var(--bg-surface) 25%,
+    var(--bg-elevated) 50%,
+    var(--bg-surface) 75%
+  );
+  background-size: 200% 100%;
+  animation: skeleton-shimmer 1.5s ease-in-out infinite;
+  border-radius: var(--radius-sm);
+}
+
+/* Small caption / label line — ~6px tall, narrow width */
+.skeleton-line-sm {
+  height: 6px;
+  width: 40%;
+  margin-bottom: var(--space-1);
+}
+
+/* Medium body-text line — ~14px tall, full width */
+.skeleton-line-md {
+  height: 14px;
+  width: 100%;
+  margin-bottom: var(--space-1);
+}
+
+/* ── Skeleton KPI block (label + big-number placeholder) ───────────────── */
+.skeleton-kpi {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: var(--space-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  overflow: hidden;
+  position: relative;
+}
+
+/* When `.skeleton-card` (the W9-7 rule at line ~476) is used as the
+   SkeletonCard primitive from ui/skeleton-card.tsx, ensure the inner
+   lines inherit the same shimmer gradient as the new variants so the
+   visual language is consistent. The earlier `.skeleton-line-lg` /
+   `.skeleton-line` rules already use a similar gradient; this just
+   guarantees the new `.skeleton-line-sm` / `.skeleton-line-md` siblings
+   inside SkeletonCard / SkeletonKPI shimmer in lock-step. */
+.skeleton-card .skeleton-line-sm,
+.skeleton-card .skeleton-line-md,
+.skeleton-kpi .skeleton-line-sm,
+.skeleton-kpi .skeleton-line-lg {
+  margin-bottom: var(--space-2);
+}
+
+/* ── Skeleton table (rows × cells grid, matches data-table density) ────── */
+.skeleton-table {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+.skeleton-row {
+  display: flex;
+  gap: 1px;
+  background: var(--border);
+}
+
+.skeleton-cell {
+  flex: 1 1 0;
+  height: 28px;            /* matches .data-table row height */
+  background: var(--bg-card);
+  background-image: linear-gradient(
+    90deg,
+    rgba(255, 255, 255, 0) 25%,
+    rgba(255, 255, 255, 0.06) 50%,
+    rgba(255, 255, 255, 0) 75%
+  );
+  background-size: 200% 100%;
+  animation: skeleton-shimmer 1.5s ease-in-out infinite;
+}
+
+/* ── Card hover lift (for clickable KPI cards / list items) ────────────── */
+/* Subtle 1px rise + soft shadow on hover. Kept short (150ms) so the
+   feedback feels immediate without being "bouncy". `will-change` hints
+   to the browser that transform/box-shadow will animate, enabling GPU
+   compositing for the transition. */
+.card-hover {
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+  will-change: transform;
+}
+.card-hover:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+}
+/* Respect reduced-motion: skip the lift entirely */
+@media (prefers-reduced-motion: reduce) {
+  .card-hover {
+    transition: none;
+  }
+  .card-hover:hover {
+    transform: none;
+  }
+}
+
+/* ── Sonner toast theme variables ──────────────────────────────────────── */
+/* The shadcn `ui/sonner.tsx` toaster references `--popover` /
+   `--popover-foreground` / `--border`. The dashboard uses a custom
+   dark palette, not the shadcn default tokens — so we map them here
+   to the existing dashboard variables. This ensures any future
+   `toast()` call renders with the correct card background + text color
+   (matches the `.card` styling already used everywhere else). */
+:root {
+  --popover: var(--bg-card);
+  --popover-foreground: var(--text-primary);
+}
+/* Sonner's data-sonner-toast attribute: align padding/radius with the
+   dashboard card system. The inline `--normal-*` vars on the Toaster
+   already route to `--popover` / `--border`; this just adds the
+   radius + tighter padding the dashboard prefers. */
+[data-sonner-toast] {
+  border-radius: var(--radius-md) !important;
+  font-family: var(--font-mono, 'JetBrains Mono', monospace);
+  font-size: 12.5px;
+}
+

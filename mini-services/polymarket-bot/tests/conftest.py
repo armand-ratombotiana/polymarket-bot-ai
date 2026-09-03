@@ -121,6 +121,28 @@ from core.safety import (  # noqa: E402
 from paper.simulator import PaperSimulator, paper_sim  # noqa: E402
 from risk.manager import InstitutionalRiskEngine, risk_manager  # noqa: E402
 
+# ── Disable rate limiter in tests (W10-4) ─────────────────────────────────────
+# The shared ``limiter`` singleton in ``api/rate_limit.py`` is disabled here
+# at conftest module-load time (before any test runs) so:
+#   * existing tests that hit rate-limited routes via TestClient don't
+#     suddenly start receiving 429s after the limit is hit (TestClient uses
+#     the same source IP — ``127.0.0.1`` — for every request, so the
+#     4th request to a 3/min-limited route would otherwise fail);
+#   * the in-memory hit counter doesn't leak between tests;
+#   * the ``slowapi`` decorator's wrapper is essentially a pass-through
+#     when ``limiter.enabled = False`` (verified against slowapi 0.1.10).
+# The dedicated ``tests/test_rate_limiting.py`` module builds its OWN
+# ``Limiter`` instances for the limit-is-actually-enforced tests, so the
+# global ``enabled = False`` flag doesn't affect them.
+try:
+    from api.rate_limit import limiter as _shared_limiter  # noqa: E402
+
+    _shared_limiter.enabled = False
+except ImportError:  # pragma: no cover — defensive: if api.rate_limit
+    # ever becomes importable only inside the server package, the test
+    # suite should still run (limiter just isn't installed in this env).
+    pass
+
 
 # ── Autouse: reset store singletons before every test ──────────────────────
 @pytest.fixture(autouse=True)

@@ -1,0 +1,51 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# Polymarket Bot — Production Caddyfile
+#
+# Replace `yourdomain.com` with your real domain (or `:80` / `:443` for IP-only
+# hosting). Caddy will automatically provision a Let's Encrypt certificate for
+# the named host when ports 80/443 are exposed in docker-compose.yml.
+#
+# Routing contract (mirrors the dev-time Caddyfile):
+#   1. Requests carrying `?XTransformPort=<port>` are reverse-proxied to
+#      `backend:<port>` (service name resolves via Docker DNS).
+#   2. All other requests are reverse-proxied to `frontend:3000`.
+#
+# To use this file in production:
+#   1. Mount this file at /etc/caddy/Caddyfile instead of ./Caddyfile:
+#        volumes:
+#          - ./Caddyfile.prod:/etc/caddy/Caddyfile:ro
+#   2. Expose ports 80 + 443 in the caddy service definition.
+#   3. Set the server name below.
+# ──────────────────────────────────────────────────────────────────────────────
+
+yourdomain.com {
+	# ── Match ?XTransformPort=<port> (any value) ────────────────────────────────
+	@transform_port_query {
+		query XTransformPort=*
+	}
+
+	# ── Forward port-tagged traffic to the backend service ─────────────────────
+	# `backend` is the docker-compose service name; Docker's embedded DNS
+	# resolves it to the container's IP on the polymarket-net network.
+	handle @transform_port_query {
+		reverse_proxy backend:{query.XTransformPort} {
+			header_up Host {host}
+			header_up X-Forwarded-For {remote_host}
+			header_up X-Forwarded-Proto {scheme}
+			header_up X-Real-IP {remote_host}
+		}
+	}
+
+	# ── Default: serve the Next.js frontend ────────────────────────────────────
+	handle {
+		reverse_proxy frontend:3000 {
+			header_up Host {host}
+			header_up X-Forwarded-For {remote_host}
+			header_up X-Forwarded-Proto {scheme}
+			header_up X-Real-IP {remote_host}
+		}
+	}
+
+	# ── Compression + sane defaults ─────────────────────────────────────────────
+	encode zstd gzip
+}
