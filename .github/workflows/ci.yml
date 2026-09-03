@@ -46,7 +46,7 @@ jobs:
           bun-version: latest
 
       - name: Setup Node.js 20 (for tooling / cache)
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 20
           cache: bun
@@ -144,7 +144,7 @@ jobs:
           bun-version: latest
 
       - name: Setup Node.js 20 (cache)
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 20
           cache: bun
