@@ -3,6 +3,7 @@
     "command": "Command Center",
     "books": "Live Books",
     "screener": "Screener",
+    "order_flow": "Order Flow",
     "positions": "Positions",
     "orders": "Orders",
     "trades": "Trades & Fills",

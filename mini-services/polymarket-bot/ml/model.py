@@ -20,6 +20,7 @@ import pickle
 import time
 from collections import deque
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 from sklearn.calibration import CalibratedClassifierCV
@@ -33,6 +34,15 @@ from ml.drift_detector import drift_detector
 from ml.ensemble_meta_learner import ensemble_meta_learner
 from ml.features import FEATURE_NAMES, N_FEATURES
 from ml.model_registry import model_registry
+
+if TYPE_CHECKING:
+    # Type-only import — avoids a circular import at module load time
+    # (``ml.explainability``'s ``register_routes`` imports ``ml_model``
+    # lazily inside the route handler, but its module body doesn't import
+    # ``ml.model`` at the top level). The string annotation below lets
+    # IDEs resolve the ``PredictionExplanation`` reference for type
+    # hints without forcing a runtime import.
+    from ml.explainability import PredictionExplanation
 
 log = logging.getLogger(__name__)
 
@@ -569,6 +579,89 @@ class MarketMLModel:
             features = features.reshape(1, -1)
         x_scaled = self.scaler.transform(features)
         return np.clip(self._blend_probas(x_scaled), 0.01, 0.99)
+
+    def compute_explanation(
+        self,
+        features: np.ndarray,
+        token_id: str = "",
+        top_n: int = 10,
+    ) -> "PredictionExplanation | None":
+        """Compute a SHAP-based per-prediction explanation for ``features``.
+
+        W17-3 — opt-in ML explainability. Runs ``shap.TreeExplainer`` against
+        the fitted RandomForest ensemble member (the fastest of the four
+        ensemble members — exact Tree SHAP in O(TLD²) vs KernelExplainer's
+        approximate O(n_background * n_samples * n_features)). The
+        ``predicted_probability`` is overwritten with the ensemble's blended
+        output (via ``predict()``) so the explanation's headline number
+        matches the dashboard — the RF-only TreeExplainer probability is
+        otherwise misleading.
+
+        Pure read: does NOT mutate the model, the feature store, or any
+        persisted state. Safe to call concurrently with ``predict()`` /
+        ``update()`` — the underlying sklearn RF is read-only after fit.
+
+        Args:
+            features: 1-D or 2-D ndarray. 1-D is treated as a single row.
+            token_id: market token this explanation belongs to.
+            top_n: number of top features (by abs SHAP) to keep in
+                ``top_features``. Capped to ``len(FEATURE_NAMES)`` (38).
+
+        Returns:
+            A ``PredictionExplanation`` dataclass instance (or ``None``
+            on any failure — the caller is expected to handle ``None``
+            by skipping the explanation field on the response). The
+            dataclass's ``to_dict()`` method returns the JSON-able
+            representation used by the ``GET /api/ml/explain/{token_id}``
+            HTTP route.
+
+        Raises:
+            RuntimeError: if the model is not fitted (``self.rf is None``).
+        """
+        if self.rf is None or self.gb is None:
+            raise RuntimeError(
+                "compute_explanation() called on an unfitted model "
+                "(self.rf is None) — call fit_initial() first"
+            )
+
+        features = np.asarray(features)
+        if features.ndim == 1:
+            features = features.reshape(1, -1)
+
+        # Compute the ensemble's blended prediction so the explanation's
+        # ``predicted_probability`` matches the dashboard's headline
+        # number (the RF-only TreeExplainer probability would otherwise
+        # be misleading — the ensemble blends 4 models).
+        try:
+            pred_p, _ = self.predict(features[0], token_id=token_id)
+        except Exception:  # noqa: BLE001 — defensive: predict() never raises in practice
+            pred_p = 0.5
+
+        try:
+            from ml.explainability import model_explainer
+
+            explanations = model_explainer.explain_tree_model(
+                self.rf,
+                features,
+                FEATURE_NAMES,
+                token_id=token_id,
+            )
+        except Exception as e:  # noqa: BLE001 — defensive
+            log.debug("[ml_model] SHAP explanation failed: %s", e, exc_info=True)
+            return None
+
+        if not explanations:
+            return None
+
+        expl = explanations[0]
+        expl.predicted_probability = float(pred_p)
+        expl.prediction_direction = "positive" if pred_p > 0.5 else "negative"
+        expl.confidence = abs(pred_p - 0.5) * 2
+        # Trim to caller's top_n (already capped to 38 by the route's
+        # Query constraint — defensive here in case a non-route caller
+        # passes an uncapped value).
+        expl.top_features = expl.top_features[: max(1, min(top_n, len(FEATURE_NAMES)))]
+        return expl
 
     def _adaptive_weights(self) -> tuple[float, float, float, float]:
         """

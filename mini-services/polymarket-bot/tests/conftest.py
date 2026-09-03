@@ -102,6 +102,18 @@ _ENV_REDIRECTS: dict[str, str] = {
     # sandbox) and crash the import — same defensive pattern as
     # FLAGS_DB_PATH / AB_TEST_DB_PATH above.
     "FEATURE_STORE_DB": str(_TMP_ROOT / "feature_store.db"),
+    # W17-5 — Immutable hash-chained audit trail. Module-level singleton
+    # ``core.immutable_audit.immutable_audit`` is constructed at import
+    # time and would otherwise try to mkdir ``/app/data`` (read-only in
+    # the sandbox) and emit warnings on every import — same defensive
+    # redirect pattern as FLAGS_DB_PATH / AB_TEST_DB_PATH above.
+    "IMMUTABLE_AUDIT_DB": str(_TMP_ROOT / "immutable_audit.db"),
+    # W17-8 — async job queue SQLite db. Module-level singleton
+    # ``core.job_queue.job_queue`` is constructed at import time and
+    # would otherwise try to mkdir ``/app/data`` (read-only in the
+    # sandbox) and crash the import — same defensive pattern as the
+    # other *_DB env redirects above.
+    "JOB_QUEUE_DB": str(_TMP_ROOT / "job_queue.db"),
     # Force the canonical trading mode to paper + live disabled so risk-gate
     # tests don't short-circuit at the shadow / live-trading gates inside
     # ``InstitutionalRiskEngine.check_order``.

@@ -776,6 +776,28 @@ def register_routes(app: Any) -> None:
             await store.log_event(
                 f"🔴 LIVE TRADING ENABLED via §82 safety gate — reason: {req.reason or 'operator request'}"
             )
+            # W17-5 — append a hash-chained immutable audit entry for the
+            # live-trading enablement. Best-effort: a failure here must never
+            # block the in-memory mode flip (the singleton's ``log()`` already
+            # swallows persistence errors and returns None; the inline
+            # try/except is belt-and-braces).
+            try:
+                from core.immutable_audit import immutable_audit
+
+                immutable_audit.log(
+                    "live_trading_enabled",
+                    {
+                        "reason": req.reason or "operator request",
+                        "source": "safety_gate",
+                        "trading_mode": settings.trading_mode,
+                        "paper_trade": bool(settings.paper_trade),
+                    },
+                )
+            except Exception as imm_e:  # noqa: BLE001 — best-effort
+                log.debug(
+                    "[live_safety_gate] immutable_audit live_trading_enabled log failed: %s",
+                    imm_e,
+                )
             log.warning(
                 "[live_safety_gate] 🔴 LIVE TRADING ENABLED via safety gate — reason=%s",
                 req.reason or "operator request",

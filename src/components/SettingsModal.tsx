@@ -120,6 +120,7 @@ const SETTINGS: SettingDescriptor[] = [
         { value: 'command', label: 'Command Center' },
         { value: 'markets-books', label: 'Live Books' },
         { value: 'markets-screener', label: 'Screener' },
+        { value: 'markets-order-flow', label: 'Order Flow' },
         { value: 'portfolio-positions', label: 'Positions' },
         { value: 'portfolio-orders', label: 'Orders' },
         { value: 'portfolio-trades', label: 'Trades' },

@@ -155,6 +155,16 @@ PUBLIC_PATHS = {"/api/health", "/api/version", "/docs", "/redoc", "/openapi.json
 # only accepts an opaque JSON payload (no PII lookup, no order body,
 # no auth-context-leak surface), so unauthenticated exposure is safe.
 PUBLIC_PATHS.add("/api/client-errors")
+# W17-7 — GraphQL endpoint. Public (no bearer token required) so a
+# dashboard / explorer client can introspect the schema + read the
+# ``health`` field BEFORE authenticating (mirrors the REST
+# ``GET /api/health`` liveness-probe contract). Mutations are not
+# exposed — the schema is read-only (Query type only, no Mutation), so
+# unauthenticated exposure can't trigger a trade / order / config
+# write. The endpoint responds to BOTH ``GET /graphql`` (the Apollo
+# Sandbox IDE HTML for browser introspection during dev) AND
+# ``POST /graphql`` (the actual GraphQL query execution path).
+PUBLIC_PATHS.add("/graphql")
 if settings.trading_mode == "live":
     PUBLIC_PATHS.discard("/docs")
     PUBLIC_PATHS.discard("/redoc")
@@ -519,6 +529,21 @@ async def lifespan(app: FastAPI):
         log.error(
             "Async DB pool close failed at shutdown: %s", _db_pool_close_exc
         )
+
+    # ── W17-8 — stop the background job-queue workers ─────────────────────
+    # ``stop_workers`` sets ``_running = False`` (the next ``while
+    # self._running`` check in each worker's loop exits cleanly) and
+    # joins each thread with a 5s timeout. If a worker is mid-handler
+    # when shutdown is requested, the handler is allowed to finish
+    # naturally (the join waits up to 5s) — daemon=True is the
+    # belt-and-braces backstop so a stuck handler does NOT hang the
+    # process exit (the OS reaps the thread when the main thread exits).
+    try:
+        from core.job_queue import job_queue as _job_queue_singleton
+
+        _job_queue_singleton.stop_workers()
+    except Exception as _jq_stop_exc:  # pragma: no cover — defensive
+        log.error("Job queue worker stop failed at shutdown: %s", _jq_stop_exc)
 
     log.info("API server stopped cleanly")
 
@@ -2311,6 +2336,27 @@ async def place_manual_trade(request: Request, req: ManualTradeRequest):
         )
     except Exception as e:  # noqa: BLE001 — broadcast must never break the API response
         log.debug("[ws_broadcast] manual-trade broadcast failed: %s", e)
+    # W17-5 — append a hash-chained immutable audit entry for the trade
+    # execution. Best-effort: a failure here must never block the order
+    # response (the singleton's ``log()`` already swallows persistence
+    # errors and returns None; the inline try/except is belt-and-braces).
+    try:
+        immutable_audit.log(
+            "trade_executed",
+            {
+                "token_id": req.token_id,
+                "slug": slug,
+                "side": side.value,
+                "price": float(req.price),
+                "size_usdc": float(req.size_usdc),
+                "size_shares": float(getattr(order, "size", 0.0) or 0.0),
+                "strategy": getattr(order, "strategy", "manual"),
+                "paper": bool(getattr(order, "paper", settings.paper_trade)),
+                "order_id": getattr(order, "order_id", None),
+            },
+        )
+    except Exception as e:  # noqa: BLE001 — best-effort: never block the trade response
+        log.debug("[immutable_audit] trade_executed log failed: %s", e)
     return {"status": "placed", "order": order}
 
 
@@ -2628,6 +2674,26 @@ async def close_position(request: Request, token_id: str, req: PositionCloseRequ
         f"(${notional_usdc:.2f}) [est P&L ${estimated_pnl:+.2f}]"
     )
 
+    # W17-5 — append a hash-chained immutable audit entry for the close.
+    # Best-effort: a failure here must never block the close response.
+    try:
+        immutable_audit.log(
+            "position_closed",
+            {
+                "token_id": token_id,
+                "slug": slug,
+                "side": side.value,
+                "price": float(close_price),
+                "size_shares": float(size_shares),
+                "notional_usdc": float(notional_usdc),
+                "estimated_pnl": float(estimated_pnl),
+                "strategy": strategy or "manual_close",
+                "order_id": getattr(order, "order_id", None),
+            },
+        )
+    except Exception as e:  # noqa: BLE001 — best-effort: never block the close response
+        log.debug("[immutable_audit] position_closed log failed: %s", e)
+
     result = {
         "status": "submitted",
         "token_id": token_id,
@@ -2861,6 +2927,20 @@ async def activate_kill_switch(request: Request):
         )
     except Exception as e:  # noqa: BLE001
         log.debug("[ws_broadcast] kill-switch-activate broadcast failed: %s", e)
+    # W17-5 — append a hash-chained immutable audit entry for the kill-
+    # switch activation. Best-effort: a failure here must never block
+    # the activation response.
+    try:
+        immutable_audit.log(
+            "kill_switch_activated",
+            {
+                "reason": "Manual via UI",
+                "source": "api",
+                "endpoint": "/api/kill-switch/activate",
+            },
+        )
+    except Exception as e:  # noqa: BLE001 — best-effort: never block the activation response
+        log.debug("[immutable_audit] kill_switch_activated log failed: %s", e)
     return {"status": "activated", "kill_switch": True}
 
 
@@ -2896,6 +2976,19 @@ async def deactivate_kill_switch(request: Request):
         )
     except Exception as e:  # noqa: BLE001
         log.debug("[ws_broadcast] kill-switch-deactivate broadcast failed: %s", e)
+    # W17-5 — append a hash-chained immutable audit entry for the kill-
+    # switch deactivation. Best-effort: a failure here must never block
+    # the deactivation response.
+    try:
+        immutable_audit.log(
+            "kill_switch_deactivated",
+            {
+                "source": "api",
+                "endpoint": "/api/kill-switch/deactivate",
+            },
+        )
+    except Exception as e:  # noqa: BLE001 — best-effort: never block the deactivation response
+        log.debug("[immutable_audit] kill_switch_deactivated log failed: %s", e)
     return {"status": "deactivated", "kill_switch": False}
 
 
@@ -4728,4 +4821,280 @@ from core.portfolio_optimizer import register_routes as _register_portfolio_opti
 _register_portfolio_optimizer_routes(app)
 
 
+# (W17-5) core.immutable_audit — cryptographically immutable hash-chained
+# audit trail. Additive wiring appended at end of file per the W17-5 task
+# spec. Adds four endpoints under ``/api/audit/immutable`` so an operator
+# can inspect the chain, verify its integrity (tamper detection), read
+# aggregate stats, and manually append entries for testing:
+#
+#   GET  /api/audit/immutable          recent entries (paginated)
+#   GET  /api/audit/immutable/verify   verify the integrity of the chain
+#   GET  /api/audit/immutable/stats    aggregate entry stats
+#   POST /api/audit/immutable/log      manually log an event (testing)
+#
+# Same registration pattern as the sibling ``register_routes`` blocks
+# above (alias imported under ``_register_*`` to avoid shadowing other
+# modules' ``register_routes`` symbol). Auth enforced by
+# ``enforce_api_auth`` (none of the four paths are in ``PUBLIC_PATHS``).
+#
+# In addition, the singleton ``immutable_audit.log()`` is called inline
+# from the trade-execution / position-close / kill-switch / live-trading-
+# enable / portfolio-config / feature-flag route handlers below —
+# integration points are marked with a ``# W17-5 — immutable_audit`` comment
+# so they're greppable.
+from core.immutable_audit import register_routes as _register_immutable_audit_routes
+from core.immutable_audit import immutable_audit  # noqa: F401 — used by inline .log() calls below
 
+_register_immutable_audit_routes(app)
+
+
+# ── (W17-8) Async job queue — background job submission & polling ────────────
+# W17-8: ``core.job_queue.JobQueue`` SQLite-backed queue with background
+# daemon-thread workers (``worker-0`` / ``worker-1``). Workers are
+# started by the lifespan startup handler (see the
+# ``_job_queue_singleton.start_workers()`` block above the ``yield``)
+# after ``register_default_handlers`` wires the three built-in handlers
+# (``retrain`` / ``backtest`` / ``export``).
+#
+# Five new endpoints appended here (auth enforced by ``enforce_api_auth``
+# — none of the five paths are in ``PUBLIC_PATHS``):
+#
+#   POST /api/jobs                    enqueue a job; body ``{"type": str,
+#                                    "payload": dict}``; returns the
+#                                    freshly-enqueued ``Job`` (status
+#                                    ``pending``)
+#   GET  /api/jobs                    list recent jobs (query params:
+#                                    ``limit``, default 50; ``status``,
+#                                    optional filter); returns the list
+#                                    newest-first
+#   GET  /api/jobs/stats              queue stats — total count / by-
+#                                    status breakdown / active worker
+#                                    count / handlers registered
+#   GET  /api/jobs/{job_id}           fetch a single job by id (404 if
+#                                    the id doesn't exist); returns the
+#                                    full ``Job`` row
+#   POST /api/jobs/{job_id}/cancel    cancel a pending job (only pending
+#                                    jobs are cancellable; running /
+#                                    completed / already-cancelled jobs
+#                                    return 409)
+#
+# Route-order note: ``/api/jobs/stats`` MUST be registered before
+# ``/api/jobs/{job_id}`` — otherwise FastAPI's path matcher would
+# interpret ``stats`` as a ``job_id`` path parameter. The five routes
+# are added in the order above to guarantee that.
+from core.job_queue import (  # noqa: E402
+    job_queue as _job_queue_singleton,
+    job_to_dict as _job_to_dict,
+)
+
+
+class JobCreateRequest(BaseModel):
+    """Body schema for ``POST /api/jobs``.
+
+    ``type`` is a free-form string; the queue dispatches to whatever
+    handler is registered for that type. Unknown types fail at
+    execution time (the worker records ``"No handler for job type:
+    <type>"`` in the job's ``error`` column and sets status to
+    ``failed``) rather than at enqueue time so a misconfigured client
+    doesn't lose its job submission to a 422 — the operator sees the
+    failure in ``GET /api/jobs/{id}`` and can re-submit after fixing
+    the type / handler registration.
+    """
+
+    type: str = Field(..., min_length=1, max_length=64)
+    payload: dict = Field(default_factory=dict)
+
+
+@app.post(
+    "/api/jobs",
+    tags=["jobs"],
+    summary="Enqueue a background job",
+    description=(
+        "Submit a long-running task (ML retrain, backtest, export, "
+        "custom) to the W17-8 background job queue. Returns the "
+        "freshly-created Job row with status ``pending``. Poll "
+        "``GET /api/jobs/{job_id}`` for completion; cancel via "
+        "``POST /api/jobs/{job_id}/cancel`` while still pending."
+    ),
+)
+@limiter.limit(WRITE_LIMIT)
+async def enqueue_job(request: Request, req: JobCreateRequest):
+    """Add a job to the queue and return the new job's metadata."""
+    job = _job_queue_singleton.enqueue(req.type, req.payload)
+    return {"job": _job_to_dict(job)}
+
+
+@app.get(
+    "/api/jobs",
+    tags=["jobs"],
+    summary="List recent jobs",
+    description=(
+        "Return the most-recent N jobs (newest-first). Optional "
+        "``status`` query param filters by job state "
+        "(``pending``/``running``/``completed``/``failed``/``cancelled``)."
+    ),
+)
+@limiter.limit(READ_LIMIT)
+async def list_jobs(
+    request: Request,
+    limit: int = Query(default=50, ge=1, le=500),
+    status: str | None = Query(default=None),
+):
+    """List recent jobs (optionally filtered by status)."""
+    jobs = _job_queue_singleton.get_recent_jobs(limit=limit, status=status)
+    return {
+        "jobs": [_job_to_dict(j) for j in jobs],
+        "count": len(jobs),
+    }
+
+
+@app.get(
+    "/api/jobs/stats",
+    tags=["jobs"],
+    summary="Queue statistics",
+    description=(
+        "Aggregate queue stats: total job count, per-status breakdown, "
+        "active worker count, and the list of registered handler "
+        "types. Used by the dashboard's job-queue panel."
+    ),
+)
+@limiter.limit(READ_LIMIT)
+async def get_job_stats(request: Request):
+    """Return aggregate queue stats."""
+    return _job_queue_singleton.get_stats()
+
+
+@app.get(
+    "/api/jobs/{job_id}",
+    tags=["jobs"],
+    summary="Get job status",
+    description=(
+        "Fetch a single job by id. Returns 404 if the id is unknown. "
+        "Used by clients polling for completion of an enqueued job."
+    ),
+)
+@limiter.limit(READ_LIMIT)
+async def get_job(request: Request, job_id: str):
+    """Return the job with ``job_id`` (or 404)."""
+    job = _job_queue_singleton.get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+    return {"job": _job_to_dict(job)}
+
+
+@app.post(
+    "/api/jobs/{job_id}/cancel",
+    tags=["jobs"],
+    summary="Cancel a pending job",
+    description=(
+        "Cancel a job that is still in the ``pending`` state. Returns "
+        "409 if the job is already ``running`` / ``completed`` / "
+        "``failed`` / ``cancelled`` — only pending jobs are "
+        "cancellable. Returns 404 if the id is unknown."
+    ),
+)
+@limiter.limit(WRITE_LIMIT)
+async def cancel_job(request: Request, job_id: str):
+    """Cancel a pending job (409 if not cancellable)."""
+    job = _job_queue_singleton.get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+    if job.status.value != "pending":
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Job {job_id} is in status '{job.status.value}' — "
+                "only 'pending' jobs are cancellable."
+            ),
+        )
+    cancelled = _job_queue_singleton.cancel_job(job_id)
+    if not cancelled:
+        # The job was pending when we fetched it but the atomic UPDATE
+        # returned 0 rows — a worker claimed it in the race window
+        # between the fetch and the cancel. Surface as 409 so the
+        # caller knows the cancel did not take effect.
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Job {job_id} was claimed by a worker before cancel — "
+                "re-fetch and retry if still required."
+            ),
+        )
+    updated = _job_queue_singleton.get_job(job_id)
+    return {"job": _job_to_dict(updated), "cancelled": True}
+
+
+# The job-queue workers are started in the lifespan startup handler
+# (see the ``_job_queue_singleton.start_workers()`` block above the
+# ``yield`` in ``async def lifespan``) and stopped in the lifespan
+# shutdown handler.
+
+
+# (W17-3) ml.explainability — SHAP-based per-prediction feature
+# attribution. Additive wiring appended at end of file per the W17-3
+# task spec. Adds one endpoint under ``/api/ml/explain/{token_id}``
+# so an operator can fetch a SHAP explanation for the model's most
+# recent prediction for a given token:
+#
+#   GET  /api/ml/explain/{token_id}    SHAP-based per-prediction
+#                                      feature attribution for the
+#                                      model's most recent prediction
+#                                      for the token (loads the
+#                                      stored feature vector from
+#                                      ``ml_feature_store``, runs
+#                                      ``shap.TreeExplainer`` against
+#                                      the RandomForest ensemble member
+#                                      with fallback to
+#                                      ``shap.KernelExplainer``, and
+#                                      returns the predicted
+#                                      probability + base value +
+#                                      top-N feature contributions +
+#                                      prediction direction)
+#
+# Same registration pattern as the sibling ``register_routes`` blocks
+# above (alias imported under ``_register_*`` to avoid shadowing other
+# modules' ``register_routes`` symbol). Auth enforced by
+# ``enforce_api_auth`` (path is NOT in ``PUBLIC_PATHS``).
+#
+# The endpoint is read-only and idempotent — it never mutates the
+# model, the feature store, or any persisted state. SHAP computation
+# is fully on-demand: no background workers, no caching layer. The
+# latency ceiling is ~50ms per call for the 38-feature × 150-tree RF
+# (benchmarked on the W11-5 calibration fold); well inside the
+# ``READ_LIMIT`` 120/min budget for an operator-driven dashboard
+# poll.
+from ml.explainability import register_routes as _register_explainability_routes
+
+_register_explainability_routes(app)
+
+
+# (W17-1) core.sentiment — market sentiment analyzer (news + price +
+# volume + social signals). Additive wiring appended at end of file
+# per the W17-1 task spec. Adds three endpoints under
+# ``/api/sentiment`` so an operator can pull a per-token aggregate
+# (overall score / confidence / per-source breakdown / trend), list
+# every persisted aggregate, and submit ad-hoc news text for keyword
+# scoring:
+#
+#   GET  /api/sentiment/{token_id}   aggregated sentiment for one
+#                                    token (triggers a fresh
+#                                    ``aggregate`` so the response
+#                                    reflects every signal recorded
+#                                    up to this call; returns a
+#                                    zeroed envelope when no signals
+#                                    exist)
+#   GET  /api/sentiment              every persisted aggregate row,
+#                                    highest score first
+#   POST /api/sentiment/analyze      analyze a text blob for keyword
+#                                    sentiment, record the resulting
+#                                    signal, and return the freshly-
+#                                    aggregated sentiment for that
+#                                    token
+#
+# Same registration pattern as the sibling ``register_routes`` blocks
+# above (alias imported under ``_register_*`` to avoid shadowing other
+# modules' ``register_routes`` symbol). Auth enforced by
+# ``enforce_api_auth`` (none of the three paths are in ``PUBLIC_PATHS``).
+from core.sentiment import register_routes as _register_sentiment_routes
+
+_register_sentiment_routes(app)

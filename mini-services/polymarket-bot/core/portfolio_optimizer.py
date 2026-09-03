@@ -593,6 +593,23 @@ def register_routes(app: Any) -> None:
             new_config = portfolio_optimizer.update_config(**updates)
         except ValueError as e:
             raise HTTPException(status_code=422, detail=str(e))
+        # W17-5 — append a hash-chained immutable audit entry for the
+        # config change. Best-effort: a failure here must never block
+        # the config-update response.
+        try:
+            from core.immutable_audit import immutable_audit
+
+            immutable_audit.log(
+                "portfolio_config_changed",
+                {
+                    "updates": updates,
+                    "new_config": new_config,
+                    "source": "api",
+                    "endpoint": "/api/portfolio/config",
+                },
+            )
+        except Exception:
+            pass  # noqa: BLE001 — best-effort
         return {"ok": True, "config": new_config}
 
 

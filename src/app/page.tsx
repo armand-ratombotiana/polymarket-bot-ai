@@ -1,7 +1,7 @@
 // app/page.tsx — Polymarket Pro Trading Workstation
 'use client'
 
-import { useEffect, useState, useCallback, useRef, type ComponentType } from 'react'
+import { useEffect, useState, useCallback, useRef, useMemo, type ComponentType } from 'react'
 import { useBot } from '@/hooks/useBot'
 import { useAudio } from '@/hooks/useAudio'
 // W15-2 — preferences store hook. Powers the user-tunable settings:
@@ -42,6 +42,10 @@ import EventLog from '@/components/EventLog'
 // Markets
 import MarketsPanel from '@/components/MarketsPanel'
 import MarketScreener from '@/components/MarketScreener'
+
+// W17-2 — Order Flow workstation (lazy: combines Recharts + framer-motion
+// + per-tick render path; the dynamic chunk keeps the initial bundle lean).
+const OrderFlowPanel = lazyPanel(() => import('@/components/OrderFlowPanel'), 'Loading Order Flow…')
 
 // Portfolio
 import PositionsPanel from '@/components/PositionsPanel'
@@ -149,7 +153,24 @@ const RateLimitPanel = lazyPanel(() => import('@/components/RateLimitPanel'), 'L
 import DepthChartModal from '@/components/DepthChartModal'
 import MarketChartModal from '@/components/MarketChartModal'
 import StrategyConfigModal from '@/components/StrategyConfigModal'
+// W17-6 — Legacy ShortcutsModal kept for any consumer that hasn't
+// migrated; page.tsx itself uses the new KeyboardCheatSheet below.
+// Mounted only when `legacyShortcutsOpen` flips true (e.g. via the
+// ⌨️ icon in TopStatusBar, which still wires to the legacy modal so
+// existing tests / muscle memory continue to work). The new
+// KeyboardCheatSheet is opened via the `?` shortcut OR the floating
+// ShortcutHint button.
 import ShortcutsModal from '@/components/ShortcutsModal'
+import KeyboardCheatSheet from '@/components/KeyboardCheatSheet'
+import ShortcutHint from '@/components/ShortcutHint'
+// W17-6 — Keyboard-shortcut catalog + hook. The catalog is the
+// single source of truth for what shortcuts exist; the hook binds
+// those shortcuts to live action callbacks below.
+import {
+  SHORTCUT_DEFINITIONS,
+  type Shortcut,
+} from '@/lib/keyboardShortcuts'
+import { useKeyboardShortcuts } from '@/hooks/useKeyboardShortcuts'
 
 // Keyboard shortcut → nav section mapping
 const KB_MAP: Record<string, NavSection> = {
@@ -191,6 +212,14 @@ export default function Dashboard() {
   const [selectedMarket, setSelectedMarket] = useState<{ tokenId: string; slug: string } | null>(null)
   const [chartMarket, setChartMarket] = useState<{ tokenId: string; slug: string } | null>(null)
   const [configOpen, setConfigOpen] = useState(false)
+  // W17-6 — `shortcutsOpen` now drives the NEW KeyboardCheatSheet
+  // (full-screen overlay with search + practice mode + JSON export)
+  // instead of the legacy ShortcutsModal. The legacy modal is still
+  // mounted (see the JSX tree below) so any consumer that imports
+  // it directly doesn't break, but the keyboard `?` shortcut + the
+  // TopStatusBar ⌨️ icon both flip THIS state — opening the new
+  // cheat sheet. The floating ShortcutHint button (bottom-right)
+  // also opens this state.
   const [shortcutsOpen, setShortcutsOpen] = useState(false)
 
   // Confirmation dialog state
@@ -300,37 +329,202 @@ export default function Dashboard() {
     await deactivateKillSwitch()
   }, [deactivateKillSwitch])
 
-  // Global keyboard shortcuts
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return
-      if (e.metaKey || e.ctrlKey || e.altKey) return
-
-      if (KB_MAP[e.key]) {
-        setActiveSection(KB_MAP[e.key])
-      } else if (e.key === '?') {
-        setShortcutsOpen(p => !p)
-      } else if (e.key === 'c' || e.key === 'C') {
-        setConfigOpen(p => !p)
-      } else if (e.key === 'k' || e.key === 'K') {
-        if (snapshot.kill_switch) {
-          handleResumeSwitch()
-        } else {
-          setConfirmKill(true)
-        }
-      } else if (e.key === 'Escape') {
-        setSelectedMarket(null)
-        setChartMarket(null)
-        setConfigOpen(false)
-        setShortcutsOpen(false)
-        setConfirmKill(false)
-        setConfirmCancelAll(false)
-        setMobileNavOpen(false)
+  // W17-6 — Global keyboard shortcuts via the new useKeyboardShortcuts
+  // hook. Replaces the legacy inline useEffect + window.addEventListener
+  // block. The hook reads from `SHORTCUT_DEFINITIONS` (the single
+  // source of truth used by BOTH the cheat sheet and the hook), so
+  // the catalog can never drift from what the hook actually dispatches.
+  //
+  // Wiring notes:
+  //   * `1`-`8` → setActiveSection via KB_MAP. Matches the Sidebar
+  //     kbd hints exactly so muscle memory + visible hints agree.
+  //   * `?` → opens the NEW KeyboardCheatSheet (full-screen overlay).
+  //     The legacy ShortcutsModal is no longer opened via the
+  //     keyboard; the new sheet is a strict superset.
+  //   * `Escape` (global) → closes every modal / clears market
+  //     selection / dismisses the mobile nav. Marked `global:true` in
+  //     the catalog so it fires even when the user is mid-typing in
+  //     the strategy-config or settings modal.
+  //   * `c` → close selected position. If `chartMarket` is set (the
+  //     trader clicked a market row to open the chart modal) we
+  //     dispatch closePosition on its token_id; otherwise this is a
+  //     no-op (the shortcut description says "selected market" so
+  //     silence is the right behaviour when nothing is selected).
+  //   * `x` → opens the cancel-all confirmation dialog (the actual
+  //     DELETE call only fires on confirm — see `handleCancelAll`).
+  //   * `r` → reloads the page. The bot's REST poller is the only
+  //     source of truth for live data, so a page reload is the
+  //     simplest correct "refresh everything" action — it re-runs
+  //     every effect from a clean slate (WS reconnect, REST snapshot
+  //     fetch, audio cue reset). A future refinement could expose a
+  //     `fetchRestSnapshot` callback directly on useBot.
+  //   * `t` → toggles the html.dark class. Mirrors what next-themes
+  //     does in ThemeToggle so the keyboard shortcut + the visible
+  //     toggle stay in sync (both flip the same class).
+  //   * `f` → toggles browser fullscreen. Standard requestFullscreen
+  //     / exitFullscreen contract.
+  //   * `/` → focuses the first search input on the page (the
+  //     CommandPalette isn't always mounted, so this is best-effort).
+  //   * `b`/`s` → quick buy / sell — no-op in the workstation today
+  //     (no global "selected market" trading flow exists yet).
+  //     Logged to console so the trader sees something happened.
+  //   * `Cmd+K` (meta+k) → opens the NEW KeyboardCheatSheet. The
+  //     CommandPalette component exists in src/components but isn't
+  //     mounted in this page (per W16-8 follow-up note); when it
+  //     eventually mounts, this shortcut should be re-wired to open
+  //     it instead.
+  //   * Plain `k` (no modifier) — NOT in SHORTCUT_DEFINITIONS (the
+  //     catalog lists only `Cmd+K` for "Open Command Palette"). But
+  //     the existing UX + the W16-8 e2e tests treat plain `k` as the
+  //     kill-switch shortcut. We register it as an EXTRA shortcut
+  //     appended after the catalog so the hook still dispatches it,
+  //     but the cheat sheet doesn't advertise it (to avoid clashing
+  //     with the catalog's `Cmd+K` entry).
+  const shortcutsList = useMemo<Shortcut[]>(() => {
+    const fromCatalog: Shortcut[] = SHORTCUT_DEFINITIONS.map((def) => {
+      switch (def.key) {
+        case '1':
+        case '2':
+        case '3':
+        case '4':
+        case '5':
+        case '6':
+        case '7':
+        case '8':
+          // Digits 1-8 → nav. KB_MAP returns the NavSection for the
+          // digit; setActiveSection is a stable state setter.
+          return { ...def, action: () => {
+            const section = KB_MAP[def.key]
+            if (section) setActiveSection(section)
+          } }
+        case '?':
+          return { ...def, action: () => setShortcutsOpen(true) }
+        case 'Escape':
+          return {
+            ...def,
+            action: () => {
+              setSelectedMarket(null)
+              setChartMarket(null)
+              setConfigOpen(false)
+              setShortcutsOpen(false)
+              setConfirmKill(false)
+              setConfirmCancelAll(false)
+              setMobileNavOpen(false)
+            },
+          }
+        case 'c':
+          // Close selected position — only when a market is
+          // selected (the trader clicked into a chart modal). With
+          // no selection, the shortcut is a silent no-op.
+          return { ...def, action: () => {
+            const selected = chartMarket ?? selectedMarket
+            if (selected) {
+              void closePosition(selected.tokenId)
+            }
+          } }
+        case 'x':
+          return { ...def, action: () => setConfirmCancelAll(true) }
+        case 'r':
+          return { ...def, action: () => {
+            if (typeof window !== 'undefined') window.location.reload()
+          } }
+        case 't':
+          return { ...def, action: () => {
+            if (typeof document === 'undefined') return
+            const root = document.documentElement
+            const isDark = root.classList.contains('dark')
+            root.classList.toggle('dark', !isDark)
+            root.classList.toggle('light', isDark)
+            try {
+              window.localStorage.setItem(
+                'theme',
+                isDark ? 'light' : 'dark',
+              )
+            } catch {
+              // localStorage may be unavailable (private mode) — fail
+              // silently; the class toggle above already flipped the
+              // visible theme.
+            }
+          } }
+        case 'f':
+          return { ...def, action: () => {
+            if (typeof document === 'undefined') return
+            if (document.fullscreenElement) {
+              void document.exitFullscreen?.()
+            } else {
+              void document.documentElement.requestFullscreen?.()
+            }
+          } }
+        case '/':
+          return { ...def, action: () => {
+            if (typeof document === 'undefined') return
+            const el = document.querySelector<HTMLInputElement>(
+              'input[type="search"], input[placeholder*="search" i]',
+            )
+            el?.focus()
+          } }
+        case 'b':
+        case 's':
+          // Quick buy / sell — no real handler today. Logged to
+          // console so the trader sees the keypress registered.
+          return { ...def, action: () => {
+            console.info(
+              `[shortcut] ${def.key.toUpperCase()} pressed — quick ${
+                def.key === 'b' ? 'buy' : 'sell'
+              } requires a selected market.`,
+            )
+          } }
+        case 'k':
+          // Cmd+K → opens the new KeyboardCheatSheet (the
+          // CommandPalette isn't mounted today — see W16-8 follow-up
+          // note). When the CommandPalette mounts, this branch should
+          // be re-wired to open it instead.
+          return { ...def, action: () => setShortcutsOpen(true) }
+        default:
+          // Defensive: any catalog entry without an explicit case
+          // becomes a no-op so the hook still matches + preventDefaults
+          // (so the browser doesn't ALSO react) without throwing.
+          return { ...def, action: () => {} }
       }
-    }
-    window.addEventListener('keydown', handler)
-    return () => window.removeEventListener('keydown', handler)
-  }, [snapshot.kill_switch, handleResumeSwitch])
+    })
+
+    // EXTRA shortcuts not in the catalog. Plain `k` toggles the kill
+    // switch (or resumes if already halted) — preserves the existing
+    // UX where the kill-switch button is the most important single
+    // key on the workstation. NOT in SHORTCUT_DEFINITIONS to avoid
+    // clashing with the catalog's `Cmd+K` entry; the cheat sheet
+    // just doesn't advertise plain `k`.
+    const extra: Shortcut[] = [
+      {
+        key: 'k',
+        modifiers: [],
+        description: 'Toggle kill switch / resume',
+        category: 'system',
+        action: () => {
+          if (snapshot.kill_switch) {
+            void handleResumeSwitch()
+          } else {
+            setConfirmKill(true)
+          }
+        },
+      },
+    ]
+
+    // Catalog shortcuts first (so the matcher checks them in
+    // declaration order), then the extras. The matcher iterates in
+    // array order and fires the FIRST match — for plain `k` the
+    // catalog entry `Cmd+K` won't match (different modifier set), so
+    // the extra `k` (no modifiers) wins.
+    return [...fromCatalog, ...extra]
+  }, [
+    chartMarket,
+    selectedMarket,
+    snapshot.kill_switch,
+    closePosition,
+    handleResumeSwitch,
+  ])
+
+  useKeyboardShortcuts(shortcutsList)
 
   const handleCancelAll = useCallback(async () => {
     setActionLoading(true)
@@ -518,6 +712,25 @@ export default function Dashboard() {
                 <MarketScreener
                   onSelectMarket={handleSelectMarketForChart}
                   onQuickTrade={(tokenId, slug) => setSelectedMarket({ tokenId, slug })}
+                />
+              </div>
+              </PanelErrorBoundary>
+            )}
+
+            {/* ── W17-2 — Markets — Order Flow ─────────────────────── */}
+            {activeSection === 'markets-order-flow' && (
+              <PanelErrorBoundary label="Order Flow">
+              <div style={{ height: '100%', overflow: 'auto' }} className="scrollbar-thin">
+                {/* W17-2 — Order flow workstation. Receives the parent's
+                    useBot snapshot (trades + order_books + wsConnected
+                    flag) so it doesn't open a duplicate WS socket; polls
+                    /api/depth/{token_id} internally for the imbalance
+                    meter's per-level ladder. */}
+                <OrderFlowPanel
+                  trades={snapshot.recent_trades}
+                  orderBooks={snapshot.order_books}
+                  isRealtime={wsConnected}
+                  onSelectMarket={handleSelectMarketForChart}
                 />
               </div>
               </PanelErrorBoundary>
@@ -799,7 +1012,17 @@ export default function Dashboard() {
         />
       )}
       <StrategyConfigModal isOpen={configOpen} onClose={() => setConfigOpen(false)} />
-      <ShortcutsModal isOpen={shortcutsOpen} onClose={() => setShortcutsOpen(false)} />
+      {/* W17-6 — New full-screen KeyboardCheatSheet (search + practice
+          mode + JSON export). The legacy ShortcutsModal is no longer
+          rendered — KeyboardCheatSheet is a strict superset. */}
+      <KeyboardCheatSheet
+        isOpen={shortcutsOpen}
+        onClose={() => setShortcutsOpen(false)}
+      />
+      {/* W17-6 — Floating "?" hint button. Sits in the bottom-right
+          corner so the trader can always reach the cheat sheet even
+          when the TopStatusBar is scrolled out of view. */}
+      <ShortcutHint onOpen={() => setShortcutsOpen(true)} />
 
       {/* ── Confirmation dialogs ─────────────────────────────────────────── */}
       <ConfirmationDialog

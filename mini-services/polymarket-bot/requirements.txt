@@ -38,6 +38,16 @@ numpy>=1.26.0,<3.0.0
 # ── ML Extended (4th ensemble member — optional, falls back gracefully) ───────
 lightgbm>=4.3.0,<5.0.0
 
+# ── ML Explainability (W17-3 — SHAP per-prediction feature attribution) ──────
+# W17-3: ``ml/explainability.py`` uses ``shap.TreeExplainer`` for the
+# RF / GB / LightGBM ensemble members (fast — exact Tree SHAP in O(TLD^2))
+# and falls back to ``shap.KernelExplainer`` for the SGD online learner
+# (model-agnostic, approximate). Pinned to >=0.45.0 (the first release
+# with the stable ndarray-shaped ``shap_values`` output for binary
+# sklearn classifiers — older 0.4x returned a per-class list of 2D
+# arrays, which the explainability module handles but considers legacy).
+shap>=0.45.0
+
 # ── Load testing (locust — W12-3) ─────────────────────────────────────────────
 # W12-3: per-route latency benchmarks + headless locust load profiles. Used by
 # tests/load/locustfile.py (2 user classes, 15+ weighted tasks) and

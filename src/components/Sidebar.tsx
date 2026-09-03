@@ -13,6 +13,7 @@ export type NavSection =
   | 'command'
   | 'markets-books'
   | 'markets-screener'
+  | 'markets-order-flow'
   | 'portfolio-positions'
   | 'portfolio-orders'
   | 'portfolio-trades'
@@ -76,6 +77,7 @@ const NAV_GROUPS: NavGroup[] = [
     items: [
       { id: 'markets-books', labelKey: 'nav.books', label: 'Live Books', shortLabel: 'Books', icon: '◈', kbd: '2', group: 'markets' },
       { id: 'markets-screener', labelKey: 'nav.screener', label: 'Screener', shortLabel: 'Screen', icon: '⊡', kbd: '3', group: 'markets' },
+      { id: 'markets-order-flow', labelKey: 'nav.order_flow', label: 'Order Flow', shortLabel: 'Flow', icon: '∿', group: 'markets' },
     ],
   },
   {

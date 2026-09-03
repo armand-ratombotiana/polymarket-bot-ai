@@ -269,6 +269,24 @@ def register_routes(app: Any) -> None:
         if not ok:
             raise HTTPException(status_code=404, detail=f"unknown feature flag: {key}")
         flag = flag_manager.get_flag(key)
+        # W17-5 — append a hash-chained immutable audit entry for the
+        # feature-flag change. Best-effort: a failure here must never
+        # block the flag-update response.
+        try:
+            from core.immutable_audit import immutable_audit
+
+            immutable_audit.log(
+                "feature_flag_changed",
+                {
+                    "key": key,
+                    "enabled": bool(body.enabled),
+                    "config": body.config,
+                    "source": "api",
+                    "endpoint": f"/api/flags/{key}",
+                },
+            )
+        except Exception:
+            pass  # noqa: BLE001 — best-effort
         return {
             "ok": True,
             "flag": {
