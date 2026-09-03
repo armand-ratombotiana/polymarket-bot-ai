@@ -13,7 +13,16 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         <link rel="preconnect" href="https://fonts.googleapis.com" />
         <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous" />
       </head>
-      <body>{children}</body>
+      <body>
+        {/* W9-7 — Skip-to-main-content link: visually hidden, revealed on
+            keyboard focus (Tab from URL bar). Lets keyboard & screen-reader
+            users jump the long sidebar directly to the workstation content.
+            Target is `#main` on the `<main>` element in src/app/page.tsx. */}
+        <a href="#main" className="skip-link">
+          Skip to main content
+        </a>
+        {children}
+      </body>
     </html>
   )
 }

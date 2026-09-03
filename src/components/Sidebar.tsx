@@ -159,7 +159,6 @@ export default function Sidebar({ active, onChange, mobileOpen, onMobileClose }:
       <nav
         className={`sidebar${collapsed ? ' collapsed' : ''}${mobileOpen ? ' mobile-open' : ''}`}
         aria-label="Primary navigation"
-        role="navigation"
         style={mobileOpen ? { width: 'var(--sidebar-width)' } : undefined}
       >
         {/* Logo header */}
@@ -228,7 +227,6 @@ export default function Sidebar({ active, onChange, mobileOpen, onMobileClose }:
                   key={item.id}
                   onClick={() => handleSelect(item.id)}
                   className={`sidebar-item${active === item.id ? ' active' : ''}`}
-                  role="menuitem"
                   aria-current={active === item.id ? 'page' : undefined}
                   title={collapsed ? `${item.label}${item.kbd ? ` (${item.kbd})` : ''}` : undefined}
                 >
@@ -237,6 +235,15 @@ export default function Sidebar({ active, onChange, mobileOpen, onMobileClose }:
                     {item.icon}
                   </span>
                   <span className="sidebar-label">{item.label}</span>
+                  {/* W9-7 — Announce the keyboard shortcut to screen readers.
+                      When the sidebar is collapsed the visible kbd badge is
+                      hidden, so the sr-only text is the only way AT users
+                      learn the shortcut. */}
+                  {item.kbd && (
+                    <span className="sr-only">
+                      (Keyboard shortcut: press {item.kbd})
+                    </span>
+                  )}
                   {!collapsed && item.kbd && (
                     <span style={{
                       fontSize: '9px',
@@ -247,7 +254,7 @@ export default function Sidebar({ active, onChange, mobileOpen, onMobileClose }:
                       padding: '1px 4px',
                       fontFamily: 'JetBrains Mono, monospace',
                       flexShrink: 0,
-                    }}>
+                    }} aria-hidden="true">
                       {item.kbd}
                     </span>
                   )}
@@ -259,7 +266,7 @@ export default function Sidebar({ active, onChange, mobileOpen, onMobileClose }:
 
         {/* Footer */}
         <div className="sidebar-footer">
-          <div style={{ padding: '4px 8px' }}>
+          <div style={{ padding: '4px 8px' }} role="status" aria-live="polite">
             <div className="sidebar-item" style={{ opacity: 0.75, cursor: 'default', fontSize: '10px' }}>
               <span className="sidebar-icon" aria-hidden="true" style={{ fontSize: '12px' }}>🟢</span>
               <span className="sidebar-label" style={{ fontSize: '10.5px' }}>Bot Engine Active</span>

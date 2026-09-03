@@ -1,7 +1,7 @@
 // app/page.tsx — Polymarket Pro Trading Workstation
 'use client'
 
-import { useEffect, useState, useCallback, useRef } from 'react'
+import { useEffect, useState, useCallback, useRef, type ComponentType } from 'react'
 import { useBot } from '@/hooks/useBot'
 import { useAudio } from '@/hooks/useAudio'
 import Sidebar, { NavSection } from '@/components/Sidebar'
@@ -47,25 +47,77 @@ import DatabaseExplorerView from '@/components/DatabaseExplorerView'
 // during initial render) are never evaluated on the server. The parent
 // page is `'use client'` with a `mounted` guard, so dynamic chunks hydrate
 // cleanly without SSR mismatch warnings.
+//
+// W9-6 — every dynamic import now declares a `loading:` skeleton instead
+// of falling back to `null`. Previously, navigating to one of these
+// sections would briefly render an empty pane (visible flash) before the
+// dynamic chunk finished loading. The skeleton matches the panel-card
+// visual language so the perceived transition is smooth.
 import dynamic from 'next/dynamic'
 
+// W9-6 — shared loading skeleton for dynamically-imported panels. Renders
+// a representative card outline so the layout doesn't shift / flash blank
+// while the chunk downloads. Kept intentionally lightweight (no DOM
+// nesting beyond what's necessary) so it doesn't add measurable overhead
+// to the initial bundle.
+function PanelLoadingSkeleton({ label = 'Loading panel…' }: { label?: string }) {
+  return (
+    <div
+      className="card h-full flex flex-col bg-[#13161e] border border-[#1f2335] shadow-md overflow-hidden"
+      role="status"
+      aria-live="polite"
+      aria-label={label}
+    >
+      <div
+        className="card-header px-3.5 py-2.5 border-b border-[#1f2335] flex items-center gap-2 bg-[#0e1015]/80"
+      >
+        <span className="spinner" aria-hidden="true" />
+        <span className="text-xs font-bold text-[#dde1ed] tracking-wide">{label}</span>
+      </div>
+      <div className="p-3 flex flex-col gap-2 flex-1">
+        <div className="h-3 rounded bg-[#1f2335] animate-pulse" style={{ width: '60%' }} />
+        <div className="h-3 rounded bg-[#1f2335] animate-pulse" style={{ width: '40%' }} />
+        <div className="h-3 rounded bg-[#1f2335] animate-pulse" style={{ width: '75%' }} />
+        <div className="h-3 rounded bg-[#1f2335] animate-pulse" style={{ width: '55%' }} />
+      </div>
+      <span className="sr-only">{label}</span>
+    </div>
+  )
+}
+
+// Convenience wrapper: every dynamic() call below uses the same ssr:false
+// + loading-skeleton shape — collapsing it into a one-liner reduces the
+// risk of forgetting the skeleton on future panels. The return type is
+// `ComponentType<any>` because Next.js's `dynamic()` returns a wrapped
+// component whose prop types don't perfectly round-trip through TS
+// generics; at runtime it behaves as the imported component.
+function lazyPanel(
+  loader: () => Promise<{ default: ComponentType<any> }>,
+  label: string,
+): ComponentType<any> {
+  return dynamic(loader, {
+    ssr: false,
+    loading: () => <PanelLoadingSkeleton label={label} />,
+  })
+}
+
 // Intelligence — Wave 8
-const ShadowInferencePanel = dynamic(() => import('@/components/ShadowInferencePanel'), { ssr: false })
-const MLValidationPanel = dynamic(() => import('@/components/MLValidationPanel'), { ssr: false })
+const ShadowInferencePanel = lazyPanel(() => import('@/components/ShadowInferencePanel'), 'Loading Shadow Inference…')
+const MLValidationPanel = lazyPanel(() => import('@/components/MLValidationPanel'), 'Loading ML Validation…')
 
 // Analytics — Wave 8
-const AttributionPanel = dynamic(() => import('@/components/AttributionPanel'), { ssr: false })
-const ExecutionQualityPanel = dynamic(() => import('@/components/ExecutionQualityPanel'), { ssr: false })
-const ClosedPositionsPanel = dynamic(() => import('@/components/ClosedPositionsPanel'), { ssr: false })
+const AttributionPanel = lazyPanel(() => import('@/components/AttributionPanel'), 'Loading Attribution…')
+const ExecutionQualityPanel = lazyPanel(() => import('@/components/ExecutionQualityPanel'), 'Loading Execution Quality…')
+const ClosedPositionsPanel = lazyPanel(() => import('@/components/ClosedPositionsPanel'), 'Loading Closed Positions…')
 
 // Capital — Wave 8
-const CapitalAllocatorPanel = dynamic(() => import('@/components/CapitalAllocatorPanel'), { ssr: false })
+const CapitalAllocatorPanel = lazyPanel(() => import('@/components/CapitalAllocatorPanel'), 'Loading Capital Allocator…')
 
 // System — Wave 8
-const ObservabilityPanel = dynamic(() => import('@/components/ObservabilityPanel'), { ssr: false })
-const RetentionPanel = dynamic(() => import('@/components/RetentionPanel'), { ssr: false })
-const DecisionLedgerPanel = dynamic(() => import('@/components/DecisionLedgerPanel'), { ssr: false })
-const LiveSafetyGatePanel = dynamic(() => import('@/components/LiveSafetyGatePanel'), { ssr: false })
+const ObservabilityPanel = lazyPanel(() => import('@/components/ObservabilityPanel'), 'Loading Observability…')
+const RetentionPanel = lazyPanel(() => import('@/components/RetentionPanel'), 'Loading Retention…')
+const DecisionLedgerPanel = lazyPanel(() => import('@/components/DecisionLedgerPanel'), 'Loading Decision Ledger…')
+const LiveSafetyGatePanel = lazyPanel(() => import('@/components/LiveSafetyGatePanel'), 'Loading Safety Gate…')
 
 // Modals
 import DepthChartModal from '@/components/DepthChartModal'
@@ -213,6 +265,24 @@ export default function Dashboard() {
     setConfirmCancelAll(false)
   }, [cancelAllOrders])
 
+  // W9-6 — stable callbacks passed to memoized child panels. Without
+  // useCallback these lambdas would be new function references on every
+  // parent render, which would bypass React.memo on PositionsPanel /
+  // MarketsPanel / OrdersPanel entirely (their custom comparators compare
+  // callback identity). Keeping them stable ensures those panels skip
+  // re-rendering when the underlying props haven't actually changed.
+  const handleSelectMarketForChart = useCallback((tokenId: string, slug: string) => {
+    setChartMarket({ tokenId, slug })
+  }, [])
+
+  const handleSelectPositionForChart = useCallback((market: { tokenId: string; slug: string }) => {
+    setChartMarket(market)
+  }, [])
+
+  const handleOpenCancelAllDialog = useCallback(() => {
+    setConfirmCancelAll(true)
+  }, [])
+
   const isKilled = snapshot.kill_switch
   const isObserving = snapshot.observation_only
   const openOrderCount = snapshot.open_orders?.length ?? 0
@@ -270,7 +340,7 @@ export default function Dashboard() {
           onMobileClose={() => setMobileNavOpen(false)}
         />
 
-        <main className="main-content" role="main">
+        <main id="main" className="main-content" role="main">
           {/* Top status bar */}
           <TopStatusBar
             snapshot={snapshot}
@@ -287,7 +357,7 @@ export default function Dashboard() {
           />
 
           {/* ── Page content ─────────────────────────────────────────── */}
-          <div className="page-area">
+          <div className="page-area" aria-live="polite" aria-atomic="false">
 
             {/* ── 1. Command Center ──────────────────────────────────── */}
             {activeSection === 'command' && (
@@ -298,7 +368,7 @@ export default function Dashboard() {
                 <div style={{ gridArea: 'market', minHeight: 0, overflow: 'hidden' }}>
                   <MarketsPanel
                     books={snapshot.order_books}
-                    onSelectMarket={(tokenId, slug) => setChartMarket({ tokenId, slug })}
+                    onSelectMarket={handleSelectMarketForChart}
                     priceFlashes={priceFlashes}
                   />
                 </div>
@@ -306,7 +376,7 @@ export default function Dashboard() {
                   <PositionsPanel
                     positions={snapshot.positions}
                     dailyPnl={snapshot.daily_pnl}
-                    onSelectMarket={(m) => setChartMarket(m)}
+                    onSelectMarket={handleSelectPositionForChart}
                     onClosePosition={closePosition}
                     priceFlashes={priceFlashes}
                   />
@@ -315,7 +385,7 @@ export default function Dashboard() {
                   <OrdersPanel
                     orders={snapshot.open_orders}
                     onCancel={cancelOrder}
-                    onCancelAll={() => setConfirmCancelAll(true)}
+                    onCancelAll={handleOpenCancelAllDialog}
                   />
                 </div>
                 <div style={{ gridArea: 'events', minHeight: 0, overflow: 'hidden' }}>
@@ -344,7 +414,7 @@ export default function Dashboard() {
               <div style={{ height: '100%', overflow: 'hidden' }}>
                 <MarketsPanel
                   books={snapshot.order_books}
-                  onSelectMarket={(tokenId, slug) => setChartMarket({ tokenId, slug })}
+                  onSelectMarket={handleSelectMarketForChart}
                   priceFlashes={priceFlashes}
                 />
               </div>
@@ -354,7 +424,7 @@ export default function Dashboard() {
             {activeSection === 'markets-screener' && (
               <div style={{ height: '100%', overflow: 'hidden' }}>
                 <MarketScreener
-                  onSelectMarket={(tokenId, slug) => setChartMarket({ tokenId, slug })}
+                  onSelectMarket={handleSelectMarketForChart}
                   onQuickTrade={(tokenId, slug) => setSelectedMarket({ tokenId, slug })}
                 />
               </div>
@@ -366,7 +436,7 @@ export default function Dashboard() {
                 <PositionsPanel
                   positions={snapshot.positions}
                   dailyPnl={snapshot.daily_pnl}
-                  onSelectMarket={(m) => setChartMarket(m)}
+                  onSelectMarket={handleSelectPositionForChart}
                   onClosePosition={closePosition}
                   priceFlashes={priceFlashes}
                 />
@@ -379,7 +449,7 @@ export default function Dashboard() {
                 <OrdersPanel
                   orders={snapshot.open_orders}
                   onCancel={cancelOrder}
-                  onCancelAll={() => setConfirmCancelAll(true)}
+                  onCancelAll={handleOpenCancelAllDialog}
                 />
               </div>
             )}

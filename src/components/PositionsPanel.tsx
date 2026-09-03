@@ -1,7 +1,7 @@
 // components/PositionsPanel.tsx — Active Portfolio Positions, Real-Time P&L & Exposure Governance
 'use client'
 
-import { useState, useMemo } from 'react'
+import { useState, useMemo, useCallback, memo } from 'react'
 import { Position } from '@/hooks/useBot'
 import { formatHierarchicalMarket } from '@/lib/formatters'
 import { fmtPnl, fmtUsd } from '@/lib/design-tokens'
@@ -20,15 +20,26 @@ interface Props {
   priceFlashes?: Record<string, 'up' | 'down'>
 }
 
-export default function PositionsPanel({ positions, dailyPnl, onSelectMarket, onClosePosition, priceFlashes }: Props) {
+// W9-6 — wrapped in React.memo with a custom comparator. The component
+// receives `priceFlashes` (changes every ~500ms as flashes clear), so a
+// shallow compare would cause many missed memo hits. The comparator below
+// skips the priceFlashes object identity by diffing only the inputs that
+// drive the rendered output: positions array reference, dailyPnl number,
+// and the callback identities. priceFlashes is intentionally compared by
+// JSON-stringified snapshot so two flashes maps with identical contents
+// don't trigger a re-render (rare but possible).
+function PositionsPanel({ positions, dailyPnl, onSelectMarket, onClosePosition, priceFlashes }: Props) {
   const [filterQuery, setFilterQuery] = useState('')
   const [outcomeFilter, setOutcomeFilter] = useState<'ALL' | 'YES' | 'NO'>('ALL')
   const [sortBy, setSortBy] = useState<'size' | 'pnl' | 'market'>('size')
 
-  const totalInvested = positions.reduce((acc, p) => acc + p.total_invested, 0)
-  const totalRealized = positions.reduce((acc, p) => acc + p.realised_pnl, 0)
   const MAX_PER_MARKET = 3.0 // USD 3.00 institutional limit
   const MAX_TOTAL_PORTFOLIO = 25.0 // USD 25.00 total exposure cap
+
+  // W9-6 — memoize aggregate reductions so they only recompute when the
+  // positions array identity changes (not on every input/filter change).
+  const totalInvested = useMemo(() => positions.reduce((acc, p) => acc + p.total_invested, 0), [positions])
+  const totalRealized = useMemo(() => positions.reduce((acc, p) => acc + p.realised_pnl, 0), [positions])
 
   const filteredPositions = useMemo(() => {
     return positions
@@ -51,7 +62,9 @@ export default function PositionsPanel({ positions, dailyPnl, onSelectMarket, on
       })
   }, [positions, filterQuery, outcomeFilter, sortBy])
 
-  const handleExportCsv = () => {
+  // W9-6 — wrap CSV export in useCallback so it isn't recreated on every
+  // render (only depends on `positions`).
+  const handleExportCsv = useCallback(() => {
     if (positions.length === 0) return
     const headers = ['Token ID', 'Market Slug', 'Outcome', 'Shares', 'Avg Entry Price', 'Total Cost USD', 'Realized PnL']
     const rows = positions.map((p) => [
@@ -71,7 +84,7 @@ export default function PositionsPanel({ positions, dailyPnl, onSelectMarket, on
     document.body.appendChild(link)
     link.click()
     document.body.removeChild(link)
-  }
+  }, [positions])
 
   const portfolioExposurePct = Math.min((totalInvested / MAX_TOTAL_PORTFOLIO) * 100, 100)
 
@@ -128,12 +141,14 @@ export default function PositionsPanel({ positions, dailyPnl, onSelectMarket, on
             placeholder="Search position by market / contract..."
             value={filterQuery}
             onChange={(e) => setFilterQuery(e.target.value)}
+            aria-label="Search positions by market name or contract token ID"
             className="w-full bg-[#0e1015] border border-[#1f2335] focus:border-cyan-500/50 rounded text-xs px-2.5 py-1.5 text-[#dde1ed] placeholder-[#3e4560] outline-none transition-all"
           />
           {filterQuery && (
             <button
               onClick={() => setFilterQuery('')}
               className="absolute right-2 top-1/2 -translate-y-1/2 text-xs text-[#7e8aaa] hover:text-white"
+              aria-label="Clear search filter"
             >
               ✕
             </button>
@@ -142,11 +157,12 @@ export default function PositionsPanel({ positions, dailyPnl, onSelectMarket, on
 
         <div className="flex items-center gap-1.5">
           {/* Outcome Filter */}
-          <div className="inline-flex bg-[#0e1015] border border-[#1f2335] rounded p-0.5 text-[10px]">
+          <div className="inline-flex bg-[#0e1015] border border-[#1f2335] rounded p-0.5 text-[10px]" role="group" aria-label="Filter positions by outcome">
             {(['ALL', 'YES', 'NO'] as const).map((side) => (
               <button
                 key={side}
                 onClick={() => setOutcomeFilter(side)}
+                aria-pressed={outcomeFilter === side}
                 className={`px-2 py-0.5 rounded font-bold transition-all ${
                   outcomeFilter === side
                     ? 'bg-blue-500/20 text-cyan-300 shadow-sm'
@@ -162,6 +178,7 @@ export default function PositionsPanel({ positions, dailyPnl, onSelectMarket, on
           <select
             value={sortBy}
             onChange={(e) => setSortBy(e.target.value as any)}
+            aria-label="Sort positions by"
             className="bg-[#0e1015] border border-[#1f2335] text-[#7e8aaa] rounded text-[10px] font-semibold px-2 py-1 outline-none cursor-pointer"
           >
             <option value="size">Sort: Size ($)</option>
@@ -218,22 +235,28 @@ export default function PositionsPanel({ positions, dailyPnl, onSelectMarket, on
                   >
                     {/* Market Title */}
                     <td
-                      className="py-2.5 max-w-[240px] cursor-pointer"
-                      onClick={() => onSelectMarket?.({ tokenId: p.token_id, slug: p.slug })}
+                      className="py-2.5 max-w-[240px]"
                     >
-                      <div className="flex flex-col gap-0.5">
-                        <div className="flex items-center gap-1.5">
-                          <span className="text-[9px] text-cyan-400 font-bold uppercase tracking-wider truncate">
-                            {info.category.icon} {info.eventTitle}
+                      <button
+                        type="button"
+                        onClick={() => onSelectMarket?.({ tokenId: p.token_id, slug: p.slug })}
+                        className="w-full text-left bg-transparent border-0 p-0 cursor-pointer"
+                        aria-label={`Open depth chart and trade modal for ${info.fullLabel}`}
+                      >
+                        <div className="flex flex-col gap-0.5">
+                          <div className="flex items-center gap-1.5">
+                            <span className="text-[9px] text-cyan-400 font-bold uppercase tracking-wider truncate">
+                              {info.category.icon} {info.eventTitle}
+                            </span>
+                          </div>
+                          <span
+                            className="text-[#dde1ed] group-hover:text-cyan-300 font-medium leading-snug text-xs block whitespace-normal transition-colors"
+                            title={info.fullLabel}
+                          >
+                            {info.question}
                           </span>
                         </div>
-                        <span
-                          className="text-[#dde1ed] group-hover:text-cyan-300 font-medium leading-snug text-xs block whitespace-normal transition-colors"
-                          title={info.fullLabel}
-                        >
-                          {info.question}
-                        </span>
-                      </div>
+                      </button>
                     </td>
 
                     {/* Outcome Badge */}
@@ -333,9 +356,10 @@ export default function PositionsPanel({ positions, dailyPnl, onSelectMarket, on
                         <button
                           onClick={() => onClosePosition?.(p.token_id)}
                           className="btn btn-ghost btn-sm text-[10px] px-2 py-0.5 border border-[#1f2335] text-red-400 hover:text-white hover:border-red-500/50"
+                          aria-label={`Close position for ${info.fullLabel}`}
                           title="Close position at market"
                         >
-                          ✕ Close
+                          <span aria-hidden="true">✕</span> Close
                         </button>
                       </div>
                     </td>
@@ -350,3 +374,20 @@ export default function PositionsPanel({ positions, dailyPnl, onSelectMarket, on
   )
 }
 
+// W9-6 — React.memo with a custom comparator. `positions` is the only
+// prop whose identity changes frequently (every snapshot). `dailyPnl` is a
+// primitive. `onSelectMarket` / `onClosePosition` are stable (useCallback
+// in useBot + page.tsx). `priceFlashes` mutates on every tick, so we diff
+// its keys/values with a JSON string rather than identity. When all four
+// compare equal, the component skips re-rendering entirely — a meaningful
+// win since this panel renders ~50 positions × ~9 columns on the command
+// center grid plus its own dedicated tab.
+export default memo(PositionsPanel, (prev, next) => {
+  if (prev.positions !== next.positions) return false
+  if (prev.dailyPnl !== next.dailyPnl) return false
+  if (prev.onSelectMarket !== next.onSelectMarket) return false
+  if (prev.onClosePosition !== next.onClosePosition) return false
+  // priceFlashes is intentionally compared by serialized contents.
+  if (JSON.stringify(prev.priceFlashes) !== JSON.stringify(next.priceFlashes)) return false
+  return true
+})

@@ -1,7 +1,7 @@
 // components/OrdersPanel.tsx — Live Working Orders & Execution Queue Panel
 'use client'
 
-import { useMemo } from 'react'
+import { useMemo, memo } from 'react'
 import { Order } from '@/hooks/useBot'
 import { formatHierarchicalMarket } from '@/lib/formatters'
 import { fmtAge, fmtPrice, fmtUsd } from '@/lib/design-tokens'
@@ -12,7 +12,12 @@ interface Props {
   onCancelAll?: () => void
 }
 
-export default function OrdersPanel({ orders, onCancel, onCancelAll }: Props) {
+// W9-6 — wrapped in React.memo. Props: `orders` (new array on every
+// snapshot — memo won't skip many renders by itself), `onCancel` (must
+// be stable in parent — useCallback in useBot), `onCancelAll` (must be
+// stable in parent — useCallback in page.tsx). When all three are stable
+// AND the orders array reference is unchanged, the table skips re-render.
+function OrdersPanel({ orders, onCancel, onCancelAll }: Props) {
   const totalOpenExposure = useMemo(() => {
     return orders.reduce((acc, o) => acc + o.price * (o.size - (o.size_matched ?? 0)), 0)
   }, [orders])
@@ -148,3 +153,9 @@ export default function OrdersPanel({ orders, onCancel, onCancelAll }: Props) {
     </div>
   )
 }
+
+// W9-6 — React.memo with shallow compare is sufficient because all three
+// props (orders array, onCancel, onCancelAll) are reference-compared.
+// `onCancel` and `onCancelAll` MUST be stable in the parent for memo to
+// skip renders — see useBot.ts (cancelOrder) and page.tsx (handleCancelAll).
+export default memo(OrdersPanel)

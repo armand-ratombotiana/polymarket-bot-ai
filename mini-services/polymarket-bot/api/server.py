@@ -525,6 +525,74 @@ async def enforce_api_auth(request: Request, call_next):
     return response
 
 
+# ── Request logging middleware (outermost — added AFTER enforce_api_auth so
+#    Starlette's "last added = first executed" ordering makes this run BEFORE
+#    auth, capturing every request including 401s / 503s for observability). ──
+@app.middleware("http")
+async def request_logging_middleware(request: Request, call_next):
+    """Log every request with method, path, status code, and latency.
+
+    Wrapped around every route — runs BEFORE ``enforce_api_auth`` so 401 / 503
+    responses show up in the server logs without each route having to log
+    them individually. The 4xx / 5xx counts feed operator dashboards and
+    alerting; the latency field surfaces slow-route regressions without a
+    separate tracing layer.
+    """
+    start = time.time()
+    try:
+        response = await call_next(request)
+    except Exception:
+        # ``call_next`` should never raise — Starlette converts route exceptions
+        # into 500 responses via the server exception middleware — but if it
+        # ever does (e.g. middleware itself raises), surface a clean 500
+        # instead of letting the ASGI server kill the connection.
+        duration = time.time() - start
+        log.error(
+            "[request] %s %s → 500 (unhandled in middleware chain) (%.3fs)",
+            request.method,
+            request.url.path,
+            duration,
+            exc_info=True,
+        )
+        return JSONResponse(
+            status_code=500,
+            content={"detail": "Internal server error", "path": str(request.url.path)},
+        )
+    duration = time.time() - start
+    log.info(
+        "[request] %s %s → %d (%.3fs)",
+        request.method,
+        request.url.path,
+        response.status_code,
+        duration,
+    )
+    return response
+
+
+# ── Global exception handler ─────────────────────────────────────────────────
+# Catches any exception that escapes a route handler (FastAPI's own
+# ``HTTPException`` is handled separately by FastAPI's built-in handler and
+# never reaches this function). Without this, FastAPI's default behaviour is
+# to return a 500 with the raw exception message in the response body — that
+# leaks internal stack details to the client and produces an inconsistent
+# response shape vs. the rest of the API. This handler logs the full traceback
+# server-side (so operators can debug) and returns a stable JSON shape:
+# ``{"detail": "Internal server error", "path": "<route>"}``.
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    log.error(
+        "Unhandled exception on %s %s: %s",
+        request.method,
+        request.url.path,
+        exc,
+        exc_info=True,
+    )
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "Internal server error", "path": str(request.url.path)},
+    )
+
+
 # ── Request / Config Models ───────────────────────────────────────────────────
 
 class ManualTradeRequest(BaseModel):
@@ -922,7 +990,11 @@ async def get_ai_prediction(token_id: str):
 # ── Market OHLCV & Historical Candlestick Data ────────────────────────────────
 
 @app.get("/api/history/ohlcv/{token_id}", tags=["markets"])
-async def get_market_ohlcv(token_id: str, resolution: str = "5m", count: int = 40):
+async def get_market_ohlcv(
+    token_id: str,
+    resolution: str = Query("5m", pattern="^(1m|5m|1h)$"),
+    count: int = Query(40, ge=1, le=1000),
+):
     """Return OHLCV candlestick bars for visual charting.
 
     Priority:
@@ -931,6 +1003,8 @@ async def get_market_ohlcv(token_id: str, resolution: str = "5m", count: int = 4
       2. Seeded random-walk anchored to live mid when no stored candles exist —
          explicitly labeled synthetic=True so callers always know the data source.
     """
+    if not token_id:
+        raise HTTPException(status_code=422, detail="token_id path parameter is required")
     book = await store.get_order_book(token_id)
     mid = (book.mid if book else 0.5) or 0.5
     slug = store.market_slugs.get(token_id, token_id[:14])
@@ -1020,7 +1094,7 @@ async def get_market_ohlcv(token_id: str, resolution: str = "5m", count: int = 4
 
 
 @app.get("/api/ai/search", tags=["ai"])
-async def semantic_search(query: str = Query(..., min_length=1), top_k: int = 8):
+async def semantic_search(query: str = Query(..., min_length=1, max_length=500), top_k: int = Query(8, ge=1, le=100)):
     """Semantic vector similarity search across all prediction markets."""
     results = vector_store.search(query, top_k=top_k)
     return {"query": query, "results": [{"market": meta, "score": score} for meta, score in results]}
@@ -1067,7 +1141,7 @@ async def update_config(cfg: StrategyConfigUpdate):
 # ── Markets & Order Book Depth ────────────────────────────────────────────────
 
 @app.get("/api/markets", tags=["markets"])
-async def get_markets(limit: int = 50, search: str | None = None):
+async def get_markets(limit: int = Query(50, ge=1, le=500), search: str | None = Query(None, max_length=200)):
     try:
         if search:
             items = await gamma_client.search_markets(search, limit=limit)
@@ -1075,7 +1149,15 @@ async def get_markets(limit: int = 50, search: str | None = None):
             items = await gamma_client.get_markets(active=True, limit=limit)
         return {"markets": items, "count": len(items)}
     except Exception as e:
-        raise HTTPException(status_code=502, detail=str(e))
+        # Sanitize: never leak the upstream exception's repr (which can include
+        # auth headers / request URLs / connection-string fragments) into the
+        # client-visible response body. Log the full traceback server-side;
+        # return a stable 502 with a generic upstream-failure detail.
+        log.error("[api/markets] upstream gamma_client call failed: %s", e, exc_info=True)
+        raise HTTPException(
+            status_code=502,
+            detail="Upstream market-data provider unavailable — retry shortly",
+        )
 
 
 @app.get("/api/markets/coverage", tags=["markets"])
@@ -1087,7 +1169,7 @@ async def get_market_coverage_report():
 
 
 @app.get("/api/markets/catalog", tags=["markets"])
-async def get_market_catalog(limit: int = 100, category: str | None = None):
+async def get_market_catalog(limit: int = Query(100, ge=1, le=1000), category: str | None = Query(None, max_length=100)):
     """Return indexed market catalog with full hierarchy metadata."""
     from core.market_discovery import market_discovery
     catalog = market_discovery.get_full_catalog(limit=limit, category=category)
@@ -1096,6 +1178,8 @@ async def get_market_catalog(limit: int = 100, category: str | None = None):
 
 @app.get("/api/depth/{token_id}", tags=["markets"])
 async def get_market_depth(token_id: str):
+    if not token_id:
+        raise HTTPException(status_code=422, detail="token_id path parameter is required")
     book = await store.get_order_book(token_id)
     if not book:
         book_poller.prioritize_tokens([token_id])
@@ -1490,7 +1574,7 @@ async def close_position(token_id: str, req: PositionCloseRequest):
 
 
 @app.get("/api/trades", tags=["trading"])
-async def get_trades(limit: int = 50):
+async def get_trades(limit: int = Query(50, ge=1, le=1000)):
     trades = store.trades[-limit:]
     return {
         "trades": [
@@ -1512,7 +1596,7 @@ async def get_trades(limit: int = 50):
 
 
 @app.get("/api/events", tags=["system"])
-async def get_events(n: int = 50):
+async def get_events(n: int = Query(50, ge=1, le=500)):
     events = await store.get_recent_events(n)
     return {"events": list(reversed(events)), "count": len(events)}
 
@@ -1660,17 +1744,26 @@ async def get_training_orchestrator_stats():
 
 
 @app.post("/api/ml/learn", tags=["ml"])
-async def ml_learn(token_id: str, resolved_yes: bool):
+async def ml_learn(token_id: str = Query(..., min_length=1, max_length=200), resolved_yes: bool = True):
     """Feed a resolved ground-truth outcome into the online SGD learner.
 
     1. Backfills outcome labels in both DB backends (TimescaleDB + SQLite).
     2. Fetches the most recent stored feature vector for this token.
     3. Calls ml_model.update() to incrementally train the SGD online learner.
     """
+    if not token_id or not token_id.strip():
+        raise HTTPException(status_code=422, detail="token_id is required and must be non-empty")
     from core.timescale_db import timescale_db
 
     # Step 1: persist outcome label
-    updated = timescale_db.mark_resolved_outcomes(token_id, resolved_yes=resolved_yes)
+    try:
+        updated = timescale_db.mark_resolved_outcomes(token_id, resolved_yes=resolved_yes)
+    except Exception as e:
+        log.error("[api/ml/learn] mark_resolved_outcomes failed for %s: %s", token_id, e, exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to persist outcome label — see server logs for details",
+        )
 
     # Step 2: fetch the most recent feature vector for this token
     import json as _json
@@ -1729,13 +1822,20 @@ async def get_deep_analysis():
 @app.get("/api/analysis/market/{token_id}", tags=["analysis"])
 async def analyze_specific_market(token_id: str):
     """Return complete 9-factor probabilistic, microstructure, and recommendation analysis for a single contract."""
+    if not token_id:
+        raise HTTPException(status_code=422, detail="token_id path parameter is required")
     from core.analysis_engine import deep_analysis_engine
     analysis = deep_analysis_engine.analyze_market(token_id)
+    if analysis is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"no analysis available for token '{token_id}'",
+        )
     return analysis
 
 
 @app.get("/api/analysis/news", tags=["analysis"])
-async def get_fundamental_news(limit: int = 50, category: str | None = None):
+async def get_fundamental_news(limit: int = Query(50, ge=1, le=500), category: str | None = Query(None, max_length=100)):
     """Return news headlines with sentiment scores. Items carry `is_seed` provenance."""
     items = fundamental_engine.news_feed
     if category and category.lower() != "all":
@@ -1801,7 +1901,7 @@ async def run_backtest_simulation(req: BacktestRequest):
 
 
 @app.get("/api/audit/logs", tags=["audit"])
-async def get_audit_logs(limit: int = 100, category: str | None = None):
+async def get_audit_logs(limit: int = Query(100, ge=1, le=1000), category: str | None = Query(None, max_length=100)):
     """Query immutable SQLite audit trail logs."""
     logs = await audit_logger.get_recent_events(limit=limit, category=category)
     return {"logs": logs, "count": len(logs)}
@@ -1898,7 +1998,7 @@ async def execute_arbitrage(req: ArbitrageExecuteRequest):
 
 
 @app.get("/api/database/records", tags=["database"])
-async def get_database_records(table: str = "market_snapshots", limit: int = 25):
+async def get_database_records(table: str = Query("market_snapshots", max_length=200), limit: int = Query(25, ge=1, le=500)):
     """Query latest time-series records from the ACTIVE backend (KD-29).
 
     Reads through the engine so results always match the backend that is
@@ -1907,7 +2007,6 @@ async def get_database_records(table: str = "market_snapshots", limit: int = 25)
     from core.timescale_db import _TABLES, timescale_db
     if table not in _TABLES:
         raise HTTPException(status_code=400, detail=f"Invalid table {table}")
-    limit = max(1, min(int(limit), 500))
     return timescale_db.fetch_records(table=table, limit=limit)
 
 

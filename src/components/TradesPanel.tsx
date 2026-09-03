@@ -1,7 +1,7 @@
 // components/TradesPanel.tsx — Recent Trade Executions Feed
 'use client'
 
-import { useState, useMemo } from 'react'
+import { useState, useMemo, useCallback, memo } from 'react'
 import { Trade } from '@/hooks/useBot'
 import { formatHierarchicalMarket } from '@/lib/formatters'
 import { fmtAge, fmtPrice, fmtPnl, fmtUsd } from '@/lib/design-tokens'
@@ -10,7 +10,12 @@ interface Props {
   trades: Trade[]
 }
 
-export default function TradesPanel({ trades }: Props) {
+// W9-6 — wrapped in React.memo. The single prop `trades` is a new array
+// reference on every snapshot, so memo skips re-render only when snapshot
+// identity is unchanged (e.g. parent re-rendered without a new snapshot).
+// Internal filtering/sorting is memoized below to avoid recomputing on
+// every parent render.
+function TradesPanel({ trades }: Props) {
   const [filterQuery, setFilterQuery] = useState('')
   const [sideFilter, setSideFilter] = useState<'ALL' | 'BUY' | 'SELL'>('ALL')
   const [copiedId, setCopiedId] = useState<string | null>(null)
@@ -26,7 +31,9 @@ export default function TradesPanel({ trades }: Props) {
     })
   }, [trades, filterQuery, sideFilter])
 
-  const displayedTrades = filteredTrades.slice(0, 100)
+  // W9-6 — slice(0, 100) is cheap but pure; memoize so we don't allocate
+  // a new array on every parent re-render (e.g. when copiedId toggles).
+  const displayedTrades = useMemo(() => filteredTrades.slice(0, 100), [filteredTrades])
 
   // Execution Summary Metrics
   const stats = useMemo(() => {
@@ -38,7 +45,11 @@ export default function TradesPanel({ trades }: Props) {
     return { totalVol, netPnl, winRate, totalCount: trades.length }
   }, [trades])
 
-  const handleExportCsv = () => {
+  // W9-6 — wrap CSV export + clipboard in useCallback. These callbacks
+  // are passed to <button onClick> lambdas, so stability isn't strictly
+  // required, but useCallback documents intent and avoids allocating new
+  // closures when trades hasn't changed.
+  const handleExportCsv = useCallback(() => {
     if (trades.length === 0) return
     const headers = ['Trade ID', 'Timestamp', 'Market Slug', 'Side', 'Price', 'Shares', 'P&L', 'Strategy']
     const rows = trades.map((t) => [
@@ -59,13 +70,13 @@ export default function TradesPanel({ trades }: Props) {
     document.body.appendChild(link)
     link.click()
     document.body.removeChild(link)
-  }
+  }, [trades])
 
-  const copyToClipboard = (text: string, id: string) => {
+  const copyToClipboard = useCallback((text: string, id: string) => {
     navigator.clipboard.writeText(text)
     setCopiedId(id)
     setTimeout(() => setCopiedId(null), 1500)
-  }
+  }, [])
 
   return (
     <div className="card h-full flex flex-col p-3 bg-[#13161e] border border-[#1f2335] shadow-xl">
@@ -232,3 +243,7 @@ export default function TradesPanel({ trades }: Props) {
   )
 }
 
+// W9-6 — React.memo with shallow compare. Single prop `trades` (array ref)
+// is compared by identity. When the parent re-renders but `trades` hasn't
+// changed (e.g. due to a state update elsewhere), this panel skips.
+export default memo(TradesPanel)

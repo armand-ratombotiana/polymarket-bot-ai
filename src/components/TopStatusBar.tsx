@@ -269,8 +269,10 @@ export default function TopStatusBar({
             onClick={onToggleMute}
             className="btn btn-ghost btn-sm p-1.5 text-xs text-[#7e8aaa] hover:text-white"
             title={muted ? 'Unmute alerts' : 'Mute alerts'}
+            aria-label={muted ? 'Unmute audio alerts' : 'Mute audio alerts'}
+            aria-pressed={muted}
           >
-            {muted ? '🔇' : '🔊'}
+            <span aria-hidden="true">{muted ? '🔇' : '🔊'}</span>
           </button>
         )}
 
@@ -279,8 +281,9 @@ export default function TopStatusBar({
             onClick={onOpenShortcuts}
             className="btn btn-ghost btn-sm p-1.5 text-xs text-[#7e8aaa] hover:text-white"
             title="Shortcuts (?)"
+            aria-label="Open keyboard shortcuts cheatsheet"
           >
-            ⌨️
+            <span aria-hidden="true">⌨️</span>
           </button>
         )}
 
@@ -288,8 +291,9 @@ export default function TopStatusBar({
           <button
             onClick={onOpenConfig}
             className="btn btn-ghost btn-sm text-xs font-semibold text-[#7e8aaa] hover:text-white flex items-center gap-1 px-2 py-1"
+            aria-label="Open strategy and risk configuration modal"
           >
-            ⚙️ Config
+            <span aria-hidden="true">⚙️</span> Config
           </button>
         )}
 

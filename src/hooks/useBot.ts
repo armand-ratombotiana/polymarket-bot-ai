@@ -127,7 +127,22 @@ export function useBot() {
   const flashTimersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({})
   const [priceFlashes, setPriceFlashes] = useState<Record<string, 'up' | 'down'>>({})
 
-  // Direct REST fetch to populate data immediately or on fallback
+  // Direct REST fetch to populate data immediately or on fallback.
+  //
+  // W9-6 — Stale-while-revalidate behaviour: this fetcher never sets a
+  // "loading" flag. It always preserves the current `snapshot` state in
+  // the UI while the network request is in-flight, then atomically swaps
+  // in the new snapshot on success. This avoids a flash of empty content
+  // on every 2s poll (the previous data remains visible until the new
+  // data arrives). The only state that can change is `status` — and even
+  // that only flips on the FIRST successful connect (guarded by
+  // `isWsConnectedRef`); subsequent polls leave `status` untouched so the
+  // status bar doesn't flicker.
+  //
+  // The fallback composite fetch already batches all six sub-endpoints via
+  // `Promise.all` — they all run concurrently rather than sequentially,
+  // so worst-case latency is `max(t_book, t_status, t_events, t_orders,
+  // t_positions, t_trades)` rather than the sum.
   const fetchRestSnapshot = useCallback(async () => {
     const apiUrl = getApiUrl()
     try {
@@ -335,38 +350,87 @@ export function useBot() {
   }, [])
 
   // Actions
-  const activateKillSwitch = async () => {
+  // W9-6 — wrap mutation actions in useCallback. Without useCallback these
+  // functions get new identities on every render, which means:
+  //   1. Any child component receiving them as props (PositionsPanel's
+  //      onClosePosition, OrdersPanel's onCancel) bypasses React.memo on
+  //      every parent re-render — defeating the memoization we added to
+  //      those panels.
+  //   2. Effects in this hook that list them as deps re-run on every
+  //      snapshot (none currently do, but it's a footgun for future edits).
+  // The callbacks only close over `fetchRestSnapshot` (already useCallback-
+  // wrapped above) and stable imports, so the dependency array is stable.
+  const activateKillSwitch = useCallback(async () => {
     const apiUrl = getApiUrl()
     await fetch(`${apiUrl}/api/kill-switch/activate`, { method: 'POST', headers: authHeaders() }).catch(() => {})
     fetchRestSnapshot()
-  }
+  }, [fetchRestSnapshot])
 
-  const deactivateKillSwitch = async () => {
+  const deactivateKillSwitch = useCallback(async () => {
     const apiUrl = getApiUrl()
     await fetch(`${apiUrl}/api/kill-switch/deactivate`, { method: 'POST', headers: authHeaders() }).catch(() => {})
     fetchRestSnapshot()
-  }
+  }, [fetchRestSnapshot])
 
-  const cancelAllOrders = async () => {
+  const cancelAllOrders = useCallback(async () => {
     const apiUrl = getApiUrl()
     await fetch(`${apiUrl}/api/orders`, { method: 'DELETE', headers: authHeaders() }).catch(() => {})
     fetchRestSnapshot()
-  }
+  }, [fetchRestSnapshot])
 
-  const cancelOrder = async (orderId: string) => {
+  const cancelOrder = useCallback(async (orderId: string) => {
     const apiUrl = getApiUrl()
     await fetch(`${apiUrl}/api/orders/${orderId}`, { method: 'DELETE', headers: authHeaders() }).catch(() => {})
     fetchRestSnapshot()
-  }
+  }, [fetchRestSnapshot])
 
   // S1 — Close a single position by token_id. POSTs to the backend close
   // endpoint and refreshes the snapshot. Failures are swallowed so the UI
   // remains responsive; the next REST poll will reconcile state.
-  const closePosition = async (tokenId: string) => {
+  // W9-6 — wrapped in useCallback for stable identity (see comment above).
+  const closePosition = useCallback(async (tokenId: string) => {
     const apiUrl = getApiUrl()
     await fetch(`${apiUrl}/api/positions/${tokenId}/close`, { method: 'POST', headers: authHeaders() }).catch(() => {})
     fetchRestSnapshot()
-  }
+  }, [fetchRestSnapshot])
+
+  // W9-6 — Visibility-aware REST polling.
+  // Background polling (the 2s `setInterval`) is the WebSocket fallback.
+  // When the document is hidden (user switched tabs / minimized the window),
+  // we pause the interval so we don't:
+  //   - Burn backend quota on tabs nobody is looking at.
+  //   - Trigger React re-render storms on every tick (the parent
+  //     `app-shell` re-renders on every snapshot — a hidden tab doing this
+  //     30 times a minute wastes CPU).
+  // The WebSocket stays open; if the server pushes critical updates
+  // (kill_switch, fills), the snapshot still updates — only the REST
+  // polling is gated.
+  useEffect(() => {
+    if (typeof document === 'undefined') return
+    const onVis = () => {
+      if (document.hidden) {
+        if (restPollRef.current) {
+          clearInterval(restPollRef.current)
+          restPollRef.current = null
+        }
+      } else {
+        // Tab became visible — immediately fetch (in case state changed
+        // while hidden) and resume the 2s polling cadence.
+        if (!restPollRef.current) {
+          fetchRestSnapshot()
+          restPollRef.current = setInterval(() => {
+            if (!isWsConnectedRef.current) {
+              fetchRestSnapshot()
+            }
+          }, 2000)
+        }
+      }
+    }
+    document.addEventListener('visibilitychange', onVis)
+    return () => {
+      document.removeEventListener('visibilitychange', onVis)
+    }
+  }, [fetchRestSnapshot])
 
   return {
     snapshot,

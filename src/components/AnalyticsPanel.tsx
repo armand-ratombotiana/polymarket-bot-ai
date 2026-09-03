@@ -1,7 +1,7 @@
 // components/AnalyticsPanel.tsx — Institutional Performance Analytics
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useCallback, useRef, memo } from 'react'
 import { getApiUrl, apiFetch } from '@/lib/api'
 import { fmtUsd, fmtPnl, fmtPct } from '@/lib/design-tokens'
 
@@ -43,28 +43,68 @@ const STRATEGY_LABELS: Record<string, string> = {
   ml_random_forest_quant: 'RF Quant Ensemble',
 }
 
-export default function AnalyticsPanel() {
+// W9-6 — wrapped in React.memo. The component takes no props, so React.memo
+// with default shallow compare would never re-render. That's incorrect
+// here: the panel self-polls every 4s and updates its own state. React.memo
+// on a no-prop component is a no-op (only useful to skip when the parent
+// re-renders). It IS valuable when this panel is rendered as a child of a
+// frequently-re-rendering parent (the command-center grid re-renders on
+// every snapshot tick from useBot), so we wrap it to short-circuit those
+// parent-driven re-renders. Internal state updates (data/loading) still
+// trigger re-renders normally.
+function AnalyticsPanel() {
   const [data, setData] = useState<Analytics | null>(null)
   const [loading, setLoading] = useState(true)
 
+  // W9-6 — useCallback for the fetcher so the polling effect can list it
+  // as a stable dependency (effect only re-runs on mount). The fetcher
+  // references no closures except `setData`/`setLoading` which are stable.
+  const fetchAnalytics = useCallback(async () => {
+    try {
+      const apiUrl = getApiUrl()
+      const res = await apiFetch(`${apiUrl}/api/analytics`)
+      if (res.ok) {
+        setData(await res.json())
+      }
+    } catch {
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  // W9-6 — pause polling when the tab is hidden to avoid burning API
+  // quota and CPU on background tabs. Resumes immediately on visibility.
+  // The ref holds the current interval id; visibilitychange clears it
+  // and restarts it when the tab becomes visible again.
+  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
+
   useEffect(() => {
-    const fetchAnalytics = async () => {
-      try {
-        const apiUrl = getApiUrl()
-        const res = await apiFetch(`${apiUrl}/api/analytics`)
-        if (res.ok) {
-          setData(await res.json())
-        }
-      } catch {
-      } finally {
-        setLoading(false)
+    const start = () => {
+      // immediate first fetch on start (covers both initial mount + resume)
+      fetchAnalytics()
+      if (intervalRef.current) clearInterval(intervalRef.current)
+      intervalRef.current = setInterval(fetchAnalytics, 4000)
+    }
+    const stop = () => {
+      if (intervalRef.current) {
+        clearInterval(intervalRef.current)
+        intervalRef.current = null
       }
     }
-
-    fetchAnalytics()
-    const timer = setInterval(fetchAnalytics, 4000)
-    return () => clearInterval(timer)
-  }, [])
+    const onVis = () => {
+      if (document.hidden) {
+        stop()
+      } else {
+        start()
+      }
+    }
+    start()
+    document.addEventListener('visibilitychange', onVis)
+    return () => {
+      stop()
+      document.removeEventListener('visibilitychange', onVis)
+    }
+  }, [fetchAnalytics])
 
   if (loading && !data) {
     return (
@@ -245,3 +285,10 @@ export default function AnalyticsPanel() {
     </div>
   )
 }
+
+// W9-6 — React.memo (no props, default shallow compare). Skips
+// re-renders triggered purely by parent re-renders (e.g. useBot snapshot
+// updates that don't affect this panel). Internal state updates
+// (data/loading) still re-render normally because they originate inside
+// the component.
+export default memo(AnalyticsPanel)

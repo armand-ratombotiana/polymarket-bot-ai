@@ -1,7 +1,7 @@
 // components/MarketsPanel.tsx — Pro Markets & Live Order Books Desk with Microstructure Gauges
 'use client'
 
-import { useState, useMemo } from 'react'
+import { useState, useMemo, memo } from 'react'
 import { OrderBook } from '@/hooks/useBot'
 import { formatHierarchicalMarket } from '@/lib/formatters'
 import { fmtPrice } from '@/lib/design-tokens'
@@ -60,13 +60,28 @@ function ProbabilityGauge({ mid }: { mid: number | null }) {
 
 const CATEGORIES = ['ALL', 'CRYPTO', 'POLITICS', 'ECONOMY', 'SPORTS', 'TECH']
 
-export default function MarketsPanel({ books, onSelectMarket, priceFlashes }: Props) {
+// W9-6 — wrapped in React.memo. The component receives `books` (a new
+// array reference on every snapshot from useBot — every poll/WebSocket
+// message — so memo won't skip many renders by itself), `onSelectMarket`
+// (stable when parent wraps it in useCallback), and `priceFlashes`
+// (mutates ~500ms after each tick as flashes clear). For memo to be
+// effective, the parent (page.tsx) MUST pass stable callback identities
+// via useCallback — otherwise the memo is bypassed on every parent render.
+// We still wrap with React.memo (default shallow compare) so that any
+// future parent-side memoization of `books` (e.g. via a selector hook)
+// would automatically skip this panel's re-render.
+function MarketsPanel({ books, onSelectMarket, priceFlashes }: Props) {
   const [search, setSearch] = useState('')
   const [selectedCat, setSelectedCat] = useState('ALL')
   const [sortBy, setSortBy] = useState<'mid' | 'spread' | 'age'>('mid')
   const [sortAsc, setSortAsc] = useState(false)
   const [copiedToken, setCopiedToken] = useState<string | null>(null)
 
+  // W9-6 — handlers kept as inline functions rather than useCallback:
+  // they are wrapped in per-row arrow lambdas inside the JSX
+  // (onClick={() => handleSort('mid')}), so making the outer function stable
+  // has no memoization benefit. The expensive work (filter + sort) is
+  // already memoized via the useMemo blocks below.
   const handleSort = (field: 'mid' | 'spread' | 'age') => {
     if (sortBy === field) {
       setSortAsc(!sortAsc)
@@ -320,3 +335,16 @@ export default function MarketsPanel({ books, onSelectMarket, priceFlashes }: Pr
     </div>
   )
 }
+
+// W9-6 — React.memo with a custom comparator. `books` always changes
+// reference on each snapshot (so memo rarely skips on its own), but the
+// comparator also collapses identical priceFlashes maps so two snapshots
+// with the same mid prices back-to-back won't re-render this 200+ cell
+// table. `onSelectMarket` must be stable in the parent (useCallback) —
+// otherwise the comparator returns false on every parent render.
+export default memo(MarketsPanel, (prev, next) => {
+  if (prev.books !== next.books) return false
+  if (prev.onSelectMarket !== next.onSelectMarket) return false
+  if (JSON.stringify(prev.priceFlashes) !== JSON.stringify(next.priceFlashes)) return false
+  return true
+})

@@ -177,10 +177,64 @@ body {
 }
 
 /* ── Focus ring ─────────────────────────────────────────────────────────── */
-:focus-visible {
-  outline: 2px solid var(--border-focus);
+/* W9-7 — Visible keyboard focus indicator on every interactive element.
+   Uses :focus-visible (not :focus) so mouse clicks don't paint the ring;
+   keyboard users get a 2px ring in the design-system accent colour. */
+*:focus-visible {
+  outline: 2px solid var(--border-focus, #3b82f6);
   outline-offset: 2px;
   border-radius: var(--radius-sm);
+}
+/* Ensure elements that hide their default outline still show one on keyboard
+   nav (e.g. .input, .select which set `outline: none` for their custom
+   focus styles — keyboard users get the box-shadow already, but :focus-visible
+   adds an outline as a redundant safety net for high-contrast mode). */
+.input:focus-visible,
+.select:focus-visible,
+.btn:focus-visible,
+.sidebar-item:focus-visible,
+.modal-close:focus-visible {
+  outline: 2px solid var(--border-focus, #3b82f6);
+  outline-offset: 2px;
+}
+
+/* ── Screen-reader-only utility ───────────────────────────────────────────
+   W9-7 — Hide content visually but keep it readable by assistive tech.
+   Pattern from the W3C WAI-ARIA Authoring Practices. */
+.sr-only {
+  position: absolute !important;
+  width: 1px !important;
+  height: 1px !important;
+  padding: 0 !important;
+  margin: -1px !important;
+  overflow: hidden !important;
+  clip: rect(0, 0, 0, 0) !important;
+  white-space: nowrap !important;
+  border: 0 !important;
+}
+/* Skip-to-main-content link: visually hidden by default, becomes visible
+   on keyboard focus. Used in src/app/layout.tsx. */
+.skip-link {
+  position: absolute;
+  left: 8px;
+  top: 8px;
+  z-index: 9999;
+  background: var(--bg-card, #13161e);
+  color: var(--text-primary, #dde1ed);
+  border: 1px solid var(--border-focus, #3b82f6);
+  border-radius: var(--radius-md, 6px);
+  padding: 8px 14px;
+  font-size: 12.5px;
+  font-weight: 600;
+  text-decoration: none;
+  transform: translateY(-150%);
+  transition: transform var(--duration-fast, 120ms) var(--easing-std, cubic-bezier(0.4, 0, 0.2, 1));
+}
+.skip-link:focus,
+.skip-link:focus-visible {
+  transform: translateY(0);
+  outline: 2px solid var(--border-focus, #3b82f6);
+  outline-offset: 2px;
 }
 
 /* ── Scrollbar ──────────────────────────────────────────────────────────── */
