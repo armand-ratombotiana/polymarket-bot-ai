@@ -2265,3 +2265,43 @@ _register_ml_version_routes(app)
 from risk.routes import register_routes as _register_risk_routes
 
 _register_risk_routes(app)
+
+
+# (W11) core.observability_collector — background auto-collector for the
+# unified health dashboard. Additive wiring appended at end of file per
+# the W11 task spec. NOTE: unlike the sibling ``register_routes``
+# invocations above, ``core.observability_collector.register_routes``
+# does NOT add any HTTP routes — its docstring is explicit
+# ("NO HTTP ROUTES ADDED"). Instead it wraps ``app.router.lifespan_context``
+# so a single long-running asyncio task starts after the app's own
+# startup completes (and stops before the app's own shutdown runs).
+# The task periodically (every ~30 s) pulls operational stats from
+# every active subsystem (book_poller / store / ml_model /
+# drift_detector / psutil) and persists them through
+# ``core.observability.record_metric`` so ``GET /api/observability``
+# always has fresh data without each subsystem having to instrument
+# itself. The wrap is idempotent (``_lifespan_wrapped`` guard) so a
+# duplicate call is a no-op. The route count therefore does NOT
+# increase — only the lifespan is augmented — which is the intended
+# behaviour: this is observability *plumbing*, not a new surface.
+from core.observability_collector import register_routes as _register_observability_collector
+
+_register_observability_collector(app)
+
+
+# (W11) ml.routes — ML model-governance endpoints (version registry +
+# rollback). The W11 spec asks for this to be wired "if not already
+# wired". It IS already wired by the T8 block at lines ~2246–2254 above
+# (alias ``_register_ml_version_routes``, invokes
+# ``_register_ml_version_routes(app)``). Re-invoking here would
+# double-register ``GET /api/ml/versions`` and ``POST /api/ml/rollback``
+# and FastAPI would raise a duplicate-route error at app construction
+# time. Skipping the re-wiring is the correct, non-destructive choice —
+# the endpoints are already present on the route table (verified by
+# importing the app and enumerating ``app.routes``: both paths appear
+# exactly once). No second ``from ml.routes import register_routes``
+# line is added here because the alias is already bound at module scope
+# by the T8 block; a redundant re-import would be a no-op that obscures
+# the deliberate skip. The W11 spec's "if not already wired" guard
+# clause resolves to FALSE for this app — do nothing.
+# (ml.routes already wired — see T8 block above; intentionally not re-registered.)

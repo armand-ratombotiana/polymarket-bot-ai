@@ -387,11 +387,11 @@ export default function Dashboard() {
             {/* ── 7. Intelligence — Deep Analysis ───────────────────── */}
             {activeSection === 'intelligence-analysis' && (
               <div style={{ height: '100%', overflow: 'hidden' }}>
+                {/* W13 — One-click Trade button on each "Top Alpha Opportunities" row
+                    mounts the DepthChartModal (depth book + trade ticket) for that
+                    market. Mirrors the MarketsPanel onSelectMarket wiring pattern. */}
                 <DeepAnalysisView
                   onOpenChart={(m) => setChartMarket(m)}
-                  {/* W13 — One-click Trade button on each "Top Alpha Opportunities" row
-                      mounts the DepthChartModal (depth book + trade ticket) for that
-                      market. Mirrors the MarketsPanel onSelectMarket wiring pattern. */}
                   onSelectMarket={(tokenId, slug) => setSelectedMarket({ tokenId, slug })}
                 />
               </div>
