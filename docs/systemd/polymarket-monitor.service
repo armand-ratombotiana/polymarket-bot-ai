@@ -1,0 +1,72 @@
+# /etc/systemd/system/polymarket-monitor.service
+# W12-5 reference unit file — long-running monitoring daemon.
+#
+# Runs scripts/monitor.py, which:
+#   * Invokes health_check.py in-process every 60s
+#   * Appends each sample (as JSONL) to MONITOR_LOG
+#   * Emits a state-transition alert to stderr (visible via journalctl)
+#     whenever the overall pass/fail state changes (OK → DEGRADED → DOWN)
+#
+# The daemon is a Type=simple service — systemd considers it "active"
+# as long as the Python process is alive. The actual bot-health signal is
+# in the JSONL log file and in the stderr alerts journald captures.
+#
+# See docs/systemd/README.md for installation + override instructions.
+
+[Unit]
+Description=Polymarket bot — long-running health monitor daemon
+Documentation=file:///home/z/my-project/docs/systemd/README.md
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/z/my-project
+ExecStart=/usr/bin/env python3 /home/z/my-project/scripts/monitor.py --interval 60
+
+# Environment overrides — uncomment / edit as needed.
+# Environment=FRONTEND_URL=http://localhost:3000
+# Environment=BACKEND_URL=http://localhost:8080
+# Environment=BOT_DATA_DIR=/home/z/my-project/mini-services/polymarket-bot/data
+# Environment=API_TOKEN=<prod-token>
+# Environment=MONITOR_LOG=/var/log/polymarket/health_monitor.jsonl
+
+# Run as the same user that owns the data dir so the JSONL log is writable.
+User=z
+Group=z
+
+# Hardening — needs network + write access to the JSONL log path.
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/home/z/my-project/mini-services/polymarket-bot/data
+ProtectHome=read-only
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+SystemCallArchitectures=native
+
+# Graceful shutdown: monitor.py traps SIGTERM and exits 0 within ~1s.
+# Give it 10s of leeway before systemd SIGKILLs it.
+KillSignal=SIGTERM
+TimeoutStopSec=10s
+
+# Restart policy — keep the daemon up across transient Python crashes,
+# but don't loop forever if it's failing on startup (e.g. syntax error).
+Restart=on-failure
+RestartSec=10s
+StartLimitIntervalSec=120s
+StartLimitBurst=5
+
+# Capture stdout (JSONL log) AND stderr (state-transition alerts) in the
+# journal so `journalctl -u polymarket-monitor -f` shows everything live.
+# Note: monitor.py ALSO writes the JSONL log to disk under ReadWritePaths.
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

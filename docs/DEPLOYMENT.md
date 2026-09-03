@@ -453,6 +453,54 @@ sudo journalctl -u polymarket-web.service -u polymarket-bot.service -f
 - **Daily loss approaching limit**. Alert when realised daily loss
   exceeds 80% of `DAILY_LOSS_LIMIT_USDC`.
 
+### 9.4 Health check + monitoring scripts (W12-5)
+
+The repo ships three standalone monitoring scripts under `scripts/`:
+
+| Script | Runs as | What it does |
+| --- | --- | --- |
+| `scripts/health_check.py` | one-shot | 10 checks (frontend, backend, DBs, disk, memory, ML, kill switch, alerts, observability). Prints JSON to stdout; exits 0 if all pass, 1 otherwise. |
+| `scripts/monitor.py` | daemon | Calls `health_check.py` every 60 s, appends JSONL samples to `data/health_monitor.jsonl`, prints a state-transition alert to stderr (visible via `journalctl`) whenever the overall state changes (OK → DEGRADED → DOWN). |
+| `scripts/status_report.py` | one-shot | Aggregates six endpoints (`/api/health`, `/api/status`, `/api/snapshot`, `/api/ml/metrics`, `/api/alerts/stats`, `/api/cache/stats`) into a single JSON report with a human-readable summary on stderr. |
+
+Reference systemd unit/timer files live under `docs/systemd/` (NOT installed
+by default):
+
+| File | Purpose |
+| --- | --- |
+| `docs/systemd/polymarket-health.service` | One-shot unit that runs `health_check.py`. |
+| `docs/systemd/polymarket-health.timer` | Fires the one-shot unit every 5 minutes. |
+| `docs/systemd/polymarket-monitor.service` | Long-running daemon that runs `monitor.py` continuously. |
+
+To install them on a production host:
+
+```bash
+sudo cp docs/systemd/polymarket-*.service /etc/systemd/system/
+sudo cp docs/systemd/polymarket-health.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now polymarket-health.timer
+sudo systemctl enable --now polymarket-monitor.service
+```
+
+The health-check timer's `SuccessExitStatus=0 1` directive means
+`systemctl status polymarket-health.service` shows green even when the
+bot is unhealthy — the actual signal is in the JSON stdout and in the
+journal. Inspect with:
+
+```bash
+# Latest health-check result (JSON)
+sudo journalctl -u polymarket-health.service -n 80 --no-pager
+
+# Live monitor daemon stream (state-transition alerts on stderr)
+sudo journalctl -u polymarket-monitor.service -f
+
+# The JSONL log file (one record per 60 s sample)
+tail -f /opt/polymarket-bot/mini-services/polymarket-bot/data/health_monitor.jsonl | jq .
+```
+
+See `docs/systemd/README.md` for the full operator runbook (environment
+overrides, drop-ins, log rotation).
+
 ## 10. Security Checklist
 
 Run through this checklist before flipping `TRADING_MODE` to `live`.

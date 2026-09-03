@@ -1,0 +1,27 @@
+# /etc/systemd/system/polymarket-health.timer
+# W12-5 reference timer — fires polymarket-health.service every 5 minutes.
+#
+# Pair with polymarket-health.service. Install with:
+#   sudo systemctl enable --now polymarket-health.timer
+# Inspect with:
+#   systemctl list-timers polymarket-health.timer
+#   systemctl status polymarket-health.timer
+# See docs/systemd/README.md for the full operator runbook.
+
+[Unit]
+Description=Run Polymarket bot health check every 5 minutes
+Documentation=file:///home/z/my-project/docs/systemd/README.md
+
+[Timer]
+# Fire 5 minutes after the last activation, with a small spread so the
+# bot stack and other periodic services don't all hit at the same instant.
+OnBootSec=1min
+OnUnitActiveSec=5min
+AccuracySec=10s
+Unit=polymarket-health.service
+
+# If a firing is missed (host was down), run it once on next boot.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

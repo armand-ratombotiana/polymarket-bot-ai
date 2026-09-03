@@ -16,7 +16,11 @@
     "db:reset": "prisma migrate reset",
     "e2e": "playwright test",
     "e2e:ui": "playwright test --ui",
-    "e2e:headed": "playwright test --headed"
+    "e2e:headed": "playwright test --headed",
+    "analyze": "ANALYZE=true bun run build",
+    "analyze:server": "ANALYZE=true bun run build && bun run start",
+    "storybook": "storybook dev -p 6006",
+    "build-storybook": "storybook build"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",
@@ -87,7 +91,13 @@
     "zustand": "^5.0.6"
   },
   "devDependencies": {
+    "@next/bundle-analyzer": "^16.3.4",
     "@playwright/test": "^1.62.1",
+    "@storybook/addon-essentials": "^8.6.14",
+    "@storybook/addon-interactions": "^8.6.14",
+    "@storybook/addon-links": "^10.6.0",
+    "@storybook/nextjs": "^10.6.0",
+    "@storybook/react": "^10.6.0",
     "@tailwindcss/postcss": "^4",
     "@testing-library/jest-dom": "^7.0.1",
     "@testing-library/react": "^16.3.3",
@@ -99,6 +109,7 @@
     "eslint": "^9",
     "eslint-config-next": "^16.1.1",
     "jsdom": "^30.0.1",
+    "storybook": "^10.6.0",
     "tailwindcss": "^4",
     "tw-animate-css": "^1.3.5",
     "typescript": "^5",

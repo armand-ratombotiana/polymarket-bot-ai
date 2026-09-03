@@ -61,6 +61,16 @@ from config import settings
 from core.audit_logger import audit_logger
 from core.book_poller import book_poller
 from core.clob_client import OrderArgs
+# W12-6 — Structured logging. Imported BEFORE the FastAPI app is constructed
+# so the very first ``log.info(...)`` call (e.g. inside ``_seed_markets``)
+# emits a structured record. ``setup_logging()`` is idempotent, so the
+# repeated ``from api.server import app`` in sibling test modules doesn't
+# stack duplicate handlers on the root logger.
+from core.logging_config import (
+    get_logger,
+    request_id_var,
+    setup_logging,
+)
 from core.data_store import Order, Side, store
 from core.fundamental_ingest import fundamental_engine
 from core.gamma_client import gamma_client
@@ -78,6 +88,14 @@ from ml.vector_store import vector_store
 from paper.simulator import paper_sim
 from risk.manager import BANKROLL_CEILING, MAX_DEPLOYABLE_CAPITAL, risk_manager
 from strategies.registry import strategy_registry
+
+# ── W12-6 — Structured logging ────────────────────────────────────────────────
+# Install the JSON / colored formatter on the root logger BEFORE the first
+# ``getLogger`` call below so every record — including the ones emitted
+# during lifespan startup — flows through the structured formatter.
+# Idempotent: subsequent imports of this module (test collection, dev reload)
+# are a no-op.
+setup_logging()
 
 log = logging.getLogger(__name__)
 
@@ -731,16 +749,36 @@ async def enforce_api_auth(request: Request, call_next):
 # ── Request logging middleware (outermost — added AFTER enforce_api_auth so
 #    Starlette's "last added = first executed" ordering makes this run BEFORE
 #    auth, capturing every request including 401s / 503s for observability). ──
+# W12-6 — Enhanced with a per-request UUID propagated via the
+# ``core.logging_config.request_id_var`` ContextVar. Every downstream log
+# line emitted during the request (audit_logger, ml.copilot, strategies,
+# etc.) now carries the same ``request_id`` under its ``context`` block,
+# so a log aggregator can group every record for a single client request
+# without correlating timestamps. The id is also echoed in the response
+# header ``X-Request-ID`` so the client can self-service a trace.
 @app.middleware("http")
 async def request_logging_middleware(request: Request, call_next):
-    """Log every request with method, path, status code, and latency.
+    """Log every request with method, path, status code, latency, and a
+    per-request UUID propagated to all downstream log records via a
+    ``contextvars.ContextVar``.
 
     Wrapped around every route — runs BEFORE ``enforce_api_auth`` so 401 / 503
     responses show up in the server logs without each route having to log
     them individually. The 4xx / 5xx counts feed operator dashboards and
     alerting; the latency field surfaces slow-route regressions without a
-    separate tracing layer.
+    separate tracing layer; the ``request_id`` lets an operator trace a
+    single request across the entire middleware + handler + audit-logger
+    chain in a structured log aggregator.
     """
+    import uuid as _uuid
+
+    request_id = str(_uuid.uuid4())[:8]
+    # Populate the ContextVar so every downstream ``log.info(...)`` call
+    # (audit_logger, copilot, strategies …) inherits the same request_id in
+    # its ``context`` block. ``set`` returns a token we MUST use to reset
+    # the var on the way out — without ``reset(token)`` the value would
+    # leak into the next request served by this same task slot.
+    request_id_token = request_id_var.set(request_id)
     start = time.time()
     try:
         response = await call_next(request)
@@ -756,19 +794,39 @@ async def request_logging_middleware(request: Request, call_next):
             request.url.path,
             duration,
             exc_info=True,
+            extra={
+                "request_id": request_id,
+                "method": request.method,
+                "path": str(request.url.path),
+                "status": 500,
+                "duration_ms": round(duration * 1000, 3),
+            },
         )
+        request_id_var.reset(request_id_token)
         return JSONResponse(
             status_code=500,
             content={"detail": "Internal server error", "path": str(request.url.path)},
+            headers={"X-Request-ID": request_id},
         )
     duration = time.time() - start
+    # Echo the id back to the client so support / debugging can self-service
+    # a log trace without operator intervention.
+    response.headers["X-Request-ID"] = request_id
     log.info(
         "[request] %s %s → %d (%.3fs)",
         request.method,
         request.url.path,
         response.status_code,
         duration,
+        extra={
+            "request_id": request_id,
+            "method": request.method,
+            "path": str(request.url.path),
+            "status": response.status_code,
+            "duration_ms": round(duration * 1000, 3),
+        },
     )
+    request_id_var.reset(request_id_token)
     return response
 
 
@@ -3160,6 +3218,22 @@ log.info(
 from core.alerting import register_routes as _register_alerting_routes
 
 _register_alerting_routes(app)
+
+
+# (W12-1) core.feature_flags — runtime feature toggles backed by SQLite.
+# Additive wiring appended at end of file per the W12-1 task spec. Adds
+# four feature-flag management endpoints under ``/api/flags``:
+#   GET  /api/flags                list all flags + their state/config
+#   GET  /api/flags/{key}          get a single flag (404 if unknown)
+#   POST /api/flags/{key}          update a flag (body: {enabled, config?})
+#   POST /api/flags/{key}/reset    reset a flag to its default value
+# Same registration pattern as the sibling ``register_routes`` blocks
+# above (alias imported under ``_register_*`` to avoid shadowing other
+# modules' ``register_routes`` symbol). Auth enforced by
+# ``enforce_api_auth`` (none of the four paths are in ``PUBLIC_PATHS``).
+from core.feature_flags import register_routes as _register_flag_routes
+
+_register_flag_routes(app)
 
 
 # ── W11-2 — Cache stats + management endpoints ─────────────────────────────────

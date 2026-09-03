@@ -4,7 +4,10 @@
 ![Python](https://img.shields.io/badge/Python-3.12-blue)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.111%2B-009688)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5-3178C6)
-![Tests](https://img.shields.io/badge/tests-340%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-916%2B%20passing-brightgreen)
+![E2E](https://img.shields.io/badge/E2E-Playwright-2EAD33)
+![Docker](https://img.shields.io/badge/Docker-ready-2496ED)
+![PWA](https://img.shields.io/badge/PWA-installable-5A0FC8)
 ![Trading Mode](https://img.shields.io/badge/trading-paper-orange)
 
 Polymarket Pro is an institutional-grade algorithmic trading bot for
@@ -13,6 +16,29 @@ ensemble with a Level-2 meta-learner, a 10-check live safety gate, full decision
 auditability, paper-trading-by-default semantics, and a 37-panel React
 workstation — so every PREDICTION → SIGNAL → RISK → ORDER → FILL chain can be
 reconstructed, attributed, and stress-tested end-to-end.
+
+---
+
+## Project Status
+
+**Maturity: production-ready for paper trading; live trading gated behind a 10-check safety gate.**
+
+| Dimension             | Status                                                                                  |
+| --------------------- | --------------------------------------------------------------------------------------- |
+| Backend tests         | 709 passing (pytest, 44+ files)                                                         |
+| Frontend tests        | 207 passing (vitest + Testing Library)                                                  |
+| E2E tests             | 38 passing (Playwright: dashboard, navigation, API health)                              |
+| Total tests           | 916+ across the full stack                                                              |
+| API surface           | 77+ routes, all rate-limited, OpenAPI-documented (21 tags, 11 response models)         |
+| UI panels             | 37 React panels, WCAG 2.1 AA, dark theme, responsive                                    |
+| Real-time             | WebSocket multiplexed push (5 channels) + REST polling fallback                         |
+| ML pipeline           | 4-model ensemble + Level-2 meta-learner + Platt/isotonic calibration + drift detection  |
+| Security              | OWASP Top 10 hardening, constant-time token compare, SSRF guard, fail-closed auth      |
+| Offline / PWA         | Installable, service-worker cached, offline indicator                                  |
+| Observability         | 31 auto-collected metrics, structured JSON logging, decision-ledger audit chain         |
+| Deployment            | Docker multi-stage, docker-compose, Caddy gateway, supervisord                         |
+
+See the [Documentation Index](docs/README.md) for the full doc map.
 
 ---
 
@@ -401,7 +427,7 @@ All configuration is environment-variable driven. The canonical source is
 │   │   └── simulator.py             # Paper-trade fill simulator
 │   ├── backtesting/
 │   │   └── engine.py                # Vectorised backtest engine
-│   ├── tests/                       # 340 tests across 44 files
+│   ├── tests/                       # 709 tests across 44+ files
 │   │   ├── conftest.py              # Shared fixtures
 │   │   └── test_*.py                # Module-level test suites
 │   ├── data/                        # SQLite DBs + model artifacts
@@ -411,7 +437,7 @@ All configuration is environment-variable driven. The canonical source is
 │   ├── pyproject.toml               # Ruff config
 │   └── pytest.ini                   # pytest configuration
 │
-├── docs/                            # Generated docs + reassessments
+├── docs/                            # Project documentation (see docs/README.md)
 ├── package.json                     # Bun / Next.js scripts + frontend deps
 ├── next.config.ts                   # Next.js 16 config (output: standalone)
 ├── tsconfig.json                    # TypeScript project references
@@ -562,24 +588,55 @@ are returned alongside the aggregate `passed` boolean.
 
 ## Testing
 
+The platform is covered by a four-layer test pyramid totalling **916+ tests**.
+
+### Backend (pytest — 709 tests)
+
 ```bash
 cd /home/z/my-project/mini-services/polymarket-bot
 python -m pytest tests/ -v
 ```
 
-The backend ships with **340 tests across 44 files** (plus `conftest.py` and
-`pytest.ini`). Coverage spans every core module, every ML component, every
-strategy, the risk manager, the paper simulator, the live safety gate, the
-decision ledger, the observability collector, and an end-to-end decision-chain
-test that exercises PREDICTION → SIGNAL → RISK → ORDER → FILL.
+Coverage spans every core module, every ML component (ensemble, meta-learner,
+calibration, drift detector, model registry), every strategy (signal trader,
+market maker, arbitrage scanner), the risk manager, the paper simulator, the
+10-check live safety gate, the decision ledger, the observability collector, the
+cache layer, the OpenAPI contract surface, the security helpers, and an
+end-to-end decision-chain test that exercises PREDICTION → SIGNAL → RISK →
+ORDER → FILL.
 
-Frontend lint / type-check:
+### Frontend (vitest + Testing Library — 207 tests)
+
+```bash
+cd /home/z/my-project
+bun run test           # vitest run (component + hook + lib tests)
+```
+
+### E2E (Playwright — 38 tests)
+
+```bash
+cd /home/z/my-project
+bun run e2e            # playwright test (dashboard + navigation + API health)
+```
+
+The Playwright suite (`e2e/dashboard.spec.ts`, `e2e/navigation.spec.ts`,
+`e2e/api-health.spec.ts`) drives a real browser against the running stack:
+dashboard render, panel navigation, sidebar routing, and live API health checks.
+
+### Lint & types
 
 ```bash
 cd /home/z/my-project
 bun run lint           # ESLint — clean (0 errors, 0 warnings)
 bunx tsc --noEmit      # TypeScript — clean on src/
 ```
+
+### Performance & load
+
+See [docs/LOAD_TESTING.md](docs/LOAD_TESTING.md) for the performance-testing
+strategy and benchmark reference points. See
+[docs/BUILD_OPTIMIZATION.md](docs/BUILD_OPTIMIZATION.md) for bundle-analysis
+tooling (`scripts/analyze-bundle.sh`, `@next/bundle-analyzer`).
 
 ---
 
@@ -618,11 +675,16 @@ WebSocket: `WS /ws` — broadcast manager pushes live book snapshots, order
 updates, and event-log entries to all connected clients.
 
 See `docs/API.md` for the complete reference (request/response schemas,
-auth requirements, error codes).
+auth requirements, error codes), and `docs/API_CLIENT.md` for the typed
+frontend client utilities (`apiFetch`, `authHeaders`, `getAuthedWsUrl`).
+Real-time push is documented in `docs/WEBSOCKET.md`.
 
 ---
 
 ## Deployment
+
+> Full production-deployment guide: [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
+> Day-2 operations (backup, restore, DB maintenance): [docs/MAINTENANCE.md](docs/MAINTENANCE.md).
 
 ### Production build (Next.js standalone)
 
@@ -662,6 +724,8 @@ auto-restarts uvicorn on crash.
 ---
 
 ## Security
+
+> Comprehensive OWASP Top 10 hardening guide: [docs/SECURITY.md](docs/SECURITY.md).
 
 - **Bearer token auth** — every non-public route requires an
   `Authorization: Bearer <API_TOKEN>` header. Token comparison is

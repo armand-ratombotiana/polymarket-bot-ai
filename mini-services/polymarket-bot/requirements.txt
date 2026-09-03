@@ -37,3 +37,12 @@ numpy>=1.26.0,<3.0.0
 
 # ── ML Extended (4th ensemble member — optional, falls back gracefully) ───────
 lightgbm>=4.3.0,<5.0.0
+
+# ── Load testing (locust — W12-3) ─────────────────────────────────────────────
+# W12-3: per-route latency benchmarks + headless locust load profiles. Used by
+# tests/load/locustfile.py (2 user classes, 15+ weighted tasks) and
+# scripts/load-test.sh. Pinned to >=2.20.0 (the first release with the
+# stable --headless + --csv + --only-summary flag combination that the
+# load-test.sh runner relies on; older 2.x releases emit a different CSV
+# header row).
+locust>=2.20.0

@@ -1,0 +1,15 @@
+{
+  "$schema": "https://example.com/bundle-budget.schema.json",
+  "_comment": "W12-4 — Bundle size budget. Enforced by humans (via ./scripts/analyze-bundle.sh) and reviewed at each PR that touches src/ or next.config. Update the per-route numbers when a route legitimately grows (e.g. a new heavy panel lands on `/`). A regression >10% over the listed number should be flagged in code review.",
+  "max_first_load_kb": 350,
+  "max_per_chunk_kb": 244,
+  "max_total_static_kb": 2000,
+  "routes": {
+    "/": 350,
+    "/_app": 100
+  },
+  "warnings": [
+    "recharts is large — consider lazy loading charts",
+    "framer-motion is large — only import used components"
+  ]
+}

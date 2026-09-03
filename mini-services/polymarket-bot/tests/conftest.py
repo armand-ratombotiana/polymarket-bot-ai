@@ -85,6 +85,11 @@ _ENV_REDIRECTS: dict[str, str] = {
     "CLOSED_POSITIONS_DB_PATH": str(_TMP_ROOT / "closed_positions.db"),
     "EXECUTION_QUALITY_DB_PATH": str(_TMP_ROOT / "execution_quality.db"),
     "OBSERVABILITY_DB_PATH": str(_TMP_ROOT / "observability.db"),
+    # W12-1 — feature flags SQLite store. Module-level singleton
+    # ``core.feature_flags.flag_manager`` is constructed at import time
+    # and would otherwise try to mkdir ``/app/data`` (read-only in the
+    # sandbox) and crash the import.
+    "FLAGS_DB_PATH": str(_TMP_ROOT / "feature_flags.db"),
     "RECON_REPORT_DIR": str(_TMP_ROOT / "reports"),
     # Force the canonical trading mode to paper + live disabled so risk-gate
     # tests don't short-circuit at the shadow / live-trading gates inside

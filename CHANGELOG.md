@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Playwright E2E tests (38 tests: dashboard, navigation, API health)
+- Backend caching layer (TTLCache: 6 caches, stats + clear endpoints)
+- OpenAPI/Swagger enhancement (21 tags, 11 Pydantic response models)
+- WebSocket real-time hooks (useWebSocket, useRealtimeData)
+- ML probability calibration (Platt scaling, isotonic regression)
+- OWASP security audit (constant-time comparison, security headers)
+- PWA support (manifest, service worker, offline indicator)
+- Database indexes optimization (6 modules)
+- Feature flags system (13 default flags, runtime toggle)
+- Backup/restore scripts (backup.sh, restore.sh, db-maintenance.sh)
+- Load testing (locust + performance benchmarks)
+- Bundle analyzer (@next/bundle-analyzer)
+- Health check scripts (health_check.py, monitor.py)
+- Structured JSON logging (JSONFormatter, ColoredFormatter)
+- Storybook component stories
+- Typed API client SDK (17 namespaces, 60+ methods)
+- Comprehensive maintenance documentation
+
+### Changed
+- Total tests: 916+ (709 backend + 207 frontend + 38 E2E)
+- All 77+ API routes now have rate limiting + OpenAPI documentation
+
 ## [1.0.0] - 2025-09-03
 
 ### Added

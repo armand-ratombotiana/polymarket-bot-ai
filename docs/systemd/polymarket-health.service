@@ -1,0 +1,65 @@
+# /etc/systemd/system/polymarket-health.service
+# W12-5 reference unit file — one-shot health check for the Polymarket bot.
+#
+# Runs scripts/health_check.py, which:
+#   1. Probes the Next.js frontend (HTTP 200 on FRONTEND_URL)
+#   2. Probes the FastAPI backend (/api/health returns 200 + status="ok")
+#   3. Verifies the 4 SQLite DBs exist and are readable
+#   4. Checks disk free > 1 GB and memory usage < 90 %
+#   5. Confirms the ML ensemble is loaded
+#   6. Surfaces kill-switch / alert / observability status
+#
+# Exit code 0 = all 10 checks passed; 1 = at least one failed.
+# Pair with polymarket-health.timer (every 5 min) for hands-off monitoring.
+#
+# See docs/systemd/README.md for installation + override instructions.
+
+[Unit]
+Description=Polymarket bot — one-shot health check
+Documentation=file:///home/z/my-project/docs/systemd/README.md
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/z/my-project
+ExecStart=/usr/bin/env python3 /home/z/my-project/scripts/health_check.py --quiet
+
+# Environment overrides — uncomment / edit as needed for your deployment.
+# Environment=FRONTEND_URL=http://localhost:3000
+# Environment=BACKEND_URL=http://localhost:8080
+# Environment=BOT_DATA_DIR=/home/z/my-project/mini-services/polymarket-bot/data
+# Environment=API_TOKEN=<prod-token>
+
+# Run as the same user that owns the data dir so SQLite can read the DBs.
+User=z
+Group=z
+
+# Hardening — the script only needs network + read access to the data dir.
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/home/z/my-project/mini-services/polymarket-bot/data
+ProtectHome=read-only
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+SystemCallArchitectures=native
+
+# A failed health check (exit 1) is NOT a service failure — it's a signal.
+# We want systemctl to be green even when the bot is unhealthy, so the
+# timer keeps firing. Inspect exit code via `systemctl status` or journald.
+SuccessExitStatus=0 1
+
+# Capture stdout/stderr into the journal so `journalctl -u polymarket-health`
+# shows the JSON report. (Python writes JSON to stdout; --quiet suppresses
+# the human-readable progress lines.)
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

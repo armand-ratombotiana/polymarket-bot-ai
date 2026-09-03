@@ -52,22 +52,24 @@ prompt
 
 server.log
 # Polymarket-bot data files (runtime-generated, not source)
-mini-services/polymarket-bot/data/*.db
-mini-services/polymarket-bot/data/*.db-*
-mini-services/polymarket-bot/data/*.pkl
-mini-services/polymarket-bot/data/*.json
-mini-services/polymarket-bot/data/reports/
-mini-services/polymarket-bot/data/test_run/
+mini-services/polymarket-bot/data/
 mini-services/polymarket-bot/server.log
 upload/
 tool-results/
+backups/
+dist/
 
 # Python bytecode caches (defensive — keep stray .pyc out of commits)
 __pycache__/
 *.pyc
+*.npz
+.ruff_cache/
 
 # Playwright E2E test artifacts (regenerated on each test run)
 /test-results/
 /playwright-report/
 /playwright/.cache/
 /blob-report/
+
+# Storybook build output (regenerated on each `bun run build-storybook`)
+/storybook-static/
