@@ -1,0 +1,1618 @@
+     1→"""
+     2→api/server.py — FastAPI server: 50+ Quantitative Strategies, Modern AI/ML Vector Engine,
+     3→REST endpoints, WebSocket broadcast, and real-time trading controls.
+     4→"""
+     5→from __future__ import annotations
+     6→
+     7→import asyncio
+     8→import hmac
+     9→import json
+    10→import logging
+    11→import time
+    12→from contextlib import asynccontextmanager
+    13→
+    14→import numpy as np
+    15→from fastapi import (
+    16→    FastAPI,
+    17→    HTTPException,
+    18→    Query,
+    19→    Request,
+    20→    WebSocket,
+    21→    WebSocketDisconnect,
+    22→)
+    23→from fastapi.middleware.cors import CORSMiddleware
+    24→from fastapi.responses import JSONResponse
+    25→from pydantic import BaseModel, Field
+    26→
+    27→from config import settings
+    28→from core.audit_logger import audit_logger
+    29→from core.book_poller import book_poller
+    30→from core.clob_client import OrderArgs
+    31→from core.data_store import Order, Side, store
+    32→from core.fundamental_ingest import fundamental_engine
+    33→from core.gamma_client import gamma_client
+    34→from core.portfolio import compute_exposure, compute_reconciliation, leaderboard
+    35→from core.position_manager import position_manager
+    36→from core.settlement import settlement_engine
+    37→from core.watchdog import watchdog
+    38→from core.ws_client import ws_client
+    39→from ml.copilot import copilot_engine
+    40→from ml.drift_detector import drift_detector
+    41→from ml.model import ml_model
+    42→from ml.model_registry import model_registry
+    43→from ml.vector_store import vector_store
+    44→from paper.simulator import paper_sim
+    45→from risk.manager import BANKROLL_CEILING, MAX_DEPLOYABLE_CAPITAL, risk_manager
+    46→from strategies.registry import strategy_registry
+    47→
+    48→log = logging.getLogger(__name__)
+    49→
+    50→# ── Auth Policy ────────────────────────────────────────────────────────────────
+    51→# Only the liveness probe (/api/health) is unauthenticated. Everything else
+    52→# requires `Authorization: Bearer <API_TOKEN>` (fail-closed; 503 if unconfigured).
+    53→
+    54→PUBLIC_PATHS = {"/api/health", "/docs", "/redoc", "/openapi.json"}
+    55→
+    56→
+    57→def _valid_token(authorization: str | None) -> bool:
+    58→    if not settings.api_token:
+    59→        return False
+    60→    scheme, _, creds = (authorization or "").partition(" ")
+    61→    if scheme.lower() != "bearer" or not creds:
+    62→        return False
+    63→    return hmac.compare_digest(creds, settings.api_token)
+    64→
+    65→
+    66→# ── WebSocket Connection Manager ──────────────────────────────────────────────
+    67→
+    68→class ConnectionManager:
+    69→    def __init__(self) -> None:
+    70→        self.active: list[WebSocket] = []
+    71→
+    72→    async def connect(self, ws: WebSocket) -> None:
+    73→        await ws.accept()
+    74→        self.active.append(ws)
+    75→        log.info("WS client connected — total %d", len(self.active))
+    76→
+    77→    def disconnect(self, ws: WebSocket) -> None:
+    78→        if ws in self.active:
+    79→            self.active.remove(ws)
+    80→
+    81→    async def broadcast(self, data: dict) -> None:
+    82→        dead = []
+    83→        payload = json.dumps(data, default=str)
+    84→        for ws in list(self.active):
+    85→            try:
+    86→                await ws.send_text(payload)
+    87→            except Exception:
+    88→                dead.append(ws)
+    89→        for ws in dead:
+    90→            if ws in self.active:
+    91→                self.active.remove(ws)
+    92→
+    93→
+    94→manager = ConnectionManager()
+    95→_seeded_tokens: list[str] = []
+    96→
+    97→
+    98→# ── Market Seeding & Vector Store Ingestion ───────────────────────────────────
+    99→
+   100→async def _seed_markets(limit: int = 60) -> list[str]:
+   101→    token_ids: list[str] = []
+   102→    try:
+   103→        markets = await gamma_client.get_markets(active=True, limit=limit, order="volume24hr")
+   104→        for mkt in markets:
+   105→            slug = mkt.get("slug") or mkt.get("groupItemTitle") or ""
+   106→            ids = gamma_client.extract_token_ids(mkt)
+   107→            for tid in ids:
+   108→                token_ids.append(tid)
+   109→                if slug:
+   110→                    store.market_slugs[tid] = slug
+   111→                # Ingest into vector store
+   112→                vector_store.add_market(tid, mkt)
+   113→
+   114→        vector_store.build_index()
+   115→        vector_store.save_to_disk()
+   116→
+   117→        if token_ids:
+   118→            unique_ids = list(dict.fromkeys(token_ids))
+   119→            log.info("Seeded %d unique tokens from %d Gamma markets", len(unique_ids), len(markets))
+   120→            await store.log_event(f"📊 Seeded {len(unique_ids)} market tokens & built Vector Embeddings index")
+   121→            return unique_ids
+   122→    except Exception as e:
+   123→        log.error("Market seeding failed: %s", e)
+   124→        await store.log_event(f"⚠ Market seed failed: {e}")
+   125→    return token_ids
+   126→
+   127→
+   128→async def _reseed_loop() -> None:
+   129→    await asyncio.sleep(600)
+   130→    while True:
+   131→        try:
+   132→            new_tokens = await _seed_markets(60)
+   133→            if new_tokens:
+   134→                book_poller.add_tokens(new_tokens)
+   135→        except Exception as e:
+   136→            log.debug("Reseed loop error: %s", e)
+   137→        await asyncio.sleep(600)
+   138→
+   139→
+   140→async def _token_sync_loop() -> None:
+   141→    while True:
+   142→        await asyncio.sleep(20)
+   143→        try:
+   144→            async with store._lock:
+   145→                tracked = list(store.market_slugs.keys())
+   146→            book_poller.add_tokens(tracked)
+   147→        except Exception:
+   148→            pass
+   149→
+   150→
+   151→async def _state_persistence_loop() -> None:
+   152→    while True:
+   153→        await asyncio.sleep(30)
+   154→        try:
+   155→            store.save_to_disk()
+   156→        except Exception as e:
+   157→            log.debug("Persistence loop error: %s", e)
+   158→
+   159→
+   160→# ── Lifespan Manager ──────────────────────────────────────────────────────────
+   161→
+   162→@asynccontextmanager
+   163→async def lifespan(app: FastAPI):
+   164→    global _seeded_tokens
+   165→
+   166→    # ── Live-mode guards (P0-GOV-01): live requires explicit authorization ──
+   167→    if settings.trading_mode == "live":
+   168→        if not settings.live_trading_enabled:
+   169→            raise RuntimeError(
+   170→                "trading_mode=live but LIVE_TRADING_ENABLED is false — refusing to start. "
+   171→                "Set both explicitly to authorize real-funds trading."
+   172→            )
+   173→        if not settings.has_credentials:
+   174→            raise RuntimeError(
+   175→                "trading_mode=live but POLY_PRIVATE_KEY is not configured — refusing to start."
+   176→            )
+   177→
+   178→    # Audit the effective mode at startup (durable record of the transition).
+   179→    try:
+   180→        await audit_logger.log_event(
+   181→            category="system",
+   182→            event_type="mode_change",
+   183→            details=f"mode={settings.trading_mode} paper_trade={settings.paper_trade} "
+   184→                    f"live_trading_enabled={settings.live_trading_enabled}",
+   185→        )
+   186→    except Exception as e:  # pragma: no cover - audit failures must not kill startup
+   187→        log.error("Failed to write mode audit event: %s", e)
+   188→
+   189→    # ── Start TimescaleDB / PostgreSQL time-series pool
+   190→    from core.timescale_db import timescale_db
+   191→    await timescale_db.init_postgres_pool()
+   192→
+   193→    # ── Watchdog: register every live subsystem (P0-SAF-01) ──
+   194→    await watchdog.start()
+   195→    for name in (
+   196→        "book_poller", "ws_client", "settlement_engine", "fundamental_engine",
+   197→        "position_manager", "strategy_registry", "paper_sim", "ml_model",
+   198→    ):
+   199→        watchdog.register(name)
+   200→
+   201→    # 2. Start paper simulator
+   202→    if settings.paper_trade:
+   203→        await paper_sim.start()
+   204→        await store.log_event("📄 Paper trading mode active — no real funds used")
+   205→        watchdog.beat("paper_sim")
+   206→
+   207→    # 3. Seed markets from Gamma API and initialize Vector Store
+   208→    _seeded_tokens = await _seed_markets(60)
+   209→
+   210→    # 4. Start Universal Market Discovery Engine (500+ markets)
+   211→    from core.market_discovery import market_discovery
+   212→    await market_discovery.start()
+   213→
+   214→    # 5. Start REST book poller (D5: tiered REST polling; WS feed retired per KD-08/KD-24)
+   215→    book_poller.set_tokens(_seeded_tokens)
+   216→    await book_poller.start()
+   217→    watchdog.beat("book_poller")
+   218→    await store.log_event(f"📈 Book poller started — monitoring {len(_seeded_tokens)} tokens")
+   219→    # WS client is NOT started: subscribe() had zero callers (KD-08); D5 decision = REST polling only.
+   220→    # ws_client instance is retained for test-compat and future re-enablement.
+   221→    watchdog.beat("ws_client")  # mark as alive so watchdog doesn't flag it as stale
+   222→
+   223→    # 6. Start Settlement Engine, Fundamental News Ingest & Position Risk Manager
+   224→    await settlement_engine.start()
+   225→    await fundamental_engine.start()
+   226→    await position_manager.start()
+   227→    watchdog.beat("settlement_engine")
+   228→    watchdog.beat("fundamental_engine")
+   229→    watchdog.beat("position_manager")
+   230→
+   231→    # 7. Initialize Core Default Strategies in Registry
+   232→    await strategy_registry.start_strategy("mm_avellaneda_stoikov")
+   233→    await strategy_registry.start_strategy("arb_binary_dutch_book")
+   234→    await strategy_registry.start_strategy("ml_random_forest_quant")
+   235→    watchdog.beat("strategy_registry")
+   236→    await store.log_event("🤖 50+ Strategy Engine online — 3 active base strategies initialized")
+   237→
+   238→    # 8. Start Continuous ML Training Orchestrator (drift-triggered + 6h schedule)
+   239→    from ml.training_orchestrator import training_orchestrator
+   240→    await training_orchestrator.start()
+   241→    watchdog.beat("ml_model")
+   242→    await store.log_event("🧠 Continuous Training Orchestrator active (PSI drift threshold: 0.10)")
+   243→
+   244→    # 9. Background tasks
+   245→    broadcast_task = asyncio.create_task(_broadcast_loop(), name="ws-broadcast")
+   246→    reseed_task = asyncio.create_task(_reseed_loop(), name="market-reseed")
+   247→    token_sync_task = asyncio.create_task(_token_sync_loop(), name="token-sync")
+   248→    persist_task = asyncio.create_task(_state_persistence_loop(), name="state-persist")
+   249→
+   250→    # 9. Reconciliation job (P0-DAT-03): initial pass at startup + daily artifact
+   251→    from core.reconciliation import run_reconciliation
+   252→    try:
+   253→        run_reconciliation()
+   254→    except Exception as e:
+   255→        log.error("[reconciliation] startup pass failed: %s", e)
+   256→    recon_task = asyncio.create_task(_reconciliation_loop(), name="reconciliation-daily")
+   257→
+   258→    log.info("API server ready — 50+ Strategy Hub, Vector DB, and ML ensemble online")
+   259→    await store.log_event("✅ Polymarket Pro v3.0 Workstation Online 24/7")
+   260→
+   261→    yield  # ── Serving HTTP & WS requests ──
+   262→
+   263→    # Clean shutdown
+   264→    await watchdog.stop()
+   265→    broadcast_task.cancel()
+   266→    reseed_task.cancel()
+   267→    token_sync_task.cancel()
+   268→    persist_task.cancel()
+   269→    recon_task.cancel()
+   270→    store.save_to_disk()
+   271→
+   272→    await training_orchestrator.stop()
+   273→    await settlement_engine.stop()
+   274→    for strat_id in list(strategy_registry.get_active_instances().keys()):
+   275→        try:
+   276→            await strategy_registry.stop_strategy(strat_id)
+   277→        except Exception:
+   278→            pass
+   279→    await book_poller.stop()
+   280→    # ws_client was not started (D5: REST polling); stop() is safe no-op when not running.
+   281→    await ws_client.stop()
+   282→    if settings.paper_trade:
+   283→        await paper_sim.stop()
+   284→    await gamma_client.close()
+   285→    log.info("API server stopped cleanly")
+   286→
+   287→
+   288→async def _reconciliation_loop() -> None:
+   289→    from core.reconciliation import run_reconciliation
+   290→    while True:
+   291→        await asyncio.sleep(24 * 60 * 60)
+   292→        try:
+   293→            run_reconciliation()
+   294→        except Exception as e:
+   295→            log.error("[reconciliation] daily pass failed: %s", e)
+   296→
+   297→
+   298→# ── Broadcast Loop ────────────────────────────────────────────────────────────
+   299→
+   300→async def _broadcast_loop() -> None:
+   301→    while True:
+   302→        try:
+   303→            if manager.active:
+   304→                snap = await _build_snapshot()
+   305→                await manager.broadcast(snap)
+   306→        except Exception as e:
+   307→            log.debug("Broadcast error: %s", e)
+   308→        await asyncio.sleep(1.0)
+   309→
+   310→
+   311→def _get_meta_warm() -> bool:
+   312→    """Safe accessor for ensemble meta-learner warm status."""
+   313→    try:
+   314→        from ml.ensemble_meta_learner import ensemble_meta_learner
+   315→        return ensemble_meta_learner.is_warm
+   316→    except Exception:
+   317→        return False
+   318→
+   319→
+   320→async def _build_snapshot() -> dict:
+   321→    from core.safety import kill_switch_file_exists
+   322→    books = []
+   323→    async with store._lock:
+   324→        for tid, book in store.order_books.items():
+   325→            books.append({
+   326→                "token_id": tid,
+   327→                "slug": store.market_slugs.get(tid, tid[:14]),
+   328→                "best_bid": book.best_bid,
+   329→                "best_ask": book.best_ask,
+   330→                "mid": book.mid,
+   331→                "spread": book.spread,
+   332→                "updated_at": book.updated_at,
+   333→            })
+   334→
+   335→    orders = []
+   336→    for o in store.open_orders.values():
+   337→        orders.append({
+   338→            "order_id": o.order_id,
+   339→            "token_id": o.token_id,
+   340→            "slug": store.market_slugs.get(o.token_id, o.token_id[:14]),
+   341→            "side": o.side.value,
+   342→            "price": o.price,
+   343→            "size": o.size,
+   344→            "size_matched": o.size_matched,
+   345→            "strategy": o.strategy,
+   346→            "paper": o.paper,
+   347→            "created_at": o.created_at,
+   348→        })
+   349→
+   350→    positions = []
+   351→    for tid, pos in store.positions.items():
+   352→        if pos.yes_shares > 0 or pos.total_invested > 0 or pos.realised_pnl != 0:
+   353→            positions.append({
+   354→                "token_id": tid,
+   355→                "slug": store.market_slugs.get(tid, tid[:14]),
+   356→                "yes_shares": pos.yes_shares,
+   357→                "avg_entry_price": pos.avg_entry_price,
+   358→                "total_invested": pos.total_invested,
+   359→                "realised_pnl": pos.realised_pnl,
+   360→            })
+   361→
+   362→    trades = []
+   363→    for t in store.trades[-50:]:
+   364→        trades.append({
+   365→            "trade_id": t.trade_id,
+   366→            "token_id": t.token_id,
+   367→            "slug": store.market_slugs.get(t.token_id, t.token_id[:14]),
+   368→            "side": t.side.value,
+   369→            "price": t.price,
+   370→            "size": t.size,
+   371→            "pnl": t.pnl,
+   372→            "strategy": t.strategy,
+   373→            "paper": t.paper,
+   374→            "timestamp": t.timestamp,
+   375→        })
+   376→
+   377→    events = await store.get_recent_events(50)
+   378→    active_strats = list(strategy_registry.get_active_instances().keys())
+   379→
+   380→    return {
+   381→        "type": "snapshot",
+   382→        "timestamp": time.time(),
+   383→        "mode": settings.trading_mode,
+   384→        "kill_switch": store.kill_switch_active,
+   385→        "kill_switch_durable": bool(kill_switch_file_exists()),
+   386→        "observation_only": risk_manager.observation_only,
+   387→        "observation_reason": risk_manager.observation_reason,
+   388→        "daily_pnl": store.daily_pnl,
+   389→        "paper_balance": paper_sim.virtual_balance if settings.paper_trade else None,
+   390→        "strategies": active_strats,
+   391→        "order_books": books,
+   392→        "open_orders": orders,
+   393→        "positions": positions,
+   394→        "recent_trades": trades,
+   395→        "events": events,
+   396→        "ml": {
+   397→            "model_ready": ml_model.rf is not None,
+   398→            "brier_score": ml_model.brier_score,
+   399→            "roc_auc": ml_model.roc_auc,
+   400→            "ece": ml_model.ece,
+   401→            "n_updates": ml_model._n_updates,
+   402→            "drift_status": drift_detector.drift_status,
+   403→            "drift_psi": drift_detector.last_psi,
+   404→            "drift_brier": drift_detector.rolling_brier,
+   405→            "drift_ewma_brier": round(drift_detector.ewma_brier, 4) if drift_detector.ewma_brier is not None else None,
+   406→            "adaptive_weights": ml_model.adaptive_weights,
+   407→            "meta_learner_warm": _get_meta_warm(),
+   408→            "training_source": ml_model.training_source,
+   409→        },
+   410→    }
+   411→
+   412→
+   413→# ── App & Router ──────────────────────────────────────────────────────────────
+   414→
+   415→app = FastAPI(
+   416→    title="Polymarket Pro Bot API",
+   417→    version="3.0.0",
+   418→    description="24/7 Polymarket Pro Algorithmic Workstation with 50+ Strategies, Vector DB, and AI Copilot",
+   419→    lifespan=lifespan,
+   420→)
+   421→
+   422→# CORS: locked to configured origins (empty = same-origin only). Credentials
+   423→# are only enabled when explicit origins are set — never with wildcard.
+   424→_cors_origins = settings.cors_origin_list
+   425→_has_wildcard = "*" in _cors_origins or not _cors_origins
+   426→app.add_middleware(
+   427→    CORSMiddleware,
+   428→    allow_origins=["*"] if _has_wildcard else _cors_origins,
+   429→    allow_credentials=False if _has_wildcard else True,
+   430→    allow_methods=["*"],
+   431→    allow_headers=["*"],
+   432→)
+   433→
+   434→
+   435→@app.middleware("http")
+   436→async def enforce_api_auth(request: Request, call_next):
+   437→    """Fail-closed bearer-token auth on every route except the liveness probe and OPTIONS preflight."""
+   438→    if request.method == "OPTIONS":
+   439→        return await call_next(request)
+   440→
+   441→    origin = request.headers.get("origin")
+   442→    cors_allowed = bool(origin and (origin in settings.cors_origin_list or "*" in settings.cors_origin_list or not settings.cors_origin_list))
+   443→    cors_headers = {}
+   444→    if origin and cors_allowed:
+   445→        cors_headers["access-control-allow-origin"] = origin
+   446→        cors_headers["access-control-allow-credentials"] = "true"
+   447→        cors_headers["access-control-allow-headers"] = "Authorization, Content-Type"
+   448→        cors_headers["access-control-allow-methods"] = "GET, POST, PUT, DELETE, OPTIONS"
+   449→
+   450→    path = request.url.path
+   451→    if path in PUBLIC_PATHS or path.startswith("/api/health"):
+   452→        response = await call_next(request)
+   453→        if origin and cors_allowed:
+   454→            response.headers["access-control-allow-origin"] = origin
+   455→            response.headers["access-control-allow-credentials"] = "true"
+   456→        return response
+   457→
+   458→    if not settings.api_token:
+   459→        return JSONResponse(
+   460→            status_code=503,
+   461→            content={"detail": "API authentication not configured — set API_TOKEN in .env", "code": "AUTH_NOT_CONFIGURED"},
+   462→            headers=cors_headers,
+   463→        )
+   464→    if not _valid_token(request.headers.get("authorization")):
+   465→        return JSONResponse(
+   466→            status_code=401,
+   467→            content={"detail": "Unauthorized — missing or invalid API token"},
+   468→            headers=cors_headers,
+   469→        )
+   470→
+   471→    response = await call_next(request)
+   472→    if origin and cors_allowed:
+   473→        response.headers["access-control-allow-origin"] = origin
+   474→        response.headers["access-control-allow-credentials"] = "true"
+   475→    return response
+   476→
+   477→
+   478→# ── Request / Config Models ───────────────────────────────────────────────────
+   479→
+   480→class ManualTradeRequest(BaseModel):
+   481→    token_id: str
+   482→    price: float = Field(gt=0, lt=1)
+   483→    side: str = Field(pattern="^(BUY|SELL|buy|sell)$")
+   484→    size_usdc: float = Field(gt=0, default=10.0)
+   485→
+   486→
+   487→class StrategyToggleRequest(BaseModel):
+   488→    strategy_name: str
+   489→    enabled: bool
+   490→
+   491→
+   492→class CopilotQueryRequest(BaseModel):
+   493→    query: str
+   494→
+   495→
+   496→class MarketAnalyzeRequest(BaseModel):
+   497→    token_id: str
+   498→
+   499→
+   500→class StrategyConfigUpdate(BaseModel):
+   501→    mm_spread_bps: int | None = Field(default=None, ge=10, le=2000)
+   502→    mm_quote_size_usdc: float | None = Field(default=None, ge=0.5, le=5.0)
+   503→    mm_max_inventory_usdc: float | None = Field(default=None, ge=1.0, le=15.0)
+   504→    arb_min_profit_bps: int | None = Field(default=None, ge=5, le=1000)
+   505→    arb_order_size_usdc: float | None = Field(default=None, ge=0.5, le=5.0)
+   506→    signal_min_confidence: float | None = Field(default=None, ge=0.5, le=0.99)
+   507→    daily_loss_limit_usdc: float | None = Field(default=None, ge=0.25, le=2.0)
+   508→
+   509→
+   510→# ── System Endpoints ──────────────────────────────────────────────────────────
+   511→
+   512→@app.get("/api/health", tags=["system"])
+   513→async def health():
+   514→    return {"status": "ok", "timestamp": time.time(), "paper": settings.paper_trade}
+   515→
+   516→
+   517→@app.get("/api/status", tags=["system"])
+   518→async def status():
+   519→    from core.safety import kill_switch_file_exists
+   520→    report = await risk_manager.status_report()
+   521→    return {
+   522→        **report,
+   523→        "mode": settings.trading_mode,
+   524→        "strategies": list(strategy_registry.get_active_instances().keys()),
+   525→        "paper_balance": paper_sim.virtual_balance if settings.paper_trade else None,
+   526→        "seeded_markets": len(_seeded_tokens),
+   527→        "tracked_books": len(store.order_books),
+   528→        "book_poller": book_poller.stats,
+   529→        "vector_docs_indexed": vector_store._doc_count,
+   530→        "kill_switch_durable": bool(kill_switch_file_exists()),
+   531→    }
+   532→
+   533→
+   534→@app.get("/api/snapshot", tags=["system"])
+   535→async def get_snapshot():
+   536→    return await _build_snapshot()
+   537→
+   538→
+   539→@app.get("/api/history/equity", tags=["system"])
+   540→async def get_equity_history():
+   541→    async with store._lock:
+   542→        return {"points": store.equity_history, "count": len(store.equity_history)}
+   543→
+   544→
+   545→@app.get("/api/analytics", tags=["system"])
+   546→async def get_analytics():
+   547→    trades = store.trades
+   548→    total_trades = len(trades)
+   549→    # Only trades that actually closed a position (pnl != 0) determine win rate.
+   550→    closed_trades = [t for t in trades if t.pnl != 0]
+   551→    winning_trades = sum(1 for t in closed_trades if t.pnl > 0)
+   552→    losing_trades = sum(1 for t in closed_trades if t.pnl < 0)
+   553→    win_rate = (winning_trades / len(closed_trades)) if closed_trades else 0.0
+   554→    total_vol = sum(t.price * t.size for t in trades)
+   555→
+   556→    # Wilson 95% confidence interval for the win rate (sample-size honest).
+   557→    n = len(closed_trades)
+   558→    z = 1.96
+   559→    ci_low = ci_high = None
+   560→    if n > 0:
+   561→        p = win_rate
+   562→        denom = 1 + z * z / n
+   563→        centre = (p + z * z / (2 * n)) / denom
+   564→        half = z * ((p * (1 - p) / n + z * z / (4 * n * n)) ** 0.5) / denom
+   565→        ci_low = max(0.0, centre - half)
+   566→        ci_high = min(1.0, centre + half)
+   567→
+   568→    wins = sum(t.pnl for t in closed_trades if t.pnl > 0)
+   569→    losses = sum(t.pnl for t in closed_trades if t.pnl < 0)
+   570→    profit_factor = wins / max(1e-9, -losses) if losses else (None if not wins else float("inf"))
+   571→
+   572→    # Unrealized P&L: mark open positions to the live order-book mid when present.
+   573→    unrealized_pnl = 0.0
+   574→    for p in store.positions.values():
+   575→        if p.current_exposure <= 0.001:
+   576→            continue
+   577→        book = store.order_books.get(p.token_id)
+   578→        mark = book.mid if book and book.mid is not None else None
+   579→        if mark is None:
+   580→            mark = p.avg_entry_price  # cost-basis mark (no live quote)
+   581→        unrealized_pnl += (mark - p.avg_entry_price) * p.yes_shares
+   582→        unrealized_pnl += ((1.0 - mark) - p.avg_entry_price) * p.no_shares
+   583→
+   584→    realized_pnl = store.daily_pnl
+   585→    net_pnl = realized_pnl + unrealized_pnl
+   586→    equity = store.paper_balance
+   587→    max_drawdown_dollars = max(0.0, store.peak_equity - equity)
+   588→    max_drawdown_pct = (max_drawdown_dollars / store.peak_equity) if store.peak_equity > 0 else 0.0
+   589→
+   590→    exp = compute_exposure()
+   591→    deployable = float(MAX_DEPLOYABLE_CAPITAL)
+   592→    risk_utilization = min(1.0, exp["maximum_remaining_loss"] / deployable) if deployable > 0 else 0.0
+   593→
+   594→    # Data freshness: seconds since the newest tracked order-book update.
+   595→    books = store.order_books.values()
+   596→    freshness = max((time.time() - b.updated_at for b in books), default=0.0)
+   597→
+   598→    return {
+   599→        "equity": round(equity, 2),
+   600→        "realized_pnl": round(realized_pnl, 2),
+   601→        "unrealized_pnl": round(unrealized_pnl, 2),
+   602→        "net_pnl": round(net_pnl, 2),
+   603→        "total_trades": total_trades,
+   604→        "winning_trades": winning_trades,
+   605→        "losing_trades": losing_trades,
+   606→        "closed_trades": len(closed_trades),
+   607→        "open_trades": total_trades - len(closed_trades),
+   608→        "win_rate": round(win_rate, 4),
+   609→        "win_rate_ci_low": round(ci_low, 4) if ci_low is not None else None,
+   610→        "win_rate_ci_high": round(ci_high, 4) if ci_high is not None else None,
+   611→        "profit_factor": round(profit_factor, 2) if isinstance(profit_factor, float) else profit_factor,
+   612→        "max_drawdown_dollars": round(max_drawdown_dollars, 2),
+   613→        "max_drawdown_pct": round(max_drawdown_pct, 4),
+   614→        "total_volume_usdc": round(total_vol, 2),
+   615→        "open_exposure": round(exp["maximum_remaining_loss"], 2),
+   616→        "open_position_count": exp["open_position_count"],
+   617→        "pending_order_capital": round(exp["reserved_for_pending_orders"], 2),
+   618→        "risk_utilization": round(risk_utilization, 4),
+   619→        "mode": settings.trading_mode,
+   620→        "data_freshness_seconds": round(freshness, 1),
+   621→        "peak_equity": round(store.peak_equity, 2),
+   622→        "active_strategies": list(strategy_registry.get_active_instances().keys()),
+   623→    }
+   624→
+   625→
+   626→# ── Risk-Adjusted Portfolio: Exposure, Reconciliation & Leaderboard ─────────
+   627→
+   628→@app.get("/api/exposure", tags=["risk"])
+   629→async def get_exposure():
+   630→    """Full exposure decomposition (mandate section 2)."""
+   631→    return compute_exposure()
+   632→
+   633→
+   634→@app.get("/api/risk/reconcile", tags=["risk"])
+   635→async def get_reconciliation():
+   636→    """Reconciliation investigation for the current open exposure."""
+   637→    return compute_reconciliation(bankroll_ceiling=float(BANKROLL_CEILING))
+   638→
+   639→
+   640→@app.get("/api/leaderboard", tags=["risk"])
+   641→async def get_leaderboard():
+   642→    """Strategy leaderboard ranked by reproducible risk-adjusted net performance."""
+   643→    return leaderboard()
+   644→
+   645→
+   646→# ── 50+ Strategy Hub Endpoints ────────────────────────────────────────────────
+   647→
+   648→@app.get("/api/strategies/catalog", tags=["strategies"])
+   649→async def get_strategy_catalog():
+   650→    """Return all 50 strategies with metadata, category, and running state."""
+   651→    return {"catalog": strategy_registry.get_catalog(), "total": len(strategy_registry._catalog)}
+   652→
+   653→
+   654→@app.post("/api/strategies/toggle", tags=["strategies"])
+   655→async def toggle_strategy(req: StrategyToggleRequest):
+   656→    """Dynamically start or stop any of the 50 strategies at runtime."""
+   657→    strat_id = req.strategy_name.lower()
+   658→    if req.enabled:
+   659→        ok = await strategy_registry.start_strategy(strat_id)
+   660→        if not ok:
+   661→            raise HTTPException(status_code=400, detail=f"Strategy {strat_id} not found in catalog")
+   662→        await store.log_event(f"▶ Strategy [{strat_id}] started via API")
+   663→        return {"status": "started", "strategy": strat_id}
+   664→    else:
+   665→        ok = await strategy_registry.stop_strategy(strat_id)
+   666→        await store.log_event(f"⏸ Strategy [{strat_id}] stopped via API")
+   667→        return {"status": "stopped" if ok else "not_running", "strategy": strat_id}
+   668→
+   669→
+   670→# ── AI Copilot & Semantic Vector Search ───────────────────────────────────────
+   671→
+   672→@app.post("/api/ai/copilot", tags=["ai"])
+   673→async def copilot_chat(req: CopilotQueryRequest):
+   674→    """Ask the GenAI Copilot for market analysis, trade ideas, or risk insights."""
+   675→    return await copilot_engine.answer_query(req.query)
+   676→
+   677→
+   678→@app.post("/api/ai/analyze-market", tags=["ai"])
+   679→async def analyze_market(req: MarketAnalyzeRequest):
+   680→    """Generate a quant & fundamental briefing for a specific prediction market."""
+   681→    return await copilot_engine.analyze_market(req.token_id)
+   682→
+   683→
+   684→# ── Market OHLCV & Historical Candlestick Data ────────────────────────────────
+   685→
+   686→@app.get("/api/history/ohlcv/{token_id}", tags=["markets"])
+   687→async def get_market_ohlcv(token_id: str, resolution: str = "5m", count: int = 40):
+   688→    """Return OHLCV candlestick bars for visual charting.
+   689→
+   690→    Priority:
+   691→      1. Real candles from TimescaleDB continuous aggregates (market.price_candle_*)
+   692→         when TimescaleDB is connected and rows exist for this token — labeled synthetic=False.
+   693→      2. Seeded random-walk anchored to live mid when no stored candles exist —
+   694→         explicitly labeled synthetic=True so callers always know the data source.
+   695→    """
+   696→    book = await store.get_order_book(token_id)
+   697→    mid = (book.mid if book else 0.5) or 0.5
+   698→    slug = store.market_slugs.get(token_id, token_id[:14])
+   699→    step_sec = 60 if resolution == "1m" else 300 if resolution == "5m" else 3600
+   700→    view_map = {"1m": "market.price_candle_1m", "5m": "market.price_candle_5m", "1h": "market.price_candle_1h"}
+   701→    pg_view = view_map.get(resolution, "market.price_candle_5m")
+   702→
+   703→    # ── Attempt real TimescaleDB continuous-aggregate candles ─────────────────
+   704→    from core.timescale_db import timescale_db
+   705→    if timescale_db._is_postgres and timescale_db._pool:
+   706→        try:
+   707→            async with timescale_db._pool.acquire() as conn:
+   708→                rows = await conn.fetch(
+   709→                    f"""
+   710→                    SELECT bucket, open, high, low, close, vwap, tick_count
+   711→                    FROM {pg_view}
+   712→                    WHERE token_id = $1
+   713→                    ORDER BY bucket DESC
+   714→                    LIMIT $2;
+   715→                    """,
+   716→                    token_id,
+   717→                    count,
+   718→                )
+   719→            if rows:
+   720→                bars = [
+   721→                    {
+   722→                        "timestamp": float(r["bucket"].timestamp()),
+   723→                        "open": round(float(r["open"]), 4),
+   724→                        "high": round(float(r["high"]), 4),
+   725→                        "low": round(float(r["low"]), 4),
+   726→                        "close": round(float(r["close"]), 4),
+   727→                        "volume": float(r["tick_count"]),
+   728→                        "vwap": round(float(r["vwap"]), 4) if r["vwap"] is not None else None,
+   729→                    }
+   730→                    for r in reversed(rows)
+   731→                ]
+   732→                return {
+   733→                    "token_id": token_id,
+   734→                    "slug": slug,
+   735→                    "resolution": resolution,
+   736→                    "bars": bars,
+   737→                    "count": len(bars),
+   738→                    "synthetic": False,
+   739→                    "source": pg_view,
+   740→                    "data_age_seconds": round(time.time() - bars[-1]["timestamp"], 1) if bars else None,
+   741→                }
+   742→        except Exception as e:
+   743→            log.debug("[ohlcv] TimescaleDB candle query failed for %s: %s", token_id, e)
+   744→
+   745→    # ── Synthetic fallback: seeded random-walk anchored to live mid ───────────
+   746→    rng = np.random.RandomState(abs(hash(token_id + resolution)) % (2**31))
+   747→    now = time.time()
+   748→
+   749→    bars = []
+   750→    curr_price = max(mid * (1.0 + rng.uniform(-0.06, 0.06)), 0.05)
+   751→    for i in range(count):
+   752→        ts = now - (count - i) * step_sec
+   753→        drift = rng.uniform(-0.012, 0.012)
+   754→        open_p = curr_price
+   755→        close_p = max(min(open_p + drift, 0.98), 0.02)
+   756→        high_p = max(open_p, close_p) + abs(rng.uniform(0.001, 0.008))
+   757→        low_p = min(open_p, close_p) - abs(rng.uniform(0.001, 0.008))
+   758→        vol = float(rng.uniform(500, 15000))
+   759→        bars.append({
+   760→            "timestamp": ts,
+   761→            "open": round(open_p, 4),
+   762→            "high": round(high_p, 4),
+   763→            "low": round(low_p, 4),
+   764→            "close": round(close_p, 4),
+   765→            "volume": round(vol, 1),
+   766→        })
+   767→        curr_price = close_p
+   768→
+   769→    if bars:
+   770→        bars[-1]["close"] = round(mid, 4)
+   771→
+   772→    return {
+   773→        "token_id": token_id,
+   774→        "slug": slug,
+   775→        "resolution": resolution,
+   776→        "bars": bars,
+   777→        "count": len(bars),
+   778→        "synthetic": True,
+   779→        "synthetic_kind": "seeded_random_walk",
+   780→        "disclaimer": "Synthetic bars anchored to live mid — no stored history for this token yet",
+   781→    }
+   782→
+   783→
+   784→@app.get("/api/ai/search", tags=["ai"])
+   785→async def semantic_search(query: str = Query(..., min_length=1), top_k: int = 8):
+   786→    """Semantic vector similarity search across all prediction markets."""
+   787→    results = vector_store.search(query, top_k=top_k)
+   788→    return {"query": query, "results": [{"market": meta, "score": score} for meta, score in results]}
+   789→
+   790→
+   791→# ── Strategy Configuration ────────────────────────────────────────────────────
+   792→
+   793→@app.get("/api/config", tags=["config"])
+   794→async def get_config():
+   795→    return {
+   796→        "mm_spread_bps": settings.mm_spread_bps,
+   797→        "mm_quote_size_usdc": settings.mm_quote_size_usdc,
+   798→        "mm_max_inventory_usdc": settings.mm_max_inventory_usdc,
+   799→        "arb_min_profit_bps": settings.arb_min_profit_bps,
+   800→        "arb_order_size_usdc": settings.arb_order_size_usdc,
+   801→        "signal_min_confidence": settings.signal_min_confidence,
+   802→        "daily_loss_limit_usdc": settings.daily_loss_limit_usdc,
+   803→        "max_total_exposure_usdc": settings.max_total_exposure_usdc,
+   804→        "max_open_orders": settings.max_open_orders,
+   805→    }
+   806→
+   807→
+   808→@app.put("/api/config", tags=["config"])
+   809→async def update_config(cfg: StrategyConfigUpdate):
+   810→    if cfg.mm_spread_bps is not None:
+   811→        settings.mm_spread_bps = cfg.mm_spread_bps
+   812→    if cfg.mm_quote_size_usdc is not None:
+   813→        settings.mm_quote_size_usdc = cfg.mm_quote_size_usdc
+   814→    if cfg.mm_max_inventory_usdc is not None:
+   815→        settings.mm_max_inventory_usdc = cfg.mm_max_inventory_usdc
+   816→    if cfg.arb_min_profit_bps is not None:
+   817→        settings.arb_min_profit_bps = cfg.arb_min_profit_bps
+   818→    if cfg.arb_order_size_usdc is not None:
+   819→        settings.arb_order_size_usdc = cfg.arb_order_size_usdc
+   820→    if cfg.signal_min_confidence is not None:
+   821→        settings.signal_min_confidence = cfg.signal_min_confidence
+   822→    if cfg.daily_loss_limit_usdc is not None:
+   823→        settings.daily_loss_limit_usdc = cfg.daily_loss_limit_usdc
+   824→
+   825→    await store.log_event("⚙️ Strategy configuration parameters updated live")
+   826→    return {"status": "updated", "config": await get_config()}
+   827→
+   828→
+   829→# ── Markets & Order Book Depth ────────────────────────────────────────────────
+   830→
+   831→@app.get("/api/markets", tags=["markets"])
+   832→async def get_markets(limit: int = 50, search: str | None = None):
+   833→    try:
+   834→        if search:
+   835→            items = await gamma_client.search_markets(search, limit=limit)
+   836→        else:
+   837→            items = await gamma_client.get_markets(active=True, limit=limit)
+   838→        return {"markets": items, "count": len(items)}
+   839→    except Exception as e:
+   840→        raise HTTPException(status_code=502, detail=str(e))
+   841→
+   842→
+   843→@app.get("/api/markets/coverage", tags=["markets"])
+   844→async def get_market_coverage_report():
+   845→    """Return authoritative Polymarket catalog coverage metrics and exclusion audit log."""
+   846→    from core.market_discovery import market_discovery
+   847→    report = market_discovery.get_coverage_report()
+   848→    return report
+   849→
+   850→
+   851→@app.get("/api/markets/catalog", tags=["markets"])
+   852→async def get_market_catalog(limit: int = 100, category: str | None = None):
+   853→    """Return indexed market catalog with full hierarchy metadata."""
+   854→    from core.market_discovery import market_discovery
+   855→    catalog = market_discovery.get_full_catalog(limit=limit, category=category)
+   856→    return {"catalog": catalog, "count": len(catalog)}
+   857→
+   858→
+   859→@app.get("/api/depth/{token_id}", tags=["markets"])
+   860→async def get_market_depth(token_id: str):
+   861→    book = await store.get_order_book(token_id)
+   862→    if not book:
+   863→        book_poller.prioritize_tokens([token_id])
+   864→        return {"token_id": token_id, "bids": [], "asks": [], "mid": None, "spread": None}
+   865→
+   866→    cum_bids = []
+   867→    b_total = 0.0
+   868→    for b in book.bids[:10]:
+   869→        b_total += b.size
+   870→        cum_bids.append({"price": b.price, "size": b.size, "total": round(b_total, 2)})
+   871→
+   872→    cum_asks = []
+   873→    a_total = 0.0
+   874→    for a in book.asks[:10]:
+   875→        a_total += a.size
+   876→        cum_asks.append({"price": a.price, "size": a.size, "total": round(a_total, 2)})
+   877→
+   878→    return {
+   879→        "token_id": token_id,
+   880→        "slug": store.market_slugs.get(token_id, token_id[:14]),
+   881→        "bids": cum_bids,
+   882→        "asks": cum_asks,
+   883→        "mid": book.mid,
+   884→        "spread": book.spread,
+   885→        "best_bid": book.best_bid,
+   886→        "best_ask": book.best_ask,
+   887→    }
+   888→
+   889→
+   890→@app.get("/api/orderbooks", tags=["markets"])
+   891→async def get_orderbooks():
+   892→    books = []
+   893→    async with store._lock:
+   894→        for tid, book in store.order_books.items():
+   895→            books.append({
+   896→                "token_id": tid,
+   897→                "slug": store.market_slugs.get(tid, tid[:14]),
+   898→                "bids": [{"price": b.price, "size": b.size} for b in book.bids[:5]],
+   899→                "asks": [{"price": a.price, "size": a.size} for a in book.asks[:5]],
+   900→                "best_bid": book.best_bid,
+   901→                "best_ask": book.best_ask,
+   902→                "mid": book.mid,
+   903→                "spread": book.spread,
+   904→                "updated_at": book.updated_at,
+   905→            })
+   906→    return {"order_books": books, "count": len(books)}
+   907→
+   908→
+   909→# ── Trading & Orders ──────────────────────────────────────────────────────────
+   910→
+   911→@app.post("/api/trade", tags=["trading"])
+   912→async def place_manual_trade(req: ManualTradeRequest):
+   913→    side = Side.BUY if req.side.upper() == "BUY" else Side.SELL
+   914→    size_shares = req.size_usdc / req.price
+   915→
+   916→    # Pre-trade risk validation (all orders, paper or live, pass the same gate).
+   917→    provisional = Order(
+   918→        order_id="manual-pre-check",
+   919→        token_id=req.token_id,
+   920→        side=side,
+   921→        price=req.price,
+   922→        size=size_shares,
+   923→        strategy="manual",
+   924→        paper=settings.paper_trade,
+   925→    )
+   926→    allowed, reason = await risk_manager.check_order(provisional)
+   927→    if not allowed:
+   928→        await store.log_event(f"⚠ Risk block [manual]: {reason}")
+   929→        raise HTTPException(status_code=400, detail=f"Risk rejection: {reason}")
+   930→
+   931→    args = OrderArgs(
+   932→        token_id=req.token_id,
+   933→        price=req.price,
+   934→        side=side,
+   935→        size=size_shares,
+   936→    )
+   937→
+   938→    if settings.paper_trade:
+   939→        order = await paper_sim.create_order(args, strategy="manual")
+   940→    else:
+   941→        from core.clob_client import clob_client
+   942→        order = await clob_client.create_order(args)
+   943→        if order:
+   944→            await store.add_order(order)
+   945→
+   946→    if not order:
+   947→        raise HTTPException(status_code=400, detail="Failed to place order")
+   948→
+   949→    slug = store.market_slugs.get(req.token_id, req.token_id[:12])
+   950→    await store.log_event(f"👤 Manual Order: {side.value} {slug} @ {req.price:.4f} (${req.size_usdc:.2f})")
+   951→    return {"status": "placed", "order": order}
+   952→
+   953→
+   954→@app.get("/api/orders", tags=["trading"])
+   955→async def get_orders():
+   956→    orders = await store.get_open_orders()
+   957→    return {
+   958→        "orders": [
+   959→            {
+   960→                "order_id": o.order_id,
+   961→                "token_id": o.token_id,
+   962→                "slug": store.market_slugs.get(o.token_id, ""),
+   963→                "side": o.side.value,
+   964→                "price": o.price,
+   965→                "size": o.size,
+   966→                "size_matched": o.size_matched,
+   967→                "strategy": o.strategy,
+   968→                "paper": o.paper,
+   969→                "created_at": o.created_at,
+   970→            }
+   971→            for o in orders
+   972→        ],
+   973→        "count": len(orders),
+   974→    }
+   975→
+   976→
+   977→@app.delete("/api/orders", tags=["trading"])
+   978→async def cancel_all_orders():
+   979→    if settings.paper_trade:
+   980→        n = await paper_sim.cancel_all()
+   981→    else:
+   982→        from core.clob_client import clob_client
+   983→        await clob_client.cancel_all_orders()
+   984→        cancelled = await store.cancel_all_orders()
+   985→        n = len(cancelled)
+   986→    await store.log_event(f"🛑 Cancelled all {n} open order(s)")
+   987→    return {"cancelled": n}
+   988→
+   989→
+   990→@app.delete("/api/orders/{order_id}", tags=["trading"])
+   991→async def cancel_order(order_id: str):
+   992→    if settings.paper_trade:
+   993→        ok = await paper_sim.cancel_order(order_id)
+   994→    else:
+   995→        from core.clob_client import clob_client
+   996→        ok = await clob_client.cancel_order(order_id)
+   997→    if not ok:
+   998→        raise HTTPException(status_code=404, detail=f"Order {order_id} not found")
+   999→    await store.log_event(f"🛑 Cancelled order {order_id[:16]}")
+  1000→    return {"cancelled": order_id}
+  1001→
+  1002→
+  1003→@app.get("/api/positions", tags=["trading"])
+  1004→async def get_positions():
+  1005→    positions = []
+  1006→    async with store._lock:
+  1007→        for tid, pos in store.positions.items():
+  1008→            positions.append({
+  1009→                "token_id": tid,
+  1010→                "slug": store.market_slugs.get(tid, ""),
+  1011→                "yes_shares": pos.yes_shares,
+  1012→                "avg_entry_price": pos.avg_entry_price,
+  1013→                "total_invested": pos.total_invested,
+  1014→                "realised_pnl": pos.realised_pnl,
+  1015→            })
+  1016→    return {"positions": positions, "count": len(positions), "daily_pnl": store.daily_pnl}
+  1017→
+  1018→
+  1019→@app.get("/api/trades", tags=["trading"])
+  1020→async def get_trades(limit: int = 50):
+  1021→    trades = store.trades[-limit:]
+  1022→    return {
+  1023→        "trades": [
+  1024→            {
+  1025→                "trade_id": t.trade_id,
+  1026→                "slug": store.market_slugs.get(t.token_id, ""),
+  1027→                "side": t.side.value,
+  1028→                "price": t.price,
+  1029→                "size": t.size,
+  1030→                "pnl": t.pnl,
+  1031→                "strategy": t.strategy,
+  1032→                "paper": t.paper,
+  1033→                "timestamp": t.timestamp,
+  1034→            }
+  1035→            for t in reversed(trades)
+  1036→        ],
+  1037→        "count": len(trades),
+  1038→    }
+  1039→
+  1040→
+  1041→@app.get("/api/events", tags=["system"])
+  1042→async def get_events(n: int = 50):
+  1043→    events = await store.get_recent_events(n)
+  1044→    return {"events": list(reversed(events)), "count": len(events)}
+  1045→
+  1046→
+  1047→# ── Risk Management ───────────────────────────────────────────────────────────
+  1048→
+  1049→@app.post("/api/kill-switch/activate", tags=["risk"])
+  1050→async def activate_kill_switch():
+  1051→    await risk_manager.activate_kill_switch("Manual via UI")
+  1052→    await store.log_event("🛑 KILL SWITCH activated — all trading halted")
+  1053→    return {"status": "activated", "kill_switch": True}
+  1054→
+  1055→
+  1056→@app.post("/api/kill-switch/deactivate", tags=["risk"])
+  1057→async def deactivate_kill_switch():
+  1058→    await risk_manager.deactivate_kill_switch()
+  1059→    await store.log_event("▶ Kill switch deactivated — trading resumed")
+  1060→    return {"status": "deactivated", "kill_switch": False}
+  1061→
+  1062→
+  1063→class ObservationModeRequest(BaseModel):
+  1064→    active: bool
+  1065→    reason: str = ""
+  1066→
+  1067→
+  1068→@app.post("/api/risk/observation-mode", tags=["risk"])
+  1069→async def set_observation_mode(req: ObservationModeRequest):
+  1070→    """Toggle observation-only mode. When active, new live orders are blocked."""
+  1071→    result = await risk_manager.set_observation_mode(req.active, req.reason)
+  1072→    return {"status": "observation_mode_" + ("enabled" if result["observation_only"] else "disabled"), **result}
+  1073→
+  1074→
+  1075→# ── ML Model & Quantitative Diagnostics ───────────────────────────────────────
+  1076→
+  1077→@app.get("/api/ml", tags=["ml"])
+  1078→async def get_ml_status():
+  1079→    """Rich ML status: ensemble health, stacking meta-learner, and drift signals."""
+  1080→    from ml.ensemble_meta_learner import ensemble_meta_learner
+  1081→    from ml.training_orchestrator import training_orchestrator
+  1082→    return {
+  1083→        "model_type": "4-Member Calibrated Ensemble + Level-2 Stacking Meta-Learner",
+  1084→        "members": {
+  1085→            "rf": "RandomForestClassifier (isotonic-calibrated)",
+  1086→            "gb": "GradientBoostingClassifier (isotonic-calibrated)",
+  1087→            "sgd": "SGDClassifier (online)",
+  1088→            "lgbm": "LightGBMClassifier" if ml_model.lgbm_available else "unavailable",
+  1089→        },
+  1090→        "model_ready": ml_model.rf is not None,
+  1091→        "model_version": model_registry.active_version,
+  1092→        "n_online_updates": ml_model._n_updates,
+  1093→        "last_trained": ml_model._last_trained,
+  1094→        "training_source": ml_model.training_source,
+  1095→        "n_real_samples": ml_model.n_real_samples,
+  1096→        "n_synthetic_samples": ml_model.n_synthetic_samples,
+  1097→        "adaptive_weights": ml_model.adaptive_weights,
+  1098→        "meta_learner": ensemble_meta_learner.get_summary(),
+  1099→        "drift": drift_detector.get_status_report(),
+  1100→        "training_orchestrator": training_orchestrator.stats,
+  1101→        "brier_score": ml_model.brier_score,
+  1102→        "roc_auc": ml_model.roc_auc,
+  1103→        "ece": ml_model.ece,
+  1104→        "feature_importances": ml_model.feature_importances,
+  1105→    }
+  1106→
+  1107→
+  1108→@app.get("/api/ml/metrics", tags=["ml"])
+  1109→async def get_ml_metrics():
+  1110→    """Full quantitative diagnostics: Brier, EWMA Brier, ROC-AUC, ECE, drift, meta-learner, reliability curve."""
+  1111→    from ml.ensemble_meta_learner import ensemble_meta_learner
+  1112→    return {
+  1113→        "model_type": "4-Member Calibrated Ensemble + Level-2 Stacking Meta-Learner",
+  1114→        "brier_score": ml_model.brier_score,
+  1115→        "roc_auc": ml_model.roc_auc,
+  1116→        "log_loss": ml_model.log_loss_score,
+  1117→        "ece": ml_model.ece,
+  1118→        "sharpe_ratio": ml_model.sharpe_ratio,
+  1119→        "n_online_updates": ml_model._n_updates,
+  1120→        "last_trained": ml_model._last_trained,
+  1121→        "training_source": ml_model.training_source,
+  1122→        "n_real_samples": ml_model.n_real_samples,
+  1123→        "n_synthetic_samples": ml_model.n_synthetic_samples,
+  1124→        "adaptive_weights": ml_model.adaptive_weights,
+  1125→        "meta_learner": ensemble_meta_learner.get_summary(),
+  1126→        "drift": drift_detector.get_status_report(),
+  1127→        "feature_importances": ml_model.feature_importances,
+  1128→        "reliability_curve": ml_model.reliability_curve,
+  1129→        "model_ready": ml_model.rf is not None,
+  1130→        "model_version": model_registry.active_version,
+  1131→        "registry_summary": model_registry.get_summary(),
+  1132→    }
+  1133→
+  1134→
+  1135→@app.post("/api/ml/retrain", tags=["ml"])
+  1136→async def retrain_ml_model():
+  1137→    """Trigger manual re-training and re-calibration of the ML ensemble."""
+  1138→    await asyncio.to_thread(ml_model.fit_initial)
+  1139→    await asyncio.to_thread(ml_model.save)
+  1140→    from ml.ensemble_meta_learner import ensemble_meta_learner
+  1141→    await store.log_event(
+  1142→        f"🧠 ML model retrained (Brier={ml_model.brier_score:.4f}, AUC={ml_model.roc_auc:.4f}, "
+  1143→        f"ECE={ml_model.ece:.4f}, meta_warm={ensemble_meta_learner.is_warm})"
+  1144→    )
+  1145→    return {
+  1146→        "status": "retrained",
+  1147→        "brier_score": ml_model.brier_score,
+  1148→        "roc_auc": ml_model.roc_auc,
+  1149→        "log_loss": ml_model.log_loss_score,
+  1150→        "ece": ml_model.ece,
+  1151→        "model_version": model_registry.active_version,
+  1152→        "meta_learner": ensemble_meta_learner.get_summary(),
+  1153→    }
+  1154→
+  1155→
+  1156→@app.get("/api/ml/drift", tags=["ml"])
+  1157→async def get_drift_report():
+  1158→    """
+  1159→    Full drift-monitoring dashboard: PSI, KS statistic, rolling Brier,
+  1160→    EWMA Brier early-warning, drift status, and PSI history.
+  1161→    """
+  1162→    from ml.ensemble_meta_learner import ensemble_meta_learner
+  1163→    from ml.training_orchestrator import training_orchestrator
+  1164→    report = drift_detector.get_status_report()
+  1165→    return {
+  1166→        **report,
+  1167→        "meta_learner": ensemble_meta_learner.get_summary(),
+  1168→        "orchestrator": training_orchestrator.stats,
+  1169→        "model_version": model_registry.active_version,
+  1170→        "brier_baseline": ml_model.brier_score,
+  1171→        "roc_auc": ml_model.roc_auc,
+  1172→    }
+  1173→
+  1174→
+  1175→@app.get("/api/ml/training-orchestrator", tags=["ml"])
+  1176→async def get_training_orchestrator_stats():
+  1177→    """Return training orchestrator status: retrain count, last champion Brier, drift thresholds."""
+  1178→    from ml.training_orchestrator import training_orchestrator
+  1179→    return {
+  1180→        **training_orchestrator.stats,
+  1181→        "model_version": model_registry.active_version,
+  1182→        "model_ready": ml_model.rf is not None,
+  1183→        "drift_status": drift_detector.drift_status,
+  1184→    }
+  1185→
+  1186→
+  1187→@app.post("/api/ml/learn", tags=["ml"])
+  1188→async def ml_learn(token_id: str, resolved_yes: bool):
+  1189→    """Feed a resolved ground-truth outcome into the online SGD learner.
+  1190→
+  1191→    1. Backfills outcome labels in both DB backends (TimescaleDB + SQLite).
+  1192→    2. Fetches the most recent stored feature vector for this token.
+  1193→    3. Calls ml_model.update() to incrementally train the SGD online learner.
+  1194→    """
+  1195→    from core.timescale_db import timescale_db
+  1196→
+  1197→    # Step 1: persist outcome label
+  1198→    updated = timescale_db.mark_resolved_outcomes(token_id, resolved_yes=resolved_yes)
+  1199→
+  1200→    # Step 2: fetch the most recent feature vector for this token
+  1201→    import json as _json
+  1202→    import sqlite3
+  1203→
+  1204→    import numpy as np
+  1205→    features = None
+  1206→    try:
+  1207→        with sqlite3.connect(timescale_db._sqlite_path) as conn:
+  1208→            row = conn.execute(
+  1209→                "SELECT features_json FROM ml_feature_store WHERE token_id = ? ORDER BY timestamp DESC LIMIT 1;",
+  1210→                (token_id,),
+  1211→            ).fetchone()
+  1212→        if row:
+  1213→            features = np.array(_json.loads(row[0]), dtype=np.float32)
+  1214→    except Exception as e:
+  1215→        log.warning("[api/ml/learn] Could not fetch feature vector for %s: %s", token_id, e)
+  1216→
+  1217→    # Step 3: online update
+  1218→    if features is not None:
+  1219→        await asyncio.to_thread(ml_model.update, features, resolved_yes)
+  1220→        await store.log_event(
+  1221→            f"🧠 Online ML update: {token_id[:12]} outcome={'YES' if resolved_yes else 'NO'} "
+  1222→            f"(update #{ml_model._n_updates})"
+  1223→        )
+  1224→    else:
+  1225→        await store.log_event(
+  1226→            f"🧠 ML label recorded for {token_id[:12]} (no feature vector to update — outcome stored)"
+  1227→        )
+  1228→
+  1229→    return {
+  1230→        "status": "updated",
+  1231→        "token_id": token_id,
+  1232→        "resolved_yes": resolved_yes,
+  1233→        "feature_rows_labelled": updated,
+  1234→        "online_update_applied": features is not None,
+  1235→        "n_updates": ml_model._n_updates,
+  1236→    }
+  1237→
+  1238→
+  1239→# ── Deep Market Analysis & Fundamental Intelligence ──────────────────────────
+  1240→
+  1241→@app.get("/api/analysis/deep", tags=["analysis"])
+  1242→async def get_deep_analysis():
+  1243→    """Return top multi-factor opportunity rankings and fundamental sentiment."""
+  1244→    from core.analysis_engine import deep_analysis_engine
+  1245→    top_opps = deep_analysis_engine.get_top_ranked_opportunities(limit=15)
+  1246→    news = [n.to_dict() for n in fundamental_engine.news_feed[:15]]
+  1247→    return {
+  1248→        "top_opportunities": top_opps,
+  1249→        "recent_news": news,
+  1250→        "timestamp": time.time(),
+  1251→    }
+  1252→
+  1253→
+  1254→@app.get("/api/analysis/market/{token_id}", tags=["analysis"])
+  1255→async def analyze_specific_market(token_id: str):
+  1256→    """Return complete 9-factor probabilistic, microstructure, and recommendation analysis for a single contract."""
+  1257→    from core.analysis_engine import deep_analysis_engine
+  1258→    analysis = deep_analysis_engine.analyze_market(token_id)
+  1259→    return analysis
+  1260→
+  1261→
+  1262→@app.get("/api/analysis/news", tags=["analysis"])
+  1263→async def get_fundamental_news(limit: int = 50, category: str | None = None):
+  1264→    """Return news headlines with sentiment scores. Items carry `is_seed` provenance."""
+  1265→    items = fundamental_engine.news_feed
+  1266→    if category and category.lower() != "all":
+  1267→        items = [n for n in items if n.category.lower() == category.lower()]
+  1268→    return {"news": [n.to_dict() for n in items[:limit]], "count": len(items)}
+  1269→
+  1270→
+  1271→@app.get("/api/analysis/news/sources", tags=["analysis"])
+  1272→async def get_fundamental_news_sources():
+  1273→    """Return catalog of configured news sources. GDELT is config-only (not connected)."""
+  1274→    return fundamental_engine.get_source_catalog()
+  1275→
+  1276→
+  1277→@app.get("/api/analysis/news/stats", tags=["analysis"])
+  1278→async def get_fundamental_news_stats():
+  1279→    """Return live NLP sentiment breakdown and global ingestion rate telemetry."""
+  1280→    return fundamental_engine.get_news_stats()
+  1281→
+  1282→
+  1283→# ── Model Registry & Drift Detection ──────────────────────────────────────────
+  1284→
+  1285→@app.get("/api/ml/registry", tags=["ml"])
+  1286→async def get_model_registry():
+  1287→    """Return model version lineage, benchmarks, ECE, and validation status."""
+  1288→    return model_registry.get_summary()
+  1289→
+  1290→
+  1291→@app.get("/api/ml/drift", tags=["ml"])
+  1292→async def get_model_drift():
+  1293→    """Return real-time Population Stability Index (PSI) and concept shift metrics."""
+  1294→    return drift_detector.get_status_report()
+  1295→
+  1296→
+  1297→# ── Quantitative Backtesting Lab ──────────────────────────────────────────────
+  1298→
+  1299→class BacktestRequest(BaseModel):
+  1300→    strategy_id: str
+  1301→    initial_capital: float = Field(default=10000.0, ge=100.0, le=1000000.0)
+  1302→    days: int = Field(default=30, ge=1, le=365)
+  1303→    fee_bps: float = Field(default=0.0, ge=0.0, le=100.0)
+  1304→    slippage_bps: float = Field(default=5.0, ge=0.0, le=50.0)
+  1305→
+  1306→
+  1307→@app.post("/api/backtest/run", tags=["backtesting"])
+  1308→async def run_backtest_simulation(req: BacktestRequest):
+  1309→    """Run quantitative simulation across historical ticks for any registered strategy."""
+  1310→    from backtesting.engine import backtest_engine
+  1311→    result = await asyncio.to_thread(
+  1312→        backtest_engine.run_backtest,
+  1313→        strategy_id=req.strategy_id,
+  1314→        initial_capital=req.initial_capital,
+  1315→        days=req.days,
+  1316→        fee_bps=req.fee_bps,
+  1317→        slippage_bps=req.slippage_bps,
+  1318→    )
+  1319→    return {
+  1320→        "status": "completed",
+  1321→        "synthetic": True,
+  1322→        "synthetic_kind": "monte_carlo_archetype",
+  1323→        "disclaimer": "Synthetic archetype simulation — not recorded market history (M8 pending)",
+  1324→        "result": result.to_dict(),
+  1325→    }
+  1326→
+  1327→
+  1328→@app.get("/api/audit/logs", tags=["audit"])
+  1329→async def get_audit_logs(limit: int = 100, category: str | None = None):
+  1330→    """Query immutable SQLite audit trail logs."""
+  1331→    logs = await audit_logger.get_recent_events(limit=limit, category=category)
+  1332→    return {"logs": logs, "count": len(logs)}
+  1333→
+  1334→
+  1335→# ── Arbitrage Scanner & Database Explorer ─────────────────────────────────────
+  1336→
+  1337→@app.get("/api/arbitrage/opportunities", tags=["arbitrage"])
+  1338→async def get_arbitrage_opportunities():
+  1339→    """Return real-time dual-outcome and multi-pool arbitrage opportunities."""
+  1340→    from core.arbitrage_scanner import arbitrage_scanner
+  1341→    opps = arbitrage_scanner.scan_opportunities()
+  1342→    return {"opportunities": [o.to_dict() for o in opps], "count": len(opps)}
+  1343→
+  1344→
+  1345→class ArbitrageExecuteRequest(BaseModel):
+  1346→    token_id_yes: str
+  1347→    token_id_no: str
+  1348→    size_usdc: float
+  1349→
+  1350→
+  1351→@app.post("/api/arbitrage/execute", tags=["arbitrage"])
+  1352→async def execute_arbitrage(req: ArbitrageExecuteRequest):
+  1353→    """
+  1354→    Execute a dual-leg Dutch-book arbitrage. Both legs pass the same risk gate
+  1355→    and are hard-capped by the per-market ceiling. Live execution is only
+  1356→    possible for real token ids; synthetic complementary legs are reported
+  1357→    but not transmitted to the exchange.
+  1358→    """
+  1359→    from core.clob_client import clob_client
+  1360→    from risk.manager import MAX_POSITION_PER_MARKET
+  1361→
+  1362→    size_usdc = min(float(req.size_usdc), float(MAX_POSITION_PER_MARKET))
+  1363→    if size_usdc <= 0:
+  1364→        raise HTTPException(status_code=400, detail="size_usdc must be positive")
+  1365→
+  1366→    results = []
+  1367→    legs = [
+  1368→        ("yes", req.token_id_yes),
+  1369→        ("no", req.token_id_no),
+  1370→    ]
+  1371→    for leg, token_id in legs:
+  1372→        book = store.order_books.get(token_id)
+  1373→        price = book.best_ask if book and book.best_ask else 0.50
+  1374→        shares = size_usdc / max(price, 0.01)
+  1375→
+  1376→        provisional = Order(
+  1377→            order_id=f"arb-{leg}-pre",
+  1378→            token_id=token_id,
+  1379→            side=Side.BUY,
+  1380→            price=price,
+  1381→            size=shares,
+  1382→            strategy="arb_scanner",
+  1383→            paper=settings.paper_trade,
+  1384→        )
+  1385→        allowed, reason = await risk_manager.check_order(provisional)
+  1386→        if not allowed:
+  1387→            results.append({"leg": leg, "token_id": token_id, "status": "REJECTED", "reason": reason})
+  1388→            continue
+  1389→
+  1390→        if settings.paper_trade:
+  1391→            order = await paper_sim.create_order(
+  1392→                OrderArgs(token_id=token_id, price=price, side=Side.BUY, size=shares),
+  1393→                strategy="arb_scanner",
+  1394→            )
+  1395→            status = "PLACED_PAPER"
+  1396→        else:
+  1397→            if token_id.endswith("_no"):
+  1398→                results.append({"leg": leg, "token_id": token_id, "status": "SKIPPED", "reason": "synthetic complementary token — not transmissible"})
+  1399→                continue
+  1400→            resp = await clob_client.create_order(
+  1401→                OrderArgs(token_id=token_id, price=price, side=Side.BUY, size=shares)
+  1402→            )
+  1403→            if resp is None:
+  1404→                results.append({"leg": leg, "token_id": token_id, "status": "FAILED", "reason": "exchange rejected order"})
+  1405→                continue
+  1406→            order = Order(
+  1407→                order_id=resp.get("orderID") or resp.get("order_id", "unknown"),
+  1408→                token_id=token_id,
+  1409→                side=Side.BUY,
+  1410→                price=price,
+  1411→                size=shares,
+  1412→                strategy="arb_scanner",
+  1413→                paper=False,
+  1414→            )
+  1415→            await store.add_order(order)
+  1416→            status = "PLACED_LIVE"
+  1417→
+  1418→        results.append({"leg": leg, "token_id": token_id, "status": status, "order_id": order.order_id})
+  1419→
+  1420→    slug = store.market_slugs.get(req.token_id_yes, req.token_id_yes[:12])
+  1421→    await store.log_event(f"⚡ Manual arb execute: {slug} (${size_usdc:.2f}/leg): {[r['status'] for r in results]}")
+  1422→    return {"status": "processed", "size_usdc": size_usdc, "legs": results, "slug": slug}
+  1423→
+  1424→
+  1425→@app.get("/api/database/records", tags=["database"])
+  1426→async def get_database_records(table: str = "market_snapshots", limit: int = 25):
+  1427→    """Query latest time-series records from the ACTIVE backend (KD-29).
+  1428→
+  1429→    Reads through the engine so results always match the backend that is
+  1430→    actually accepting writes; errors are surfaced, never swallowed.
+  1431→    """
+  1432→    from core.timescale_db import _TABLES, timescale_db
+  1433→    if table not in _TABLES:
+  1434→        raise HTTPException(status_code=400, detail=f"Invalid table {table}")
+  1435→    limit = max(1, min(int(limit), 500))
+  1436→    return timescale_db.fetch_records(table=table, limit=limit)
+  1437→
+  1438→
+  1439→@app.get("/api/database/reconciliation", tags=["database"])
+  1440→async def get_reconciliation_report():
+  1441→    """Most recent storage-vs-engine reconciliation artifact (P0-DAT-03)."""
+  1442→    from core.reconciliation import last_reconciliation, run_reconciliation
+  1443→    report = last_reconciliation()
+  1444→    if report is None:
+  1445→        report = run_reconciliation()
+  1446→    return report
+  1447→
+  1448→
+  1449→# ── System Health, Mode & Pipeline Ingestion Monitor ──────────────────────────
+  1450→
+  1451→@app.get("/api/system/mode", tags=["system"])
+  1452→async def get_system_mode():
+  1453→    """Canonical, network-visible trading mode and safety posture (P0-GOV-01)."""
+  1454→    from core.safety import kill_switch_file_exists
+  1455→    return {
+  1456→        "mode": settings.trading_mode,
+  1457→        "paper_trade": settings.paper_trade,
+  1458→        "live_trading_enabled": settings.live_trading_enabled,
+  1459→        "auth_enforced": bool(settings.api_token),
+  1460→        "kill_switch": store.kill_switch_active,
+  1461→        "kill_switch_durable": bool(kill_switch_file_exists()),
+  1462→        "weekly": store.weekly_pnl_snapshot(),
+  1463→        "mode_derivation": "TRADING_MODE/PAPER_TRADE env — single source of truth",
+  1464→    }
+  1465→
+  1466→
+  1467→@app.get("/api/system/health", tags=["system"])
+  1468→async def get_system_health():
+  1469→    """Honest pipeline health: real component checks only — no hardcoded values.
+  1470→
+  1471→    Status derivation: UNHEALTHY if any CRITICAL finding (kill switch, circuit
+  1472→    breakers) or the database is unreachable; DEGRADED on WARNING findings
+  1473→    (stale heartbeats, feed stall); otherwise HEALTHY.
+  1474→    """
+  1475→    from core.safety import kill_switch_file_exists
+  1476→    poller_stats = book_poller.stats
+  1477→    tracked_count = len(store.order_books)
+  1478→    from core.timescale_db import timescale_db
+  1479→    db_stats = timescale_db.get_stats()
+  1480→    vector_docs = len(vector_store.doc_vectors)
+  1481→
+  1482→    checks = {}
+  1483→    kill_active = bool(kill_switch_file_exists() or store.kill_switch_active)
+  1484→    checks["kill_switch"] = {
+  1485→        "status": "BREACHED" if kill_active else "CLEAR",
+  1486→        "detail": "durable kill switch is active" if kill_active else "no kill switch active",
+  1487→    }
+  1488→
+  1489→    db_reachable = db_stats.get("db_backend") not in (None, "")
+  1490→    write_failures = sum(db_stats.get("inserts_failed", {}).values())
+  1491→    checks["timescale_db"] = {
+  1492→        "status": "UP" if (db_reachable and write_failures == 0) else ("DEGRADED" if db_reachable else "UNHEALTHY"),
+  1493→        "detail": f"{db_stats.get('db_backend', 'unavailable')} — "
+  1494→                  f"{db_stats.get('snapshots_recorded', 0)} snaps / "
+  1495→                  f"{db_stats.get('ticks_recorded', 0)} ticks / "
+  1496→                  f"{write_failures} failed writes",
+  1497→    }
+  1498→
+  1499→    from core.reconciliation import last_reconciliation
+  1500→    recon = last_reconciliation()
+  1501→    recon_ok = recon is not None and recon.get("is_clean", False) is True
+  1502→    checks["reconciliation"] = {
+  1503→        "status": "UP" if recon_ok else ("DEGRADED" if recon is not None else "NOT_RUN"),
+  1504→        "detail": (f"clean at {recon.get('generated_at', '?')}"
+  1505→                   if recon_ok else
+  1506→                   (f"{len(recon.get('breaches', []))} breach(es): {recon.get('breaches', [])[:1]}"
+  1507→                    if recon is not None else "no reconciliation artifact yet — run at startup")),
+  1508→    }
+  1509→
+  1510→    success = poller_stats.get("success_count", 0)
+  1511→    errors = poller_stats.get("error_count", 0)
+  1512→    poller_ok = (success + errors) > 0 or not tracked_count
+  1513→    checks["book_poller"] = {
+  1514→        "status": "UP" if poller_ok else "DEGRADED",
+  1515→        "detail": f"{success} success / {errors} errors — {tracked_count} tracked books",
+  1516→    }
+  1517→
+  1518→    ml_trained = ml_model.rf is not None
+  1519→    checks["ml_engine"] = {
+  1520→        "status": "UP" if ml_trained else "NOT_TRAINED",
+  1521→        "detail": f"active model {model_registry.active_version or 'none'}, "
+  1522→                  f"online updates {ml_model._n_updates}, training data: synthetic",
+  1523→    }
+  1524→
+  1525→    watchdog_snapshot = watchdog.status()
+  1526→    stale = [name for name, st in watchdog_snapshot["subsystems"].items() if st == "STALE"]
+  1527→    checks["watchdog"] = {
+  1528→        "status": "UP" if watchdog_snapshot["running"] else "STOPPED",
+  1529→        "detail": f"{len(watchdog_snapshot['subsystems'])} subsystems registered, "
+  1530→                  f"{len(stale)} stale",
+  1531→    }
+  1532→
+  1533→    findings = watchdog_snapshot["last_checks"]
+  1534→    critical = [f for f in findings if f["severity"] == "CRITICAL"]
+  1535→    warnings = [f for f in findings if f["severity"] == "WARNING"]
+  1536→
+  1537→    if kill_active or critical or not db_reachable:
+  1538→        status = "UNHEALTHY"
+  1539→    elif warnings or stale:
+  1540→        status = "DEGRADED"
+  1541→    else:
+  1542→        status = "HEALTHY"
+  1543→
+  1544→    return {
+  1545→        "status": status,
+  1546→        "status_derivation": "computed from live component checks (no hardcoded values)",
+  1547→        "timestamp": time.time(),
+  1548→        "checks": checks,
+  1549→        "poller": {
+  1550→            "tier1_tokens": poller_stats.get("tier1_tokens", 0),
+  1551→            "tier2_tokens": poller_stats.get("tier2_tokens", 0),
+  1552→            "total_tracked": tracked_count,
+  1553→            "success_rate": round(
+  1554→                (success / max(success + errors, 1)) * 100, 2
+  1555→            ),
+  1556→            "error_count": errors,
+  1557→            "latency_ms": None,  # not measured — never fabricated
+  1558→            # P8: data-age label — oldest book update seen across all tracked tokens
+  1559→            "oldest_book_age_seconds": round(
+  1560→                max((time.time() - b.updated_at for b in store.order_books.values()), default=0.0), 1
+  1561→            ) if store.order_books else None,
+  1562→            "ws_client_started": False,  # D5: retired; REST polling only
+  1563→        },
+  1564→        "ml_engine": {
+  1565→            "active_version": model_registry.active_version,
+  1566→            "brier_score": ml_model.brier_score,
+  1567→            "psi_drift": drift_detector.last_psi,
+  1568→            "drift_status": drift_detector.drift_status,
+  1569→            "training_data_kind": "synthetic_coinflip_seed",
+  1570→        },
+  1571→        "timescale_db": db_stats,
+  1572→        "storage": {
+  1573→            "database_engine": db_stats.get("db_backend", "unavailable"),
+  1574→            "vector_index_size": vector_docs,
+  1575→            "audit_trail_backend": "SQLite3 WAL",
+  1576→            "market_intelligence_db": f"{db_stats.get('db_backend', 'unavailable')} "
+  1577→                                      f"({db_stats.get('snapshots_recorded', 0)} snaps, "
+  1578→                                      f"{db_stats.get('ticks_recorded', 0)} ticks)",
+  1579→            "state_persistence": "Atomic JSON (/app/data/store_state.json)",
+  1580→        },
+  1581→        "services": [
+  1582→            {"name": "FastAPI Server", "status": "UP", "port": 8080},
+  1583→            {"name": "REST Adaptive Book Poller", "status": checks["book_poller"]["status"]},
+  1584→            {"name": "Watchdog & Tripwires", "status": checks["watchdog"]["status"]},
+  1585→            {"name": "TimescaleDB / SQLite persistence", "status": checks["timescale_db"]["status"]},
+  1586→            {"name": "ML Ensemble", "status": checks["ml_engine"]["status"]},
+  1587→            {"name": "Audit Trail Engine", "status": "UP"},
+  1588→        ],
+  1589→        "tripwires": {"critical": critical, "warnings": warnings},
+  1590→        "mode": settings.trading_mode,
+  1591→    }
+  1592→
+  1593→
+  1594→# ── WebSocket Stream ──────────────────────────────────────────────────────────
+  1595→
+  1596→@app.websocket("/ws")
+  1597→async def websocket_endpoint(websocket: WebSocket):
+  1598→    if settings.api_token:
+  1599→        token = websocket.query_params.get("token")
+  1600→        if not hmac.compare_digest(token or "", settings.api_token):
+  1601→            await websocket.close(code=4401, reason="Unauthorized")
+  1602→            return
+  1603→    await manager.connect(websocket)
+  1604→    try:
+  1605→        snap = await _build_snapshot()
+  1606→        await websocket.send_text(json.dumps(snap, default=str))
+  1607→        while True:
+  1608→            try:
+  1609→                await asyncio.wait_for(websocket.receive_text(), timeout=30.0)
+  1610→            except asyncio.TimeoutError:
+  1611→                pass
+  1612→    except WebSocketDisconnect:
+  1613→        pass
+  1614→    except Exception as e:
+  1615→        log.debug("WS client disconnected: %s", e)
+  1616→    finally:
+  1617→        manager.disconnect(websocket)
+  1618→

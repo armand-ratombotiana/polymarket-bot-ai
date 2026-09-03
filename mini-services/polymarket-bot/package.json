@@ -1,0 +1,9 @@
+{
+  "name": "polymarket-bot",
+  "version": "3.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "set -a && . ./.env && set +a && while true; do python3 -m uvicorn api.server:app --host 0.0.0.0 --port 8080 --log-level info; echo 'restarting...'; sleep 2; done",
+    "start": "set -a && . ./.env && set +a && exec python3 -m uvicorn api.server:app --host 0.0.0.0 --port 8080 --log-level info"
+  }
+}
