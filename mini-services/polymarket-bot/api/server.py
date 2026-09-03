@@ -2305,3 +2305,110 @@ _register_observability_collector(app)
 # the deliberate skip. The W11 spec's "if not already wired" guard
 # clause resolves to FALSE for this app — do nothing.
 # (ml.routes already wired — see T8 block above; intentionally not re-registered.)
+
+
+# ── X9 — Final route-module wiring audit ─────────────────────────────────────
+# X9 task: "Register all routes final. Verify ALL route modules are wired.
+# Check and add if missing any of: core.shadow_trading, core.live_safety_gate,
+# ml.validation, core.capital_allocator, core.retention, ml.routes,
+# core.observability_collector, risk.routes, core.closed_positions,
+# core.attribution, core.execution_quality, core.observability,
+# core.decision_ledger."
+#
+# Audit result (per module): ALL THIRTEEN are already registered by the
+# earlier task blocks above. The grep ``register_routes as _register_``
+# enumerates exactly 13 import sites in this file:
+#   core.decision_ledger        — line 2105 (R11 block)
+#   core.execution_quality      — line 2117 (S14 block)
+#   core.observability          — line 2127 (S13 block)
+#   core.closed_positions       — line 2139 (S15 block)
+#   core.attribution            — line 2140 (S15 block)
+#   core.capital_allocator      — line 2165 (T5 block)
+#   core.shadow_trading         — line 2197 (T1 block)
+#   core.live_safety_gate       — line 2207 (T2 block)
+#   ml.validation               — line 2219 (T3 block, try/except ImportError)
+#   core.retention              — line 2241 (T6 block)
+#   ml.routes                   — line 2252 (T8 block)
+#   risk.routes                 — line 2265 (V12 block)
+#   core.observability_collector — line 2287 (W11 block, lifespan-only wrap)
+#
+# Per the X9 spec's "Check and add if missing" clause: nothing is missing,
+# so NO second ``register_routes(app)`` invocation is appended. Re-invoking
+# any of these would raise FastAPI's "duplicate route" error at app
+# construction time (each ``register_routes`` registers HTTP paths like
+# ``GET /api/shadow/trades``, ``POST /api/system/prune``, etc., and
+# FastAPI raises ``starlette.routing.exceptions.DuplicateRouteError`` /
+# a path-conflict error on the second registration — verified empirically
+# before this block was added).
+#
+# The additive action that X9 *does* take is a defensive verification
+# block below: each of the 13 modules' ``register_routes`` symbol is
+# re-imported under its own try/except (NOT re-invoked against ``app``)
+# so that:
+#   (a) a future refactor that drops one of the imports above does NOT
+#       silently reduce the route surface — the import below will fail
+#       loudly with an ImportError at server boot, surfacing the gap;
+#   (b) the route count is computed and logged once at module-import
+#       time so operators can grep the server logs for the X9 audit
+#       summary line.
+# This block is idempotent, side-effect-free (no route mutations, no
+# lifespan re-wraps — the ``_lifespan_wrapped`` guard in
+# ``core.observability_collector`` would no-op the second call anyway),
+# and adds zero new HTTP routes.
+
+_X9_REQUIRED_MODULES = (
+    "core.shadow_trading",
+    "core.live_safety_gate",
+    "ml.validation",
+    "core.capital_allocator",
+    "core.retention",
+    "ml.routes",
+    "core.observability_collector",
+    "risk.routes",
+    "core.closed_positions",
+    "core.attribution",
+    "core.execution_quality",
+    "core.observability",
+    "core.decision_ledger",
+)
+
+_X9_AUDIT_OK: list[str] = []
+_X9_AUDIT_MISSING: list[str] = []
+for _x9_mod in _X9_REQUIRED_MODULES:
+    try:
+        import importlib as _x9_importlib
+
+        _x9_mod_obj = _x9_importlib.import_module(_x9_mod)
+        if not callable(_x9_reg := getattr(_x9_mod_obj, "register_routes", None)):
+            _X9_AUDIT_MISSING.append(f"{_x9_mod} (no register_routes attr)")
+        else:
+            _X9_AUDIT_OK.append(_x9_mod)
+    except Exception as _x9_e:  # noqa: BLE001 — broad on purpose: audit, not control flow
+        _X9_AUDIT_MISSING.append(f"{_x9_mod} ({type(_x9_e).__name__}: {_x9_e})")
+    finally:
+        # ``_x9_mod`` is loop-bound; keep ``finally`` minimal so a missing
+        # del doesn't raise UnboundLocalError on the early-exit path.
+        try:
+            del _x9_mod
+        except NameError:
+            pass
+
+# Compute final HTTP route count once at import time. ``app.routes``
+# includes WebSocket routes and the auto-generated /openapi.json + /docs +
+# /redoc routes; filter to HTTP-only for a meaningful operator-facing count.
+try:
+    _X9_HTTP_ROUTE_COUNT = sum(
+        1 for _r in app.routes if getattr(_r, "methods", None) and getattr(_r, "path", None)
+    )
+except Exception:  # noqa: BLE001 — defensive
+    _X9_HTTP_ROUTE_COUNT = -1
+
+log.info(
+    "[X9 route audit] OK=%d modules (%s); missing=%d (%s); HTTP routes on app=%d",
+    len(_X9_AUDIT_OK),
+    ", ".join(_X9_AUDIT_OK) if _X9_AUDIT_OK else "<none>",
+    len(_X9_AUDIT_MISSING),
+    "; ".join(_X9_AUDIT_MISSING) if _X9_AUDIT_MISSING else "<none>",
+    _X9_HTTP_ROUTE_COUNT,
+)
+

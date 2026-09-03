@@ -50,11 +50,17 @@ test
 prompt
 
 server.log
-# Skills directory
-/skills/mini-services/polymarket-bot/data/*.db
+# Polymarket-bot data files (runtime-generated, not source)
+mini-services/polymarket-bot/data/*.db
 mini-services/polymarket-bot/data/*.db-*
 mini-services/polymarket-bot/data/*.pkl
 mini-services/polymarket-bot/data/*.json
+mini-services/polymarket-bot/data/reports/
+mini-services/polymarket-bot/data/test_run/
 mini-services/polymarket-bot/server.log
 upload/
 tool-results/
+
+# Python bytecode caches (defensive — keep stray .pyc out of commits)
+__pycache__/
+*.pyc

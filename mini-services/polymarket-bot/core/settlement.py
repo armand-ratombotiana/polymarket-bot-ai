@@ -91,6 +91,15 @@ class SettlementEngine:
         slug = mkt.get("slug") or store.market_slugs.get(yes_token, yes_token[:12])
         no_token = token_ids[1] if len(token_ids) > 1 else None
 
+        # X8 — Capture log_event message text inside the lock but emit the actual
+        # log_event call AFTER the lock is released. DataStore.log_event
+        # re-acquires store._lock internally, and asyncio.Lock is NOT reentrant,
+        # so calling `await store.log_event(...)` while already holding
+        # store._lock deadlocks the settlement loop forever. (Nested-lock
+        # deadlock found by U2 subagent.)
+        _x8_yes_log_msg: str | None = None
+        _x8_no_log_msg: str | None = None
+
         # Settle any active positions in DataStore (both YES and NO tokens)
         async with store._lock:
             # 1. Settle YES token
@@ -124,7 +133,7 @@ class SettlementEngine:
                     "[settlement] Resolved YES token %s (%s): PnL=$%.2f (Payout=$%.2f, Invested=$%.2f)",
                     slug, "WINNER" if resolved_yes else "ZERO", pnl, payout, pos_yes.total_invested,
                 )
-                await store.log_event(
+                _x8_yes_log_msg = (
                     f"🏆 Settlement: {slug} YES -> {'WINNER ($1.00)' if resolved_yes else '$0.00'} | PnL: ${pnl:+.2f}"
                 )
 
@@ -181,7 +190,7 @@ class SettlementEngine:
                         "[settlement] Resolved NO token %s (%s): PnL=$%.2f (Payout=$%.2f, Invested=$%.2f)",
                         slug, "WINNER" if resolved_no else "ZERO", pnl_no, payout_no, pos_no.total_invested,
                     )
-                    await store.log_event(
+                    _x8_no_log_msg = (
                         f"🏆 Settlement: {slug} NO -> {'WINNER ($1.00)' if resolved_no else '$0.00'} | PnL: ${pnl_no:+.2f}"
                     )
 
@@ -203,6 +212,19 @@ class SettlementEngine:
                         )
                     except Exception:
                         pass
+
+        # X8 — Lock has been released; now safe to call store.log_event(),
+        # which re-acquires store._lock internally. Emit any captured messages.
+        if _x8_yes_log_msg is not None:
+            try:
+                await store.log_event(_x8_yes_log_msg)
+            except Exception as e:
+                log.warning("[settlement] YES log_event failed: %s", e)
+        if _x8_no_log_msg is not None:
+            try:
+                await store.log_event(_x8_no_log_msg)
+            except Exception as e:
+                log.warning("[settlement] NO log_event failed: %s", e)
 
         self._settled_tokens.add(yes_token)
         if no_token:
