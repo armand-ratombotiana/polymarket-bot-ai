@@ -559,6 +559,22 @@ def register_routes(app: Any) -> None:
             logger.debug("[alerting] evaluate_now metrics gather failed: %s", e)
             metrics = {}
         fired = alert_engine.evaluate(metrics)
+        # W14-1 — broadcast each fired alert on the ``alerts`` WS channel
+        # so a dashboard subscribed to the channel flashes the new alert
+        # immediately rather than waiting for the next /api/alerts poll.
+        # Lazy import keeps ``core.alerting`` importable even if the
+        # ws_broadcast module is unavailable (it never is — same package
+        # — but the pattern is consistent with the ``core.observability``
+        # lazy import above). One broadcast per fired alert so a client
+        # can dedupe / acknowledge them individually.
+        if fired:
+            try:
+                from core.ws_broadcast import ws_manager
+
+                for a in fired:
+                    await ws_manager.broadcast("alerts", asdict(a))
+            except Exception as e:  # noqa: BLE001 — broadcast must never break the API
+                logger.debug("[alerting] alerts broadcast failed: %s", e)
         return {"fired": len(fired), "alerts": [asdict(a) for a in fired]}
 
     app.include_router(router)

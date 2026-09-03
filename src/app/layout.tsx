@@ -20,6 +20,12 @@ import OfflineIndicator from '@/components/OfflineIndicator'
 // Server-component safe: the provider itself is a client component,
 // but layout.tsx just renders it without touching window APIs.
 import ThemeProvider from '@/components/ThemeProvider'
+// W14-8 — Frontend error reporter (Sentry-like). Installs global
+// `error` / `unhandledrejection` / `beforeunload` listeners on mount
+// so the dashboard can capture crashes that the ErrorBoundary can't
+// (event handlers, async rejections, tab-close). Renders null —
+// pure side-effect component.
+import ErrorReporterInit from '@/components/ErrorReporterInit'
 
 // W11-8 — PWA metadata: web app manifest, theme color, Apple touch icon,
 // and standalone-mode config so iOS Safari hides the URL bar when the
@@ -81,6 +87,11 @@ export default function RootLayout({
             <html> above absorbs the SSR/CSR class mismatch that
             `next-themes` injects via an inline script on first paint. */}
         <ThemeProvider>
+          {/* W14-8 — Frontend error reporter init. Sits ABOVE ErrorBoundary
+              so the global window listeners are wired before any render
+              crash can happen, AND survives a render crash (the fallback
+              UI keeps reporting subsequent errors). Renders null. */}
+          <ErrorReporterInit />
           {/* W9-7 — Skip-to-main-content link: visually hidden, revealed on
               keyboard focus (Tab from URL bar). Lets keyboard & screen-reader
               users jump the long sidebar directly to the workstation content.

@@ -13,13 +13,16 @@
 //  - Requires 'use client' because class components cannot be server
 //    components and React.ErrorInfo / React.Component are client-only APIs.
 //
-// Future: hook `componentDidCatch` to POST the error stack to a backend
-// `/api/errors` endpoint for centralized crash logging. Today we only log to
-// console.error to keep the surface area small.
+// W14-8 — `componentDidCatch` now forwards the error + React componentStack
+// to the client-side error reporter (`lib/errorReporter.ts`), which batches
+// and POSTs to `/api/client-errors`. Event-handler / async errors are
+// captured separately by the global window listeners installed in
+// `ErrorReporterInit` (also mounted in `app/layout.tsx`).
 
 'use client'
 
 import React from 'react'
+import { captureError } from '@/lib/errorReporter'
 
 interface Props {
   children: React.ReactNode
@@ -63,10 +66,15 @@ export default class ErrorBoundary extends React.Component<Props, State> {
   // `errorInfo.componentStack` and stash it on state so the fallback UI can
   // show it in a collapsible <details>.
   componentDidCatch(error: Error, errorInfo: React.ErrorInfo) {
-    // Log to dev console for debugging. Hook point for future telemetry —
-    // a future PR will POST { error, errorInfo } to /api/errors for
-    // centralized crash logging in production.
+    // Log to dev console for debugging (always-on local telemetry).
     console.error('[ErrorBoundary] Caught render error:', error, errorInfo)
+    // W14-8 — Forward to the client-side error reporter. The reporter
+    // batches reports and POSTs them to `/api/client-errors` on a 5s
+    // cadence (so a render loop doesn't fire 100 POSTs). The
+    // componentStack is forwarded as context so the backend log shows
+    // the React component hierarchy that produced the error, not just
+    // the JS stack.
+    captureError(error, { componentStack: errorInfo.componentStack })
     this.setState({ errorInfo })
   }
 

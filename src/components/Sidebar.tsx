@@ -2,6 +2,12 @@
 'use client'
 
 import { useState, useEffect } from 'react'
+// W14-2 — i18n: pulls the active locale + `t()` lookup so the sidebar
+// labels re-render in the trader's chosen language without a server
+// roundtrip. The hook initialises to 'en' (matching SSR payload) then
+// reconciles to the persisted locale on mount — see
+// `src/hooks/useTranslation.ts` for the hydration-safe pattern.
+import { useTranslation } from '@/hooks/useTranslation'
 
 export type NavSection =
   | 'command'
@@ -29,9 +35,15 @@ export type NavSection =
   | 'system-retention'
   | 'system-decisions'
   | 'system-safety'
+  | 'system-rate-limit'
+  | 'system-audit'
 
 interface NavItem {
   id: NavSection
+  /** i18n key — e.g. `nav.command`. Resolved via `t()` at render time. */
+  labelKey: string
+  /** English fallback label (kept for back-compat with any consumer that
+   *  still reads `item.label` directly + for grep-ability). */
   label: string
   shortLabel: string
   icon: string
@@ -41,6 +53,9 @@ interface NavItem {
 
 interface NavGroup {
   id: string
+  /** i18n key — e.g. `groups.main`. Capital group is `groups.capital_group`
+   *  (the bare `capital` key is reserved for the nav item label). */
+  labelKey: string
   label: string
   items: NavItem[]
 }
@@ -48,75 +63,85 @@ interface NavGroup {
 const NAV_GROUPS: NavGroup[] = [
   {
     id: 'main',
+    labelKey: 'groups.main',
     label: 'Main',
     items: [
-      { id: 'command', label: 'Command Center', shortLabel: 'Command', icon: '⊞', kbd: '1', group: 'main' },
+      { id: 'command', labelKey: 'nav.command', label: 'Command Center', shortLabel: 'Command', icon: '⊞', kbd: '1', group: 'main' },
     ],
   },
   {
     id: 'markets',
+    labelKey: 'groups.markets',
     label: 'Markets',
     items: [
-      { id: 'markets-books', label: 'Live Books', shortLabel: 'Books', icon: '◈', kbd: '2', group: 'markets' },
-      { id: 'markets-screener', label: 'Screener', shortLabel: 'Screen', icon: '⊡', kbd: '3', group: 'markets' },
+      { id: 'markets-books', labelKey: 'nav.books', label: 'Live Books', shortLabel: 'Books', icon: '◈', kbd: '2', group: 'markets' },
+      { id: 'markets-screener', labelKey: 'nav.screener', label: 'Screener', shortLabel: 'Screen', icon: '⊡', kbd: '3', group: 'markets' },
     ],
   },
   {
     id: 'portfolio',
+    labelKey: 'groups.portfolio',
     label: 'Portfolio',
     items: [
-      { id: 'portfolio-positions', label: 'Positions', shortLabel: 'Positions', icon: '◉', kbd: '4', group: 'portfolio' },
-      { id: 'portfolio-orders', label: 'Orders', shortLabel: 'Orders', icon: '⊕', group: 'portfolio' },
-      { id: 'portfolio-trades', label: 'Trades & Fills', shortLabel: 'Trades', icon: '◎', group: 'portfolio' },
+      { id: 'portfolio-positions', labelKey: 'nav.positions', label: 'Positions', shortLabel: 'Positions', icon: '◉', kbd: '4', group: 'portfolio' },
+      { id: 'portfolio-orders', labelKey: 'nav.orders', label: 'Orders', shortLabel: 'Orders', icon: '⊕', group: 'portfolio' },
+      { id: 'portfolio-trades', labelKey: 'nav.trades', label: 'Trades & Fills', shortLabel: 'Trades', icon: '◎', group: 'portfolio' },
     ],
   },
   {
     id: 'capital',
+    labelKey: 'groups.capital_group',
     label: 'Capital',
     items: [
-      { id: 'capital-allocator', label: 'Capital Allocator', shortLabel: 'Allocator', icon: '$', group: 'capital' },
+      { id: 'capital-allocator', labelKey: 'nav.capital', label: 'Capital Allocator', shortLabel: 'Allocator', icon: '$', group: 'capital' },
     ],
   },
   {
     id: 'strategies',
+    labelKey: 'groups.strategies',
     label: 'Strategies',
     items: [
-      { id: 'strategies-registry', label: 'Strategy Registry', shortLabel: 'Strategies', icon: '⊗', kbd: '5', group: 'strategies' },
-      { id: 'strategies-arbitrage', label: 'Arbitrage', shortLabel: 'Arbitrage', icon: '⇌', kbd: '6', group: 'strategies' },
+      { id: 'strategies-registry', labelKey: 'nav.strategies', label: 'Strategy Registry', shortLabel: 'Strategies', icon: '⊗', kbd: '5', group: 'strategies' },
+      { id: 'strategies-arbitrage', labelKey: 'nav.arbitrage', label: 'Arbitrage', shortLabel: 'Arbitrage', icon: '⇌', kbd: '6', group: 'strategies' },
     ],
   },
   {
     id: 'intelligence',
+    labelKey: 'groups.intelligence',
     label: 'Intelligence',
     items: [
-      { id: 'intelligence-analysis', label: 'Deep Analysis', shortLabel: 'Analysis', icon: '⊘', kbd: '7', group: 'intelligence' },
-      { id: 'intelligence-aiml', label: 'AI / ML Engine', shortLabel: 'AI/ML', icon: '⊛', group: 'intelligence' },
-      { id: 'intelligence-copilot', label: 'Copilot', shortLabel: 'Copilot', icon: '◈', group: 'intelligence' },
-      { id: 'intelligence-shadow', label: 'Shadow Inference', shortLabel: 'Shadow', icon: '⬡', group: 'intelligence' },
-      { id: 'intelligence-validation', label: 'ML Validation', shortLabel: 'ML Valid', icon: '⊕', group: 'intelligence' },
+      { id: 'intelligence-analysis', labelKey: 'nav.analysis', label: 'Deep Analysis', shortLabel: 'Analysis', icon: '⊘', kbd: '7', group: 'intelligence' },
+      { id: 'intelligence-aiml', labelKey: 'nav.aiml', label: 'AI / ML Engine', shortLabel: 'AI/ML', icon: '⊛', group: 'intelligence' },
+      { id: 'intelligence-copilot', labelKey: 'nav.copilot', label: 'Copilot', shortLabel: 'Copilot', icon: '◈', group: 'intelligence' },
+      { id: 'intelligence-shadow', labelKey: 'nav.shadow', label: 'Shadow Inference', shortLabel: 'Shadow', icon: '⬡', group: 'intelligence' },
+      { id: 'intelligence-validation', labelKey: 'nav.validation', label: 'ML Validation', shortLabel: 'ML Valid', icon: '⊕', group: 'intelligence' },
     ],
   },
   {
     id: 'analytics',
+    labelKey: 'groups.analytics',
     label: 'Analytics',
     items: [
-      { id: 'analytics-performance', label: 'Performance', shortLabel: 'Perf', icon: '◷', kbd: '8', group: 'analytics' },
-      { id: 'analytics-backtest', label: 'Backtest Lab', shortLabel: 'Backtest', icon: '⊙', group: 'analytics' },
-      { id: 'analytics-attribution', label: 'Attribution', shortLabel: 'Attrib', icon: '◫', group: 'analytics' },
-      { id: 'analytics-execution', label: 'Execution Quality', shortLabel: 'Exec Q', icon: '⌖', group: 'analytics' },
-      { id: 'analytics-closed', label: 'Closed Positions', shortLabel: 'Closed', icon: '⊟', group: 'analytics' },
+      { id: 'analytics-performance', labelKey: 'nav.performance', label: 'Performance', shortLabel: 'Perf', icon: '◷', kbd: '8', group: 'analytics' },
+      { id: 'analytics-backtest', labelKey: 'nav.backtest', label: 'Backtest Lab', shortLabel: 'Backtest', icon: '⊙', group: 'analytics' },
+      { id: 'analytics-attribution', labelKey: 'nav.attribution', label: 'Attribution', shortLabel: 'Attrib', icon: '◫', group: 'analytics' },
+      { id: 'analytics-execution', labelKey: 'nav.execution', label: 'Execution Quality', shortLabel: 'Exec Q', icon: '⌖', group: 'analytics' },
+      { id: 'analytics-closed', labelKey: 'nav.closed', label: 'Closed Positions', shortLabel: 'Closed', icon: '⊟', group: 'analytics' },
     ],
   },
   {
     id: 'system',
+    labelKey: 'groups.system',
     label: 'System',
     items: [
-      { id: 'system-health', label: 'System Health', shortLabel: 'Health', icon: '⊜', group: 'system' },
-      { id: 'system-database', label: 'Data Explorer', shortLabel: 'Data', icon: '⊞', group: 'system' },
-      { id: 'system-observability', label: 'Observability', shortLabel: 'Observ', icon: '◉', group: 'system' },
-      { id: 'system-retention', label: 'Retention', shortLabel: 'Retain', icon: '⌫', group: 'system' },
-      { id: 'system-decisions', label: 'Decision Ledger', shortLabel: 'Ledger', icon: '↹', group: 'system' },
-      { id: 'system-safety', label: 'Safety Gate', shortLabel: 'Safety', icon: '🛡', group: 'system' },
+      { id: 'system-health', labelKey: 'nav.health', label: 'System Health', shortLabel: 'Health', icon: '⊜', group: 'system' },
+      { id: 'system-database', labelKey: 'nav.database', label: 'Data Explorer', shortLabel: 'Data', icon: '⊞', group: 'system' },
+      { id: 'system-observability', labelKey: 'nav.observability', label: 'Observability', shortLabel: 'Observ', icon: '◉', group: 'system' },
+      { id: 'system-retention', labelKey: 'nav.retention', label: 'Retention', shortLabel: 'Retain', icon: '⌫', group: 'system' },
+      { id: 'system-decisions', labelKey: 'nav.decisions', label: 'Decision Ledger', shortLabel: 'Ledger', icon: '↹', group: 'system' },
+      { id: 'system-safety', labelKey: 'nav.safety', label: 'Safety Gate', shortLabel: 'Safety', icon: '🛡', group: 'system' },
+      { id: 'system-rate-limit', labelKey: 'nav.rate_limits', label: 'Rate Limits', shortLabel: 'Limits', icon: '⏱', group: 'system' },
+      { id: 'system-audit', labelKey: 'nav.audit', label: 'Audit Log', shortLabel: 'Audit', icon: '📋', group: 'system' },
     ],
   },
 ]
@@ -130,6 +155,12 @@ interface SidebarProps {
 
 export default function Sidebar({ active, onChange, mobileOpen, onMobileClose }: SidebarProps) {
   const [collapsed, setCollapsed] = useState(false)
+  // W14-2 — i18n: `t()` resolves label keys at render. Initial render
+  // uses 'en' (the SSR-payload match) so first paint matches the
+  // server; the mount effect inside the hook reconciles to the
+  // persisted locale afterwards. We only need `t` here — `locale`
+  // and `setLocale` aren't used directly in this component.
+  const { t } = useTranslation()
 
   // Detect viewport for auto-collapse
   useEffect(() => {
@@ -219,22 +250,26 @@ export default function Sidebar({ active, onChange, mobileOpen, onMobileClose }:
                   padding: '10px 12px 4px',
                   userSelect: 'none',
                 }}>
-                  {group.label}
+                  {t(group.labelKey)}
                 </div>
               )}
-              {group.items.map((item) => (
+              {group.items.map((item) => {
+                // Resolve once per item — used in the visible label,
+                // the collapsed-mode tooltip, and nowhere else.
+                const itemLabel = t(item.labelKey)
+                return (
                 <button
                   key={item.id}
                   onClick={() => handleSelect(item.id)}
                   className={`sidebar-item${active === item.id ? ' active' : ''}`}
                   aria-current={active === item.id ? 'page' : undefined}
-                  title={collapsed ? `${item.label}${item.kbd ? ` (${item.kbd})` : ''}` : undefined}
+                  title={collapsed ? `${itemLabel}${item.kbd ? ` (${item.kbd})` : ''}` : undefined}
                 >
                   <span className="sidebar-icon" aria-hidden="true"
                     style={{ fontSize: '15px', fontFamily: 'system-ui, sans-serif' }}>
                     {item.icon}
                   </span>
-                  <span className="sidebar-label">{item.label}</span>
+                  <span className="sidebar-label">{itemLabel}</span>
                   {/* W9-7 — Announce the keyboard shortcut to screen readers.
                       When the sidebar is collapsed the visible kbd badge is
                       hidden, so the sr-only text is the only way AT users
@@ -259,7 +294,8 @@ export default function Sidebar({ active, onChange, mobileOpen, onMobileClose }:
                     </span>
                   )}
                 </button>
-              ))}
+                )
+              })}
             </div>
           ))}
         </div>
@@ -269,7 +305,8 @@ export default function Sidebar({ active, onChange, mobileOpen, onMobileClose }:
           <div style={{ padding: '4px 8px' }} role="status" aria-live="polite">
             <div className="sidebar-item" style={{ opacity: 0.75, cursor: 'default', fontSize: '10px' }}>
               <span className="sidebar-icon" aria-hidden="true" style={{ fontSize: '12px' }}>🟢</span>
-              <span className="sidebar-label" style={{ fontSize: '10.5px' }}>Bot Engine Active</span>
+              {/* W14-2 — i18n: footer status label resolved via t(). */}
+              <span className="sidebar-label" style={{ fontSize: '10.5px' }}>{t('status.bot_active')}</span>
             </div>
           </div>
         </div>

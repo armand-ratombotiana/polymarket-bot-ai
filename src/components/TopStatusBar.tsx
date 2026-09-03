@@ -9,6 +9,10 @@ import { getApiUrl, apiFetch } from '@/lib/api'
 // cluster next to mute / shortcuts / config so the trader can flip
 // the entire workstation's palette without leaving the status bar.
 import ThemeToggle from './ThemeToggle'
+// W14-2 — i18n locale switcher. Sits next to the theme toggle so
+// appearance + language controls cluster together; both are
+// "preference" controls rather than trading actions.
+import LocaleSwitcher from './LocaleSwitcher'
 
 interface TopStatusBarProps {
   snapshot: BotSnapshot
@@ -269,10 +273,17 @@ export default function TopStatusBar({
         </span>
 
         {/* W13-4 — Theme toggle (dark/light). Sits at the start of the
-            icon cluster so it reads "appearance" → "audio" → "input help"
-            → "config". The button itself renders null on SSR (handled
-            inside ThemeToggle to dodge hydration mismatch). */}
+            icon cluster so it reads "appearance" → "language" → "audio"
+            → "input help" → "config". The button itself renders null
+            on SSR (handled inside ThemeToggle to dodge hydration
+            mismatch). */}
         <ThemeToggle />
+
+        {/* W14-2 — Locale switcher (EN / FR). Sits immediately after the
+            theme toggle so the two "appearance" controls stay grouped;
+            picks up the trader's persisted choice via useTranslation
+            and flips all t() consumers in one React commit. */}
+        <LocaleSwitcher />
 
         {onToggleMute && (
           <button

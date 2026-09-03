@@ -11,8 +11,21 @@ unless explicitly destructive).
 # Install the cron schedule (idempotent, safe to re-run)
 ./scripts/setup-cron.sh
 
-# Manual one-off backup
+# Manual one-off backup (auto-verifies the result)
 ./scripts/backup.sh
+
+# Verify a specific backup manually
+python3 scripts/verify_backup.py /home/z/my-project/backups/<timestamp>
+
+# Apply GFS rotation (dry-run first, then for real)
+python3 scripts/backup_rotation.py --dry-run
+python3 scripts/backup_rotation.py
+
+# Deep integrity check on live DBs (integrity_check + orphans + bloat + indices)
+python3 scripts/check_integrity.py
+
+# Round-trip test: backup → restore → compare for every live DB
+python3 scripts/test_restore.py
 
 # Restore from a specific timestamp
 ./scripts/restore.sh 20260903_140000
@@ -389,7 +402,200 @@ the cron entries to export vars before invoking the script:
 
 ---
 
-## 6. Disaster recovery plan
+## 6. Backup verification, rotation & integrity
+
+The `backup.sh` script creates snapshots, but creating a snapshot doesn't
+prove it can be restored — SQLite can write a structurally broken DB if the
+underlying filesystem has issues, if the bot crashes mid-write, or if the gzip
+pass corrupts the tail. The four Python scripts in this section close that
+gap by **verifying** backups, **rotating** them on a GFS schedule, **checking**
+integrity of live DBs, and **round-trip testing** the backup→restore pipeline.
+
+### 6.1 Verify a single backup
+
+`scripts/verify_backup.py` opens each `.db` (or `.db.gz`) in a backup
+directory, runs `PRAGMA integrity_check`, and confirms the expected tables
+are present with row counts reported. Run it manually against any backup
+timestamp:
+
+```bash
+python3 scripts/verify_backup.py /home/z/my-project/backups/20260903_141500
+```
+
+Output:
+- A human-readable table of `file / size / integrity / row counts per table`.
+- A `verification_report.json` written inside the backup dir for offline
+  inspection.
+- Exit code 0 if all DBs pass, 1 if any fail. A DB that is "skipped"
+  (never existed in the deployment, e.g. `ab_tests.db` on hosts without the
+  AB-testing module) does **not** count as a failure.
+
+### 6.2 Automated verification (post-backup)
+
+`backup.sh` calls `verify_backup.py` automatically at the end of every run.
+Verification failure is logged as a **WARNING, not fatal** — the rest of the
+cron schedule proceeds (other backups of unrelated DBs aren't penalised),
+and the operator sees the warning in `logs/backup.cron.log`:
+
+```
+[2026-09-03 14:15:09] Verifying backup integrity...
+[2026-09-03 14:15:10]   Verification: PASS
+```
+
+To run verification independently on a schedule (e.g. hourly verification of
+the latest backup without doing a fresh backup):
+
+```cron
+30 */2 * * * python3 /home/z/my-project/scripts/verify_backup.py $(ls -1dt /home/z/my-project/backups/2[0-9][0-9][0-9][0-9][0-9][0-9]_[0-9][0-9][0-9][0-9][0-9][0-9] | head -1) >> /home/z/my-project/logs/verify-backup.cron.log 2>&1
+```
+
+### 6.3 What to do if verification fails
+
+1. **Don't restore from the bad backup.** The verification failure means the
+   backup is not safe to use as a restore source. Restore from the most
+   recent *passing* backup instead:
+
+   ```bash
+   # List recent backup dirs + whether they verify.
+   for d in /home/z/my-project/backups/2*/; do
+     [ -d "$d" ] || continue
+     python3 /home/z/my-project/scripts/verify_backup.py "$d" >/dev/null 2>&1 \
+       && echo "OK    $d" \
+       || echo "FAIL  $d"
+   done
+   ```
+
+2. **Investigate the cause.** Common causes:
+   - **Disk full at backup time** → SQLite wrote a partial page. Check
+     `df -h` and `./scripts/health-check.sh | jq '.checks[] | select(.name=="disk")'`.
+   - **Gzip interrupted** → the `.db.gz` file is truncated. Confirm with
+     `gunzip -t /path/to/backup/file.db.gz`.
+   - **Schema drift** → a migration added a new table or column since the
+     verifier was last updated. Compare `EXPECTED_TABLES` in `verify_backup.py`
+     with `SELECT name FROM sqlite_master WHERE type='table'` on the live DB.
+   - **Backup is missing a DB entirely** → `backup.sh` couldn't read a DB
+     (e.g. it was locked mid-trade). Check the backup cron log for the
+     corresponding `sqlite_backup` failure message.
+
+3. **If the LIVE DB is also corrupt** → that's a much bigger problem. See
+   §7 (Disaster recovery, Scenario B). Run `./scripts/check_integrity.py`
+   to triage.
+
+### 6.4 Backup rotation (GFS policy)
+
+`scripts/backup_rotation.py` applies a Grandfather-Father-Son retention
+policy on top of `backup.sh`'s simple `find -mtime +N` pruning:
+
+| Tier         | Bucket   | Retain                                            |
+|--------------|----------|---------------------------------------------------|
+| Son          | Daily    | Most recent backup per calendar day, last 7 days   |
+| Father       | Weekly   | Most recent backup per ISO week, last 4 weeks      |
+| Grandfather  | Monthly  | Most recent backup per calendar month, last 12 months |
+| Ceiling      | Max age  | Hard prune after 90 days (override `--max-age-days`) |
+
+The newest backup is ALWAYS kept even if it falls outside all buckets — we
+never leave the operator with zero restore points. This means a 30-day-old
+backup may be pruned even though it's inside the monthly window, but only if
+the same calendar month already has a newer representative.
+
+```bash
+# Preview what would be pruned (no deletion):
+python3 scripts/backup_rotation.py --dry-run
+
+# Apply the rotation:
+python3 scripts/backup_rotation.py
+
+# Custom max age + JSON output (for monitoring ingestion):
+python3 scripts/backup_rotation.py --max-age-days 180 --json > /tmp/rotation.json
+```
+
+Recommended cadence: weekly (e.g. Sunday 02:00), chained after
+`db-maintenance.sh`. Add to cron alongside the existing entries:
+
+```cron
+0 2 * * 0 python3 /home/z/my-project/scripts/backup_rotation.py >> /home/z/my-project/logs/backup-rotation.cron.log 2>&1
+```
+
+`pre_restore_*` directories (created by `restore.sh` as safety snapshots)
+are NEVER pruned by this script — they must be removed manually once the
+operator is confident the restore succeeded.
+
+### 6.5 Live data integrity checker
+
+`scripts/check_integrity.py` runs deeper checks than `db-maintenance.sh`'s
+`PRAGMA integrity_check`:
+
+- **Structural**: `PRAGMA integrity_check` + `PRAGMA quick_check` on every
+  live DB (opened read-only via `file:...?mode=ro`).
+- **Foreign keys**: `PRAGMA foreign_key_check` (only finds declared FKs; most
+  of our tables use logical / undeclared FKs).
+- **Logical orphans**: cross-DB relationships — e.g. every non-NULL
+  `execution_quality.decision_id` should exist in
+  `decision_ledger.decision_events`. Implemented via `ATTACH DATABASE` so the
+  check works across DB files. The `decision_rejections.decision_id`
+  relationship is "soft" (the bot can log a rejection before allocating a
+  decision_id) and reported as info only.
+- **Table bloat**: row counts vs configurable soft ceilings. Exceeding a
+  ceiling is a WARNING, not an error. Default ceilings are derived from the
+  documented retention policy with a 2x safety margin; override per-table via
+  `--bloat-ceiling db=table=N`.
+- **Index health**: every index listed via `PRAGMA index_list`; whether
+  `sqlite_stat1` (the ANALYZE output) has stats for it. A missing stat is
+  a hint that `db-maintenance.sh` hasn't been run recently.
+
+```bash
+# Run all checks, human-readable output:
+python3 scripts/check_integrity.py
+
+# JSON output for monitoring:
+python3 scripts/check_integrity.py --json
+
+# Override a bloat ceiling:
+python3 scripts/check_integrity.py --bloat-ceiling audit_trail.db=audit_events=2000000
+
+# Run against a test data dir:
+BOT_DATA_DIR=/tmp/test-data python3 scripts/check_integrity.py
+```
+
+Exit codes: `0` (healthy), `1` (usage error), `2` (integrity failure or
+orphaned records), `3` (data dir missing).
+
+### 6.6 Restore round-trip test
+
+`scripts/test_restore.py` proves the backup+restore pipeline end-to-end.
+For each live DB it:
+
+1. **Backs up** the live DB via the Online Backup API into a temp dir
+   (read-only — live DBs are never opened write-mode).
+2. **Gzips** the backup (mimics `backup.sh`).
+3. **Restores** it into a fresh temp dir (mimics `restore.sh`'s gunzip step).
+4. **Compares** the original vs restored DB on:
+   - `PRAGMA integrity_check` on the restored copy
+   - Schema (sha256 of `sqlite_master` rows)
+   - Per-table row counts
+   - Per-table row-content hashes (sha256 of every row tuple, sorted by
+     primary key — catches row-level divergence even when counts match)
+5. **Cleans up** temp files (unless `--keep-temp`).
+
+```bash
+# Default: test every live DB once.
+python3 scripts/test_restore.py
+
+# JSON output for CI / monitoring ingestion:
+python3 scripts/test_restore.py --json
+
+# Keep temp dirs for debugging a failure:
+python3 scripts/test_restore.py --keep-temp
+# (then inspect /tmp/restore_test_XXXX/{backup,restore}/)
+```
+
+Exit codes: `0` (all DBs round-tripped cleanly), `1` (usage error), `2`
+(one or more DBs failed to round-trip), `3` (data dir missing).
+Recommended cadence: daily, in a low-traffic window (e.g. 02:30 local).
+
+---
+
+## 7. Disaster recovery plan
 
 ### Scenario A: Host crash / filesystem corruption
 
@@ -477,30 +683,40 @@ end of `backup.sh` via a wrapper script.
 
 ---
 
-## 7. File inventory
+## 8. File inventory
 
 | File                                | Purpose                              | Default cron schedule |
 |-------------------------------------|--------------------------------------|----------------------|
-| `scripts/backup.sh`                 | Create timestamped DB backups        | `15 */6 * * *` |
+| `scripts/backup.sh`                 | Create timestamped DB backups (auto-verifies) | `15 */6 * * *` |
 | `scripts/restore.sh`                | Restore DBs from a backup timestamp  | (manual) |
 | `scripts/db-maintenance.sh`         | VACUUM + ANALYZE + integrity_check    | `0 3 * * *` |
 | `scripts/health-check.sh`           | JSON health report, exit 0/1         | `*/5 * * * *` |
 | `scripts/setup-cron.sh`             | Install (or refresh) cron entries     | (one-time, manual) |
+| `scripts/verify_backup.py`          | Verify a backup dir (integrity + tables + row counts) | invoked by `backup.sh` |
+| `scripts/backup_rotation.py`       | GFS retention: daily×7d / weekly×4w / monthly×12m / max-age×90d | weekly (manual) |
+| `scripts/check_integrity.py`        | Deep live-DB integrity check (orphans + bloat + indices) | daily (manual) |
+| `scripts/test_restore.py`           | Round-trip test: backup → restore → compare | daily (manual) |
 | `docs/MAINTENANCE.md`               | This document                        | — |
 | `logs/backup.cron.log`              | Backup script output                 | appended by cron |
 | `logs/db-maintenance.cron.log`      | Maintenance script output            | appended by cron |
 | `logs/health-check.cron.log`        | Health check JSON reports            | appended by cron |
+| `logs/backup-rotation.cron.log`     | Rotation script output               | appended by cron |
+| `logs/verify-backup.cron.log`       | (Optional) hourly verifier output    | appended by cron |
 
 ---
 
-## 8. Testing the scripts (without affecting production)
+## 9. Testing the scripts (without affecting production)
 
 ```bash
 # Syntax check (no execution)
 bash -n scripts/*.sh
+python3 -m py_compile scripts/*.py
 
 # Backup into a tmp dir (no impact on production backups)
 BOT_DATA_DIR=/tmp/test-data BACKUP_DIR=/tmp/test-backups ./scripts/backup.sh
+
+# Verify the test backup
+python3 scripts/verify_backup.py /tmp/test-backups/$(ls /tmp/test-backups | tail -1)
 
 # Run health check (read-only — always safe)
 ./scripts/health-check.sh | jq .
@@ -508,4 +724,13 @@ BOT_DATA_DIR=/tmp/test-data BACKUP_DIR=/tmp/test-backups ./scripts/backup.sh
 # Run db-maintenance on a COPY of your DBs (don't touch live data):
 cp -r /home/z/my-project/mini-services/polymarket-bot/data /tmp/test-data
 BOT_DATA_DIR=/tmp/test-data ./scripts/db-maintenance.sh
+
+# Deep integrity check on live DBs (read-only — always safe)
+python3 scripts/check_integrity.py
+
+# Round-trip test (read-only on live DBs, writes only to /tmp)
+python3 scripts/test_restore.py
+
+# Rotation dry-run (no deletion)
+python3 scripts/backup_rotation.py --dry-run
 ```

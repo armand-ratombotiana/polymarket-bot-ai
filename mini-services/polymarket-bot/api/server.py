@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import time
+import uuid
 from contextlib import asynccontextmanager
 
 import numpy as np
@@ -94,9 +95,19 @@ from core.prometheus_metrics import (
     record_rate_limit_hit as _record_rate_limit_hit,
     record_request as _record_prometheus_request,
 )
+# W14-7 — In-memory rate-limit hit tracker (for the dashboard panel).
+# Surfaces "which endpoints / clients are getting throttled the most" +
+# a per-minute time series of hits over the last hour. Distinct from the
+# prometheus counter above: prometheus exposes a single monotonic
+# ``rate_limit_hits_total{endpoint=...}`` counter for Grafana; this
+# tracker holds the richer per-IP / per-limit / per-minute shape the
+# React ``RateLimitPanel`` renders. State is in-memory and process-local
+# — a restart zeroes it, which is fine for a "last hour" dashboard view.
+from core.rate_limit_tracker import rate_limit_tracker
 from core.security import validate_token_strength
 from core.settlement import settlement_engine
 from core.watchdog import watchdog
+from core.ws_broadcast import ws_manager
 from core.ws_client import ws_client
 from ml.copilot import copilot_engine
 from ml.drift_detector import drift_detector
@@ -129,6 +140,13 @@ log = logging.getLogger(__name__)
 # Prometheus-format metric values (no PII, no order body, no secrets).
 
 PUBLIC_PATHS = {"/api/health", "/api/version", "/docs", "/redoc", "/openapi.json", "/metrics"}
+# W14-8 — Client-side error reporting endpoint. Errors must ALWAYS be
+# reportable, even when the trader's API token is misconfigured or
+# expired — operators would rather see the auth-failure in the error
+# log than lose the telemetry that would have surfaced it. The endpoint
+# only accepts an opaque JSON payload (no PII lookup, no order body,
+# no auth-context-leak surface), so unauthenticated exposure is safe.
+PUBLIC_PATHS.add("/api/client-errors")
 if settings.trading_mode == "live":
     PUBLIC_PATHS.discard("/docs")
     PUBLIC_PATHS.discard("/redoc")
@@ -426,6 +444,14 @@ async def lifespan(app: FastAPI):
 
     # 9. Background tasks
     broadcast_task = asyncio.create_task(_broadcast_loop(), name="ws-broadcast")
+    # W14-1 — periodic system status broadcast (every 5s on the "system"
+    # channel). Distinct from ``_broadcast_loop`` which fires every 1s
+    # with the rich snapshot. This task emits a lean heartbeat so a
+    # client subscribed to "system" can detect a stalled bot even
+    # when the dashboard isn't pulling the full snapshot.
+    status_broadcast_task = asyncio.create_task(
+        _periodic_status_broadcast(), name="ws-status-broadcast"
+    )
     reseed_task = asyncio.create_task(_reseed_loop(), name="market-reseed")
     token_sync_task = asyncio.create_task(_token_sync_loop(), name="token-sync")
     persist_task = asyncio.create_task(_state_persistence_loop(), name="state-persist")
@@ -446,6 +472,7 @@ async def lifespan(app: FastAPI):
     # Clean shutdown
     await watchdog.stop()
     broadcast_task.cancel()
+    status_broadcast_task.cancel()
     reseed_task.cancel()
     token_sync_task.cancel()
     persist_task.cancel()
@@ -483,14 +510,73 @@ async def _reconciliation_loop() -> None:
 # ── Broadcast Loop ────────────────────────────────────────────────────────────
 
 async def _broadcast_loop() -> None:
+    """Push the rich dashboard snapshot every 1s.
+
+    W14-1 — broadcasts through BOTH the legacy ``manager`` (raw dict,
+    for ``useBot``) AND the new ``ws_manager`` (envelope, for
+    ``useRealtimeData``). The snapshot is built ONCE and reused for
+    both paths so the per-tick cost stays the same as pre-W14-1.
+    Skipped entirely when zero clients are connected to either manager
+    — the snapshot build involves iterating every order book / open
+    order / position / trade, so a server with no clients shouldn't
+    pay that cost every second.
+    """
     while True:
         try:
-            if manager.active:
+            _ws_stats = ws_manager.get_stats()
+            _has_clients = bool(manager.active) or _ws_stats["connected_clients"] > 0
+            if _has_clients:
                 snap = await _build_snapshot()
-                await manager.broadcast(snap)
+                # Legacy raw broadcast (backwards-compat with useBot).
+                if manager.active:
+                    await manager.broadcast(snap)
+                # New envelope broadcast on the "system" channel for
+                # useRealtimeData subscribers. ``ws_manager.broadcast``
+                # already short-circuits when there are zero clients.
+                await ws_manager.broadcast("system", snap)
         except Exception as e:
             log.debug("Broadcast error: %s", e)
         await asyncio.sleep(1.0)
+
+
+async def _periodic_status_broadcast() -> None:
+    """Broadcast a LEAN system status every 5s on the ``system`` channel.
+
+    Distinct from ``_broadcast_loop`` (1s, rich snapshot): this task
+    pushes a small status dict (balance, positions count, mode, kill
+    switch, observation-only) so a client subscribed to the
+    ``system`` channel receives a cheap heartbeat even when the
+    dashboard isn't running the full 1s snapshot loop (e.g. a
+    headless monitor / alerting bot that just needs to know the bot
+    is alive).
+
+    Both ``_broadcast_loop`` and this task emit on ``system`` —
+    consumers must merge the two streams (the richer 1s snapshot
+    dominates the lean 5s status, but the lean one is the only
+    heartbeat when no snapshot loop is running).
+    """
+    while True:
+        await asyncio.sleep(5)
+        try:
+            from core.safety import kill_switch_file_exists
+            status = {
+                "type": "status",
+                "balance": store.paper_balance,
+                "positions_count": len(store.positions),
+                "open_orders_count": len(store.open_orders),
+                "daily_pnl": store.daily_pnl,
+                "mode": settings.trading_mode,
+                "paper_trade": settings.paper_trade,
+                "kill_switch": store.kill_switch_active,
+                "kill_switch_durable": bool(kill_switch_file_exists()),
+                "observation_only": risk_manager.observation_only,
+                "active_strategies": list(strategy_registry.get_active_instances().keys()),
+            }
+            await ws_manager.broadcast("system", status)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001 — must not crash the loop
+            log.debug("Periodic status broadcast error: %s", e)
 
 
 def _get_meta_warm() -> bool:
@@ -770,6 +856,18 @@ async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
     # response (the rate-limit decision has already been made; the counter
     # is purely observability).
     _record_rate_limit_hit(endpoint=request.url.path)
+    # W14-7 — In-memory tracker: record the richer per-IP / per-limit /
+    # per-method shape the dashboard's ``RateLimitPanel`` renders. Same
+    # best-effort contract as the prometheus call above.
+    try:
+        rate_limit_tracker.record_hit(
+            endpoint=request.url.path,
+            method=request.method,
+            client_ip=request.client.host if request.client else "unknown",
+            limit=limit_str,
+        )
+    except Exception:  # pragma: no cover — defensive: tracker must never break the 429
+        log.warning("[rate-limit-tracker] record_hit failed", exc_info=True)
     return JSONResponse(
         status_code=429,
         content={
@@ -942,6 +1040,17 @@ async def request_logging_middleware(request: Request, call_next):
                 status=500,
                 duration=duration,
             )
+            # W14-7 — In-memory tracker: record the 500 so the dashboard's
+            # "Top endpoints" table surfaces the failure count alongside
+            # the 2xx successes. Best-effort (same contract as the call
+            # in the success path below).
+            try:
+                rate_limit_tracker.record_request(
+                    endpoint=request.url.path,
+                    status=500,
+                )
+            except Exception:  # pragma: no cover
+                log.warning("[rate-limit-tracker] record_request failed", exc_info=True)
             request_id_var.reset(request_id_token)
             return JSONResponse(
                 status_code=500,
@@ -959,6 +1068,18 @@ async def request_logging_middleware(request: Request, call_next):
             status=response.status_code if response is not None else 500,
             duration=duration,
         )
+        # W14-7 — In-memory tracker: record every request (not just the
+        # rate-limited ones) so the dashboard's "Top endpoints" table
+        # surfaces the most-trafficked routes overall, not just the
+        # throttle-prone ones. Best-effort: a tracker exception must
+        # never change the response.
+        try:
+            rate_limit_tracker.record_request(
+                endpoint=request.url.path,
+                status=response.status_code if response is not None else 500,
+            )
+        except Exception:  # pragma: no cover — defensive: tracker must never break the response
+            log.warning("[rate-limit-tracker] record_request failed", exc_info=True)
         # Echo the id back to the client so support / debugging can self-service
         # a log trace without operator intervention.
         response.headers["X-Request-ID"] = request_id
@@ -2048,6 +2169,34 @@ async def place_manual_trade(request: Request, req: ManualTradeRequest):
     analytics_cache.invalidate("analytics")
     analytics_cache.invalidate("leaderboard")
     attribution_cache.clear()
+    # W14-1 — broadcast the placement to the ``trades`` (placement event)
+    # and ``orders`` (open-orders update) channels. ``positions`` is also
+    # nudged because a paper fill may have landed since the last periodic
+    # snapshot — sending it here lets a positions-only subscriber see the
+    # new state immediately rather than waiting for the 1s tick.
+    try:
+        order_payload = {
+            "order_id": getattr(order, "order_id", None),
+            "token_id": req.token_id,
+            "slug": slug,
+            "side": side.value,
+            "price": req.price,
+            "size": float(getattr(order, "size", 0.0) or 0.0),
+            "strategy": getattr(order, "strategy", "manual"),
+            "paper": getattr(order, "paper", settings.paper_trade),
+            "timestamp": time.time(),
+        }
+        await ws_manager.broadcast(
+            "trades", {"type": "placement", **order_payload}
+        )
+        await ws_manager.broadcast(
+            "orders", {"type": "open_update", "order": order_payload}
+        )
+        await ws_manager.broadcast(
+            "positions", {"type": "nudge", "token_id": req.token_id}
+        )
+    except Exception as e:  # noqa: BLE001 — broadcast must never break the API response
+        log.debug("[ws_broadcast] manual-trade broadcast failed: %s", e)
     return {"status": "placed", "order": order}
 
 
@@ -2398,6 +2547,34 @@ async def close_position(request: Request, token_id: str, req: PositionCloseRequ
     # which is captured by the trade POST invalidation path above.
     analytics_cache.invalidate("analytics")
     analytics_cache.invalidate("leaderboard")
+    # W14-1 — broadcast the close-submit to ``trades`` (close event) and
+    # ``positions`` (state-change nudge). The actual fill (with realised
+    # P&L) lands asynchronously via the paper_sim fill loop — this
+    # broadcast surfaces the SUBMISSION so subscribers see immediate
+    # feedback; the 1s snapshot loop will follow up with the post-fill
+    # position state.
+    try:
+        await ws_manager.broadcast(
+            "trades",
+            {
+                "type": "close_submit",
+                "token_id": token_id,
+                "slug": slug,
+                "side": side.value,
+                "price": round(close_price, 4),
+                "size": round(size_shares, 4),
+                "strategy": strategy or "manual_close",
+                "estimated_pnl": round(estimated_pnl, 2),
+                "paper": settings.paper_trade,
+                "timestamp": time.time(),
+            },
+        )
+        await ws_manager.broadcast(
+            "positions",
+            {"type": "close_submit", "token_id": token_id, "slug": slug},
+        )
+    except Exception as e:  # noqa: BLE001 — broadcast must never break the response
+        log.debug("[ws_broadcast] position-close broadcast failed: %s", e)
     return result
 
 
@@ -2465,6 +2642,28 @@ async def get_events(n: int = Query(50, ge=1, le=500)):
 async def activate_kill_switch(request: Request):
     await risk_manager.activate_kill_switch("Manual via UI")
     await store.log_event("🛑 KILL SWITCH activated — all trading halted")
+    # W14-1 — broadcast the kill-switch activation as a critical alert
+    # so any dashboard subscribed to the ``alerts`` channel flashes
+    # immediately rather than waiting for the next /api/alerts/evaluate
+    # pass. Also nudges ``system`` so the heartbeat reflects the new
+    # kill_switch state on the next tick (already covered by the 1s
+    # snapshot loop, but the nudge makes it land sub-second).
+    try:
+        await ws_manager.broadcast(
+            "alerts",
+            {
+                "type": "kill_switch",
+                "severity": "critical",
+                "active": True,
+                "reason": "Manual via UI",
+                "timestamp": time.time(),
+            },
+        )
+        await ws_manager.broadcast(
+            "system", {"type": "kill_switch", "kill_switch": True}
+        )
+    except Exception as e:  # noqa: BLE001
+        log.debug("[ws_broadcast] kill-switch-activate broadcast failed: %s", e)
     return {"status": "activated", "kill_switch": True}
 
 
@@ -2483,6 +2682,23 @@ async def activate_kill_switch(request: Request):
 async def deactivate_kill_switch(request: Request):
     await risk_manager.deactivate_kill_switch()
     await store.log_event("▶ Kill switch deactivated — trading resumed")
+    # W14-1 — broadcast the deactivation. ``severity: info`` because the
+    # event is a return-to-normal, not a fresh fault.
+    try:
+        await ws_manager.broadcast(
+            "alerts",
+            {
+                "type": "kill_switch",
+                "severity": "info",
+                "active": False,
+                "timestamp": time.time(),
+            },
+        )
+        await ws_manager.broadcast(
+            "system", {"type": "kill_switch", "kill_switch": False}
+        )
+    except Exception as e:  # noqa: BLE001
+        log.debug("[ws_broadcast] kill-switch-deactivate broadcast failed: %s", e)
     return {"status": "deactivated", "kill_switch": False}
 
 
@@ -2495,6 +2711,21 @@ class ObservationModeRequest(BaseModel):
 async def set_observation_mode(req: ObservationModeRequest):
     """Toggle observation-only mode. When active, new live orders are blocked."""
     result = await risk_manager.set_observation_mode(req.active, req.reason)
+    # W14-1 — broadcast the observation-mode toggle so a dashboard
+    # subscribed to ``alerts`` sees the state change immediately.
+    try:
+        await ws_manager.broadcast(
+            "alerts",
+            {
+                "type": "observation_mode",
+                "severity": "warning" if result["observation_only"] else "info",
+                "active": result["observation_only"],
+                "reason": result.get("observation_reason", ""),
+                "timestamp": time.time(),
+            },
+        )
+    except Exception as e:  # noqa: BLE001
+        log.debug("[ws_broadcast] observation-mode broadcast failed: %s", e)
     return {"status": "observation_mode_" + ("enabled" if result["observation_only"] else "disabled"), **result}
 
 
@@ -2615,6 +2846,28 @@ async def retrain_ml_model(request: Request):
     # pre-retrain cached dict. Done BEFORE constructing the response so the
     # invalidation lands even if the response construction itself raises.
     ml_metrics_cache.invalidate("ml_metrics")
+    # W14-1 — broadcast the post-retrain ML metrics so any dashboard
+    # panel subscribed to the ``metrics`` channel refreshes its
+    # Brier / AUC / ECE display without re-polling /api/ml. The
+    # payload mirrors the GET /api/ml response shape so subscribers can
+    # reuse the same parsing logic.
+    try:
+        await ws_manager.broadcast(
+            "metrics",
+            {
+                "type": "ml_retrain",
+                "brier_score": ml_model.brier_score,
+                "roc_auc": ml_model.roc_auc,
+                "log_loss": ml_model.log_loss_score,
+                "ece": ml_model.ece,
+                "model_version": model_registry.active_version,
+                "meta_learner_warm": ensemble_meta_learner.is_warm,
+                "calibration": calibrator.last_fit_metrics,
+                "timestamp": time.time(),
+            },
+        )
+    except Exception as e:  # noqa: BLE001
+        log.debug("[ws_broadcast] ml-retrain broadcast failed: %s", e)
     return {
         "status": "retrained",
         "brier_score": ml_model.brier_score,
@@ -3091,6 +3344,28 @@ async def get_system_health():
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
+    """Authenticated WebSocket endpoint.
+
+    W14-1 — The client is registered with BOTH the legacy
+    ``ConnectionManager`` (``manager``) AND the new channel-based
+    ``WSBroadcastManager`` (``ws_manager``):
+
+      * ``manager`` keeps broadcasting the raw snapshot dict every 1s
+        so the existing ``useBot`` React hook (which checks
+        ``data.order_books`` directly, no envelope) keeps working.
+      * ``ws_manager`` broadcasts per-channel envelope messages
+        (``{channel, data, timestamp}``) for the new ``useRealtimeData``
+        hook which filters by ``msg.channel === wsChannel``.
+
+    A welcome message is pushed on the ``system`` channel immediately
+    after accept so a client can confirm the round-trip. The legacy
+    raw snapshot is sent right after so ``useBot``'s ``onmessage``
+    handler picks it up on connect (matches the pre-W14-1 contract).
+
+    Clients can send ``{"type": "subscribe", "channels": ["positions"]}``
+    to restrict delivery to a subset of channels. An empty / missing
+    channels set means "all channels" (the default).
+    """
     if settings.api_token:
         token = websocket.query_params.get("token")
         if not hmac.compare_digest(token or "", settings.api_token):
@@ -3100,21 +3375,70 @@ async def websocket_endpoint(websocket: WebSocket):
         # Fail-closed: no API token configured → reject the WS upgrade.
         await websocket.close(code=4401, reason="Unauthorized")
         return
-    await manager.connect(websocket)
+
+    client_id = str(uuid.uuid4())[:8]
+    await websocket.accept()
+    # Register with the new channel-based manager (sends welcome envelope).
+    await ws_manager.connect(websocket, client_id)
+    # Also register with the legacy manager so the 1s snapshot loop
+    # keeps pushing the raw (no-envelope) snapshot for useBot's
+    # ``data.order_books`` direct-access pattern. ``manager.connect``
+    # would call ``websocket.accept()`` a second time (error), so we
+    # append directly to its active list instead.
+    manager.active.append(websocket)
+    log.info("WS client registered: %s (legacy + broadcast manager)", client_id)
     try:
+        # Initial snapshot (raw, no envelope) — backwards-compat with
+        # the dashboard's useBot hook which checks ``data.order_books``.
         snap = await _build_snapshot()
         await websocket.send_text(json.dumps(snap, default=str))
+        # And the same snapshot wrapped in the envelope so any
+        # useRealtimeData subscriber on the ``system`` channel gets an
+        # immediate data frame on connect (no need to wait for the
+        # first 1s tick).
+        await ws_manager.broadcast("system", snap)
         while True:
             try:
-                await asyncio.wait_for(websocket.receive_text(), timeout=30.0)
+                raw = await asyncio.wait_for(websocket.receive_text(), timeout=30.0)
             except asyncio.TimeoutError:
-                pass
+                continue
+            # W14-1 — handle client subscribe messages. ``raw`` is a
+            # JSON string; a non-JSON or malformed payload is silently
+            # dropped so a buggy client can't crash the read loop.
+            try:
+                msg = json.loads(raw)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if not isinstance(msg, dict):
+                continue
+            if msg.get("type") == "subscribe":
+                channels = msg.get("channels") or []
+                if not isinstance(channels, list):
+                    continue
+                await ws_manager.subscribe(client_id, set(channels))
     except WebSocketDisconnect:
         pass
     except Exception as e:
-        log.debug("WS client disconnected: %s", e)
+        log.debug("WS client disconnected: %s — %s", client_id, e)
     finally:
-        manager.disconnect(websocket)
+        await ws_manager.disconnect(client_id)
+        if websocket in manager.active:
+            manager.active.remove(websocket)
+
+
+# W14-1 — WebSocket broadcast manager stats endpoint.
+# Additive: appends ``GET /api/ws/stats`` returning the current
+# connected-client count, total messages sent, total send errors, the
+# channel catalog, and the list of currently-connected client IDs.
+# Used by the dashboard's connection-monitor panel and by operators
+# debugging "why isn't my client receiving updates" — a zero count
+# confirms no clients are connected; a high error count points to a
+# network / serialization issue.
+# Auth enforced by ``enforce_api_auth`` (path not in ``PUBLIC_PATHS``).
+@app.get("/api/ws/stats", tags=["system"])
+async def ws_stats():
+    """Return ``WSBroadcastManager`` stats (connected clients, message counts)."""
+    return ws_manager.get_stats()
 
 
 # R11 — Unified Decision Ledger inspection endpoints.
@@ -3511,4 +3835,156 @@ async def clear_caches():
     observability_cache.clear()
     general_cache.clear()
     return {"ok": True, "message": "All caches cleared"}
+
+
+# ── W14-7 — Rate-limit analytics dashboard endpoint ─────────────────────────
+# Surfaces the in-memory ``RateLimitTracker`` snapshot to the React
+# ``RateLimitPanel`` component. Auth enforced by ``enforce_api_auth``
+# (this path is NOT in ``PUBLIC_PATHS``); rate-limited by ``READ_LIMIT``
+# because the dashboard polls every 30 s — well under the 120/min cap.
+# The route is intentionally NOT cached: a stale snapshot would mask a
+# live rate-limiting burst, which is exactly the scenario the panel is
+# designed to surface.
+@app.get("/api/rate-limit/stats", tags=["system"])
+@limiter.limit(READ_LIMIT)
+async def rate_limit_stats(request: Request):  # noqa: ARG001 — slowapi requires the `request` arg
+    """Return a snapshot of the last hour's rate-limit activity.
+
+    Shape::
+
+        {
+          "total_hits": 42,
+          "hits_per_minute_rate": 0.7,
+          "hits_by_endpoint": {"/api/orders": 30, "/api/markets": 12},
+          "hits_by_client":  {"127.0.0.1": 40, "10.0.0.5": 2},
+          "hits_per_minute":  {"1": 5, "2": 0, ... "60": 0},
+          "top_endpoints":    {"/api/orders": 30, "/api/markets": 12}
+        }
+
+    Used by the dashboard's ``Rate Limits`` panel (sidebar → System →
+    Rate Limits). All state is in-memory and process-local — a restart
+    zeroes the counters, which is fine for the panel's "last hour"
+    window.
+    """
+    return rate_limit_tracker.get_stats()
+
+
+# ── W14-8 — Client-side error reporting endpoint ──────────────────────────────
+# Public (no auth) so the reporter can POST crash reports even when the
+# trader's API token is misconfigured — operators would rather see the
+# auth-failure in this log than lose the telemetry. The reporter batches
+# reports on a 5s cadence and POSTs them here as ``{"errors": [...]}``;
+# we acknowledge the batch and write each report to the dedicated
+# ``client_errors`` logger (filterable from the main app log via the
+# logger name) with the URL + session ID + stack + context as extras
+# (which the JSON formatter in ``core.logging`` picks up if configured).
+#
+# The endpoint does NOT persist reports to the database — the volume is
+# potentially high (one batch per active tab per 5s) and the operational
+# value is in near-real-time triage, not historical queries. Operators
+# who need long-term retention should ship the ``client_errors`` logger
+# output to their existing log aggregator (ELK / Loki / CloudWatch).
+class ClientError(BaseModel):
+    """Single client-side error report (matches TS ``ErrorReport``)."""
+
+    message: str
+    stack: str | None = None
+    filename: str | None = None
+    lineno: int | None = None
+    colno: int | None = None
+    url: str
+    userAgent: str
+    timestamp: float
+    sessionId: str
+    userId: str | None = None
+    release: str | None = None
+    context: dict | None = None
+
+
+class ClientErrorBatch(BaseModel):
+    """Batch wrapper — the reporter POSTs ``{"errors": [...]}``."""
+
+    errors: list[ClientError]
+
+
+# Dedicated logger so operators can filter client-side errors out of the
+# main app log (which is dominated by trading / strategy noise). The
+# logger inherits the root handler config by default; a future PR can
+# attach a separate handler (e.g. a Slack webhook for critical-severity
+# reports) without touching the main app log.
+_client_error_logger = logging.getLogger("client_errors")
+
+
+@app.post(
+    "/api/client-errors",
+    tags=["system"],
+    summary="Receive client-side error reports",
+    description=(
+        "Sentry-like crash report ingestion. The frontend batches errors "
+        "in memory (5s window) and POSTs them here as a JSON array. "
+        "Public (no auth) so reports still arrive when the trader's API "
+        "token is misconfigured. Reports are written to the "
+        "`client_errors` logger and acknowledged with a count; they are "
+        "NOT persisted to the database."
+    ),
+)
+async def receive_client_errors(batch: ClientErrorBatch):
+    """Receive a batch of client-side error reports.
+
+    Each report is logged at WARNING level (errors are by definition
+    unexpected — INFO would bury them in routine traffic) with the
+    URL, session ID, stack, and context forwarded as log extras so a
+    structured log aggregator can index them.
+
+    Returns ``{"ok": True, "received": N}`` so the client can confirm
+    delivery (though the client's ``.catch(() => {})`` swallows the
+    response anyway — the ACK is for operators running the endpoint
+    via curl during debugging).
+    """
+    for err in batch.errors:
+        _client_error_logger.warning(
+            "[Client Error] %s",
+            err.message,
+            extra={
+                "url": err.url,
+                "session": err.sessionId,
+                "stack": err.stack,
+                "context": err.context,
+                "user_agent": err.userAgent,
+                "timestamp": err.timestamp,
+                "filename": err.filename,
+                "lineno": err.lineno,
+                "colno": err.colno,
+            },
+        )
+    return {"ok": True, "received": len(batch.errors)}
+
+
+# (W14-5) ml.ab_testing — A/B testing framework for ML model promotion
+# decisions. Additive wiring appended at end of file per the W14-5 task
+# spec. Adds four endpoints under ``/api/ab-test`` so operators can
+# start / stop / evaluate champion-vs-challenger experiments from the
+# dashboard without touching the production prediction path:
+#
+#   GET  /api/ab-test                 current experiment status (active flag,
+#                                    champion/challenger versions, per-arm
+#                                    prediction counts, recent history)
+#   POST /api/ab-test/start           start a new experiment (body: name,
+#                                    champion_version, challenger_version,
+#                                    traffic_split in [0,1], min_samples)
+#   POST /api/ab-test/stop            stop the current (or named) experiment
+#   GET  /api/ab-test/evaluate        evaluate an experiment — per-arm
+#                                    AUC/Brier/log-loss/accuracy +
+#                                    two-proportion z-test on accuracy +
+#                                    two-sample t-test on Brier +
+#                                    promote/keep_champion recommendation
+#
+# Same registration pattern as the sibling ``register_routes`` blocks
+# above (alias imported under ``_register_*`` to avoid shadowing other
+# modules' ``register_routes`` symbol). Auth enforced by
+# ``enforce_api_auth`` (none of the four paths are in ``PUBLIC_PATHS``).
+from ml.ab_testing import register_routes as _register_ab_test_routes
+
+_register_ab_test_routes(app)
+
 

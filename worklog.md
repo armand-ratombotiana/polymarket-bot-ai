@@ -23828,3 +23828,1008 @@ Stage Summary:
 - Created tests: yes (36 tests, all passing)
 - Lint: clean
 - All 376 tests pass (no regressions)
+
+---
+Task ID: W14-6
+Agent: general-purpose
+Task: Backup verification + integrity checks
+
+Work Log:
+- Read `worklog.md` tail (last ~230 lines, W13-x series) to baseline the
+  project state. Confirmed the project layout: Next.js + FastAPI trading
+  bot, ~376 frontend tests passing, backup/restore/db-maintenance/health
+  scripts already exist in `scripts/` from W12-2.
+- Read `scripts/backup.sh`, `scripts/restore.sh`, `scripts/db-maintenance.sh`
+  to understand existing patterns (sqlite3 CLI + Python fallback, gzipped
+  .db.gz output, MANIFEST.txt with SHA256s, pre_restore_* safety snapshots).
+- Listed the live data dir (`mini-services/polymarket-bot/data`) and dumped
+  the schema of each `.db` so the new scripts' expected-tables map could be
+  validated against reality. Discovered the live schemas use
+  `decision_events` (not `decisions`), `metrics` (not `observability_metrics`),
+  `orderbook_ticks` (not `order_books`) — kept the spec's `EXPECTED_TABLES`
+  verbatim per the task instructions, but flagged this in the worklog so
+  the operator can update the map if needed.
+
+- **Step 1: `scripts/verify_backup.py`** (created as specified + 1 hardening
+  fix). Implemented verbatim from the spec, then wrapped the gzip
+  decompression in `try/except (gzip.BadGzipFile, OSError)` so a corrupt
+  `.db.gz` is recorded as a per-DB verification failure rather than crashing
+  the script. Without this fix, `backup.sh`'s auto-verify step would crash
+  on any truncated .gz file instead of reporting the problem. Also added
+  a `try/except OSError` around the JSON report write so the early-return
+  case (backup_dir doesn't exist) doesn't crash on `open(json_path, 'w')`.
+  Filesize handling, human-readable report, JSON report, exit codes (0/1),
+  and the skipped (⊘) status for DBs that were never in the deployment all
+  match the spec.
+
+- **Step 2: `scripts/backup_rotation.py`** (~280 LOC). GFS retention:
+  daily×7d / weekly×4 ISO weeks / monthly×12 calendar months / hard
+  max-age×90d (overridable via `--max-age-days`). Selects the most-recent
+  backup per day/week/month bucket; the newest backup overall is ALWAYS
+  kept even if it falls outside all buckets (never leaves the operator
+  with zero restore points). `pre_restore_*` directories (created by
+  `restore.sh` as safety snapshots) are NEVER pruned — they don't match
+  the `YYYYMMDD_HHMMSS` regex and must be removed manually. Supports
+  `--dry-run`, `--json`, `--backup-dir`, `--max-age-days`. Exit codes
+  0/1/2.
+
+- **Step 3: `scripts/check_integrity.py`** (~370 LOC). Per-DB checks:
+  (1) `PRAGMA integrity_check` (full), (2) `PRAGMA quick_check` (faster
+  subset), (3) `PRAGMA foreign_key_check` (only catches declared FKs —
+  most of our tables use logical/undeclared FKs), (4) cross-DB logical
+  orphan checks via `ATTACH DATABASE` for known relationships
+  (`execution_quality.decision_id` → `decision_ledger.decision_events`,
+  `closed_positions.decision_id` → `decision_ledger.decision_events`,
+  `decision_rejections.decision_id` → `decision_ledger.decision_events`
+  [soft — bot logs rejections before allocating decision_id]), (5) table
+  bloat detection against configurable soft ceilings (DEFAULT_BLOAT_CEILINGS
+  dict derived from documented retention policy with 2x safety margin;
+  override via `--bloat-ceiling db=table=N`), (6) index health via
+  `PRAGMA index_list` + `sqlite_stat1` presence. All live DBs opened
+  read-only via `file:...?mode=ro` URI form — the script NEVER writes to
+  live data. Supports `--data-dir`, `--json`, `--bloat-ceiling`. Exit
+  codes 0/1/2/3.
+
+- **Step 4: `scripts/test_restore.py`** (~430 LOC). Round-trip test:
+  for each `*.db` in the data dir (non-recursive — skips `test_run/`,
+  `recon/` scratch dirs), (1) backs up via `Connection.backup()` (Online
+  Backup API, read-only on source), (2) gzips, (3) gunzips into a fresh
+  temp dir, (4) compares PRAGMA integrity_check on restored copy,
+  schema hash (sha256 of `sqlite_master`), per-table row counts, and
+  per-table row-content hash (sha256 of every row tuple, sorted by
+  primary key — catches row-level divergence even when counts match),
+  (5) cleans up temp files in a `finally` block (unless `--keep-temp`).
+  Per-table hashing is wrapped in `try/except sqlite3.DatabaseError` so
+  a single corrupt table doesn't abort the rest of the comparison. The
+  outer verify block is wrapped in a broader `try/except` so any
+  sqlite3.DatabaseError escaping a sub-step is recorded as a per-DB
+  failure and the run continues to the next DB. Supports `--data-dir`,
+  `--json`, `--keep-temp`. Exit codes 0/1/2/3.
+
+- **Step 5: `scripts/backup.sh`** — appended a new "Verify the backup
+  just created" block at the end (after the prune step). Calls
+  `python3 "$(dirname "$0")/verify_backup.py" "$BACKUP_PATH"`; on success
+  logs `Verification: PASS`, on failure logs `WARNING: Backup verification
+  failed — see verification_report.json in $BACKUP_PATH`. Verification
+  failure is non-fatal (we don't propagate the exit code) so a single
+  bad DB doesn't block the rest of the cron schedule — the operator
+  sees the warning in `logs/backup.cron.log`. Verified the path
+  resolution works (cwd-relative `./scripts/verify_backup.py`) and that
+  `bash -n` passes.
+
+- **Step 6: `docs/MAINTENANCE.md`** — added a new top-level section
+  "## 6. Backup verification, rotation & integrity" (sub-sections 6.1-6.6)
+  between section 5 (Cron setup) and the existing DR plan. Renumbered
+  sections 6/7/8 → 7/8/9 (Disaster recovery, File inventory, Testing
+  scripts). Updated the TL;DR code block to include verify/rotate/
+  check_integrity/test_restore commands. Updated the file inventory
+  table to list the 4 new Python scripts + 2 new log file paths
+  (`backup-rotation.cron.log`, `verify-backup.cron.log`). Updated the
+  testing section to include `python3 -m py_compile scripts/*.py` and
+  examples for each new script. The new section 6 covers: how to verify
+  a backup, automated verification post-backup, what to do if
+  verification fails (don't restore from bad backup, investigate causes:
+  disk full / gzip interrupted / schema drift / missing DB, escalate
+  to §7 DR plan if live DB is also corrupt), GFS rotation policy
+  (daily/weekly/monthly/max-age), live-DB integrity checker (the 6
+  check types), and the round-trip test pipeline.
+
+- **Verification (smoke tests against the live sandbox data dir)**:
+  * `python3 scripts/verify_backup.py` (no args) → prints usage, exit 0.
+  * `python3 scripts/verify_backup.py /tmp/verify_test` (one valid .db)
+    → ✓ VALID, audit_events: 193 rows, JSON report written, exit 0.
+  * `python3 scripts/verify_backup.py /tmp/verify_test2` (valid + corrupt
+    gz) → ✗ INVALID, "Could not decompress .gz: BadGzipFile: Not a
+    gzipped file (b'ga')", exit 1. (Pre-fix the script crashed with an
+    uncaught BadGzipFile traceback.)
+  * `python3 scripts/backup_rotation.py --dry-run --backup-dir /tmp/rotation_test`
+    → 12 backups → 7 kept / 5 pruned; correct GFS bucket selection;
+    `pre_restore_*` dirs ignored; exit 0. Live run with `--max-age-days 30`
+    pruned Aug 1 backup with reason `older_than_30d`. JSON output valid.
+  * `python3 scripts/check_integrity.py` against live data dir →
+    detected real corruption in `market_intelligence.db` (integrity_check
+    FAIL with `database disk image is malformed`, `btreeInitPage()
+    returns error code 11`, `2nd reference to page N`); 7/8 DBs healthy,
+    1/8 corrupt; cross-DB orphan checks ran cleanly (0 orphans for
+    closed_positions/execution_quality.decision_id → decision_ledger);
+    table bloat check ran (decision_events 28% of ceiling, etc.);
+    exit code 2 (correct — integrity failure). `--json` output parses.
+  * `python3 scripts/test_restore.py` against live data dir → 7/8 DBs
+    passed round-trip cleanly (audit_trail, closed_positions,
+    decision_ledger with 141954 decision_events + 70170 decision_rejections
+    row hashes match exactly, execution_quality, market, observability,
+    shadow_trades); market_intelligence.db failed (source is corrupt,
+    backup propagated the corruption, integrity_check on restored copy
+    returned FAIL); exit code 2 (correct). Temp dirs cleaned up.
+    `--json` output parses.
+  * End-to-end `backup.sh` run against a small test BOT_DATA_DIR: 3 DBs
+    backed up + gzipped + MANIFEST.txt written + auto-verify ran and
+    produced a `verification_report.json` inside the backup dir. The
+    verification reported failures because the spec's EXPECTED_TABLES
+    map doesn't match the live schemas (e.g. spec says `decisions` but
+    live DB has `decision_events`); these are spec-vs-reality mismatches,
+    not script bugs. `backup.sh` logged the WARNING and exited 0 (the
+    verify failure is non-fatal by design).
+  * `bash -n scripts/*.sh` → all shell scripts syntax OK.
+  * `python3 -m py_compile scripts/*.py` → all Python scripts compile OK.
+  * `chmod +x scripts/*.py` → all 4 new scripts are executable.
+
+- Cleaned up all test artifacts under `/tmp/` and any test backup
+  directories created under `/home/z/my-project/backups/`.
+
+Stage Summary:
+- Created `scripts/verify_backup.py` (180 LOC) — verbatim from spec + 1
+  hardening fix for corrupt `.db.gz` handling. Verifies backup integrity
+  by opening each .db (or .db.gz) and running PRAGMA integrity_check +
+  expected-tables presence + row counts. Writes `verification_report.json`
+  into the backup dir.
+- Created `scripts/backup_rotation.py` (280 LOC) — GFS retention policy:
+  daily×7d / weekly×4w / monthly×12m / max-age×90d. `pre_restore_*` safety
+  snapshots are NEVER pruned. Supports `--dry-run`, `--json`,
+  `--backup-dir`, `--max-age-days`.
+- Created `scripts/check_integrity.py` (370 LOC) — deep live-DB integrity
+  checker: integrity_check + quick_check + foreign_key_check + cross-DB
+  logical orphan checks (via ATTACH DATABASE) + table bloat detection
+  (configurable soft ceilings) + index health. Read-only on live DBs.
+- Created `scripts/test_restore.py` (430 LOC) — round-trip test: backup
+  → gzip → restore → compare (PRAGMA integrity_check + schema hash +
+  per-table row count + per-table row-content hash). Per-table error
+  isolation so a single corrupt table doesn't abort the run.
+- Updated `scripts/backup.sh` — appended an auto-verify block that calls
+  `verify_backup.py` after every backup; failure is logged as WARNING,
+  non-fatal so the rest of the cron schedule proceeds.
+- Updated `docs/MAINTENANCE.md` — added new section 6
+  "Backup verification, rotation & integrity" (sub-sections 6.1-6.6
+  covering verify/automate/troubleshoot/rotate/integrity-check/round-trip-test);
+  renumbered downstream sections 6→7 (DR), 7→8 (file inventory), 8→9
+  (testing); updated TL;DR + file inventory table + testing examples.
+- Smoke-tested all 4 scripts against the live sandbox data dir (8 DBs)
+  and against synthetic test fixtures. `check_integrity.py` and
+  `test_restore.py` both correctly identified a pre-existing corrupt
+  `market_intelligence.db` and reported it without crashing.
+
+---
+Task ID: W14-2
+Agent: full-stack-developer
+Task: i18n system
+
+Work Log:
+- Read worklog tail (~150 lines — W13-6 push notifications + W13-9 chart
+  visualizations) to baseline current state, then read package.json (found
+  `next-intl@^4.3.4` already declared), layout.tsx (root layout w/
+  ThemeProvider), Sidebar.tsx (8-group nav with English-only labels +
+  kbd shortcuts + collapse toggle), TopStatusBar.tsx (right-side action
+  cluster with ThemeToggle + mute/shortcuts/config/kill-switch buttons),
+  Sidebar.test.tsx (18 tests asserting English labels like 'Positions',
+  'Live Books', 'Bot Engine Active' — must not regress), and vitest
+  setup (jsdom env, mocked matchMedia, ResizeObserver, scrollIntoView).
+
+- Step 1 — Installed next-intl: `bun add next-intl` upgraded from
+  4.3.4 → 4.14.2 (latest). All other deps untouched.
+
+- Step 2 — Created `src/messages/en.json` (108 lines) and
+  `src/messages/fr.json` (108 lines). Both files have IDENTICAL key
+  sets (verified by the catalog-parity test). Namespaces: `nav` (25
+  nav-item labels), `groups` (8 group labels — incl. `capital_group`
+  to disambiguate from the `nav.capital` nav-item label), `common`
+  (15 generic UI verbs), `status` (5 bot/connection states),
+  `positions` (12 position-table column headers + actions),
+  `analytics` (8 KPI labels). The task spec's fr.json was a partial
+  translation missing several keys — I extended it to a complete
+  translation so the locale-parity test passes and the trader never
+  sees a raw key string in French.
+
+- Step 3 — Created `src/i18n/config.ts` (54 lines):
+  * `locales = ['en', 'fr'] as const` — single source of truth.
+  * `type Locale = (typeof locales)[number]`.
+  * `defaultLocale: Locale = 'en'`.
+  * `getLocale()` — SSR-safe (returns `defaultLocale` when `window` is
+    undefined); wraps `localStorage.getItem('locale')` in try/catch so
+    privacy-mode / sandboxed iframes don't crash the render.
+  * `setLocale(locale)` — persists to localStorage; SSR-safe no-op;
+    same try/catch wrap.
+  * Stale persisted values (e.g. a removed locale) gracefully fall
+    back to `defaultLocale` instead of throwing.
+
+  Created `src/i18n/request.ts` (24 lines) — `next-intl/server`'s
+  `getRequestConfig` that resolves the server-side locale + messages
+  bundle. Pins to `defaultLocale` for the server payload so the SSR
+  HTML matches the client's first render (the client-side
+  `useTranslation` hook is what actually flips the visible UI based
+  on the persisted locale).
+
+- Step 4 — Created `src/hooks/useTranslation.ts` (76 lines):
+  * `useState<Locale>('en')` initial — keeps the FIRST client render
+    matching the SSR payload so there's no hydration mismatch.
+  * `useEffect` reads the persisted locale via `getLocale()` and
+    reconciles state if it differs. Deps array is `[locale]` so the
+    effect re-runs after each setLocale (no-op when the persisted
+    value already matches the in-memory state).
+  * `t(key)` — `useCallback`-memoised per locale; splits the key on
+    `.`, walks the messages object, returns the string leaf if found
+    OR falls back to the key itself when: (a) any intermediate path
+    segment is missing, (b) the leaf is not a string (e.g. an
+    object/array). The fallback is intentional — a raw key like
+    `nav.does_not_exist` in the UI is an obvious red flag that a
+    translator missed an entry.
+  * `changeLocale(locale)` — persists + flips in-memory state in one
+    call so consumers re-render synchronously on the next commit.
+
+- Step 5 — Created `src/components/LocaleSwitcher.tsx` (44 lines):
+  * Compact 2-option `<select>` (EN / FR) that fits the status bar's
+    26px-tall action cluster. Inline styles read the dashboard's CSS
+    variables (`--border`, `--text-secondary`) so it inherits the
+    active theme automatically.
+  * Uses `useTranslation().locale` for the current value and
+    `setLocale()` for the change handler — no extra state, no extra
+    prop drilling.
+  * Deliberately NOT using the shadcn Select primitive (which is a
+    ~12KB-gzipped Radix portal) for what's a 2-option control.
+
+- Step 6 — Modified `src/components/TopStatusBar.tsx`:
+  * Added `import LocaleSwitcher from './LocaleSwitcher'`.
+  * Rendered `<LocaleSwitcher />` immediately after `<ThemeToggle />`
+    in the right-side action cluster — the two "appearance" controls
+    (theme + language) cluster together, then audio, input help,
+    config, and trading actions follow.
+  * Updated the existing block comment to describe the new
+    "appearance → language → audio → input help → config" reading
+    order.
+
+- Step 7 — Modified `src/components/Sidebar.tsx`:
+  * Added `import { useTranslation } from '@/hooks/useTranslation'`.
+  * Added `labelKey: string` field to the `NavItem` and `NavGroup`
+    interfaces (kept `label` as the English fallback for grep-ability
+    + back-compat with any consumer reading `item.label` directly).
+  * Added a `labelKey` value to every entry in the `NAV_GROUPS`
+    array — 25 nav items + 8 groups (capital group uses
+    `groups.capital_group` since the bare `capital` key is reserved
+    for the nav-item label).
+  * Rendered `{t(group.labelKey)}` for group headers and
+    `{t(item.labelKey)}` for nav-item labels — both the visible label
+    AND the collapsed-mode tooltip now use the translated string.
+  * Rendered `{t('status.bot_active')}` for the footer "Bot Engine
+    Active" status text.
+  * CRITICAL — did NOT touch: the `kbd` shortcuts, the icon strings,
+    the collapse toggle button, the mobile drawer, the
+    `aria-current` logic, the sr-only keyboard-shortcut hints. Only
+    the human-readable display text was swapped.
+
+- Step 8 — Created `src/hooks/useTranslation.test.ts` (290 lines,
+  21 tests across 3 describe blocks):
+  * `i18n config` (6 tests): locales catalog has ≥2 entries, default
+    is 'en', `getLocale` reads empty storage → default, `setLocale`
+    persists + reads back, stale persisted value ('de') ignored,
+    SSR-safe (window undefined) returns default + `setLocale` no-ops
+    without throwing.
+  * `locale catalog parity` (1 test): en.json and fr.json expose
+    IDENTICAL key sets — catches any half-finished translation work.
+  * `useTranslation` hook (14 tests):
+    - Initial locale is 'en' before/after mount (localStorage empty).
+    - `t()` returns the correct English string for known keys
+      (spot-checked nav.command, nav.positions, status.bot_active,
+      groups.main, groups.capital_group).
+    - `t()` returns the key itself for unknown keys
+      (nav.does_not_exist, totally.unknown.key, empty string).
+    - `t()` returns the key when the leaf is an object (nav → 'nav').
+    - `setLocale('fr')` flips locale → French strings appear
+      (Centre de Commande, Moteur Bot Actif, etc.).
+    - Switching back fr → en restores English.
+    - Locale persists to localStorage across the switch.
+    - Subsequent mount reads the persisted 'fr' value via the
+      mount effect.
+    - Stale persisted value ('de') falls back to 'en'.
+    - `t` is referentially stable across renders UNLESS the locale
+      changes (so memoised consumers don't re-render on parent
+      re-renders).
+    - Spot-checked that EVERY nav item labelKey used by the Sidebar
+      resolves to a real string in BOTH en and fr (no raw key ever
+      leaks into the UI).
+    - Same spot-check for the 8 group labelKeys.
+
+- Verification:
+  * `bun run lint` — clean (eslint . exits 0, zero warnings).
+  * `bun run test src/hooks/useTranslation.test.ts src/components/Sidebar.test.tsx
+    src/hooks/useNotifications.test.ts src/hooks/useRealtimeData.test.ts
+    src/hooks/useFeatureFlags.test.ts src/components/AnalyticsPanel.test.tsx
+    src/components/PositionsPanel.test.tsx src/components/CommandPalette.test.tsx`
+    — all 144 tests across 8 files pass (incl. 21 new useTranslation
+    tests + 18 existing Sidebar tests with English labels — zero
+    regressions).
+  * The full `bun run test` suite shows 2 pre-existing flaky test
+    files (`src/lib/errorReporter.test.ts`, `src/components/RateLimitPanel.test.tsx`).
+    I confirmed these fail on the BASELINE (after `git stash` of my
+    changes) — they're unrelated to W14-2:
+    - errorReporter.test.ts passes in isolation (24/24) but
+      intermittently fails in the full suite due to cross-test
+      contamination when other files fire unhandled promise
+      rejections.
+    - RateLimitPanel.test.tsx fails both in isolation and in the
+      full suite on `main` — it's a pre-existing `vi.useFakeTimers()`
+      + `waitFor` interaction issue unrelated to i18n.
+
+Stage Summary:
+- Installed next-intl: yes (4.3.4 → 4.14.2 via `bun add next-intl`)
+- Created messages/en.json + fr.json: yes (108 lines each, identical
+  key sets — verified by catalog-parity test)
+- Created useTranslation hook + LocaleSwitcher: yes (76 lines + 44
+  lines respectively; hook is SSR-safe + referentially stable)
+- Applied translations to Sidebar: yes (added `labelKey` field to
+  NavItem/NavGroup interfaces, wired 25 nav items + 8 groups + footer
+  status text through `t()`; kbd shortcuts, icons, collapse toggle,
+  sr-only hints, mobile drawer, aria-current logic all untouched)
+- Wired LocaleSwitcher into TopStatusBar: yes (rendered immediately
+  after ThemeToggle in the right-side action cluster)
+- Created next-intl server config: yes (`src/i18n/request.ts` — pins
+  server locale to defaultLocale so SSR payload matches first client
+  render; client-side hook handles the persisted-locale reconciliation
+  on mount)
+- Created tests: yes (21 tests across 3 describe blocks — config
+  primitives, catalog parity, hook behavior incl. locale switching,
+  fallback to key, SSR safety, referential stability, and full
+  Sidebar labelKey coverage in both locales)
+- Lint: clean (eslint . exits 0)
+- Tests: 21/21 new pass; 144/144 across 8 adjacent test files pass
+  (Sidebar, AnalyticsPanel, PositionsPanel, CommandPalette,
+  useNotifications, useRealtimeData, useFeatureFlags, useTranslation);
+  2 pre-existing flaky test files (errorReporter, RateLimitPanel)
+  fail on `main` as well — unrelated to W14-2 (verified via git stash).
+
+---
+Task ID: W14-8
+Agent: full-stack-developer
+Task: Frontend error reporting (Sentry-like client-side crash reporter)
+
+Work Log:
+- Read worklog tail (~150 lines) to baseline project state — confirmed
+  W13-9 chart refactor and W13-6 notification work landed cleanly,
+  established ErrorBoundary (W10-3), api.ts gateway wrap, and root
+  layout as integration points.
+- Read `src/components/ErrorBoundary.tsx` — class component with
+  `componentDidCatch` hook noted as the future telemetry injection
+  point (comment block at L16-L18 explicitly flagged this).
+- Read `src/lib/api.ts` — confirmed `apiFetch` adds `?XTransformPort=8080`
+  to `/api/*` URLs (excluding `/api/bot`). Decided to use `apiFetch`
+  for the reporter's flush (instead of plain `fetch` per the task
+  spec) so the request reliably reaches the backend port even before
+  the gateway wrap is installed.
+- Read `src/app/layout.tsx` — identified ThemeProvider > ErrorBoundary
+  tree as the integration surface; `<ErrorReporterInit />` placed
+  inside ThemeProvider above ErrorBoundary so listeners survive a
+  render crash.
+
+Step 1 — Created `src/lib/errorReporter.ts` (247 lines):
+  * `ErrorReport` interface: message + stack + filename/lineno/colno
+    + url + userAgent + timestamp + sessionId + userId + release +
+    context.
+  * Module-level singleton state: `SESSION_ID` (`${ts}-${random}`),
+    `ERROR_QUEUE` array, `flushTimer` debounce handle.
+  * `captureError(error, context?)` — accepts Error OR string, pushes
+    a report, mirrors to `console.error('[ErrorReporter]', ...)`,
+    schedules a 5s flush.
+  * `captureMessage(msg, level, context?)` — info/warning/error
+    breadcrumb; prefixes message with `[LEVEL]` so plain-text backend
+    log can filter by severity; level also forwarded in context.
+  * `scheduleFlush()` — debounced 5s timer; coalesces N errors in a
+    5s window into one POST.
+  * `flush()` — drains queue via `splice`, POSTs batch to
+    `/api/client-errors` via `apiFetch`. Wraps in try/catch +
+    `.catch(() => {})` so a down backend never propagates to the UI
+    and never triggers an infinite error loop.
+  * `installErrorHandlers()` — registers `error`, `unhandledrejection`,
+    `beforeunload` window listeners. `error` listener reads
+    `event.error`/`event.message` + forwards filename/lineno/colno.
+    `unhandledrejection` coerces non-Error reasons via
+    `new Error(String(reason))` so the stack field is always populated.
+  * `getErrorStats()` — read-only `{ sessionId, queueLength }` for
+    diagnostic / test introspection.
+  * `_resetForTests()` — clears queue + cancels pending timer for test
+    isolation (prefixed `_` to signal private).
+
+Step 2 — Created `src/components/ErrorReporterInit.tsx` (35 lines):
+  * Client component, renders null.
+  * `useEffect(() => installErrorHandlers(), [])` — installs once per
+    page load.
+  * Documented Strict-Mode double-invoke behavior (dev) — `addEventListener`
+    dedupes identical listener+type tuples so duplicate registration
+    is silently collapsed by the browser.
+
+Step 3 — Modified `src/app/layout.tsx`:
+  * Added import for `ErrorReporterInit` with W14-8 comment block.
+  * Inserted `<ErrorReporterInit />` inside `<ThemeProvider>` ABOVE
+    `<ErrorBoundary>` so window listeners are wired before any render
+    crash can happen, AND so the listeners survive a render crash
+    (the fallback UI keeps reporting subsequent errors).
+
+Step 4 — Modified `src/components/ErrorBoundary.tsx`:
+  * Added `import { captureError } from '@/lib/errorReporter'`.
+  * Updated header comment block: removed "future PR" language, added
+    W14-8 paragraph explaining the reporter wiring + the fact that
+    event-handler / async errors are captured separately by the
+    global window listeners.
+  * `componentDidCatch` now calls `captureError(error, {
+    componentStack: errorInfo.componentStack })` between the
+    console.error and the setState. The componentStack is forwarded
+    as context so the backend log shows the React component hierarchy
+    that produced the error, not just the JS stack.
+
+Step 5 — Modified `mini-services/polymarket-bot/api/server.py`:
+  * Added `/api/client-errors` to `PUBLIC_PATHS` (with W14-8 comment
+    explaining why errors must ALWAYS be reportable, even when the
+    trader's API token is misconfigured).
+  * Appended `ClientError` and `ClientErrorBatch` pydantic models at
+    end of file — model fields mirror the TS `ErrorReport` shape
+    exactly (message, stack, filename, lineno, colno, url, userAgent,
+    timestamp, sessionId, userId, release, context).
+  * Created dedicated `_client_error_logger = logging.getLogger(
+    "client_errors")` so operators can filter client-side errors out
+    of the main app log (dominated by trading/strategy noise).
+  * Appended `@app.post("/api/client-errors", tags=["system"])` route
+    handler — iterates the batch, logs each at WARNING level with
+    URL/session/stack/context/user_agent/timestamp/filename/lineno/
+    colno as log extras (picked up by the JSON formatter if
+    configured), returns `{"ok": True, "received": N}`.
+  * Verified Python syntax: `python -c "import ast; ast.parse(...)"`
+    exits 0.
+
+Step 6 — Created `src/lib/errorReporter.test.ts` (24 tests, 386 lines):
+  * Mock strategy: re-stub `global.fetch = vi.fn()` per test (default
+    resolves `{ok: true, received: 0}`); `apiFetch` picks up the stub
+    transparently since it calls the global `fetch` symbol.
+  * `_resetForTests()` called in `beforeEach` for queue + timer
+    isolation.
+  * `console.error` spied + mocked to silence the dev-console mirror.
+  * captureError (5 tests): grows queue for Error instance + string,
+    mirrors to console with [ErrorReporter] tag, forwards context
+    verbatim to flushed payload, no-ops on SSR (window deleted).
+  * captureMessage (4 tests): grows queue, prefixes message with
+    [LEVEL], defaults to info, forwards level+extra context.
+  * flush (6 tests): POSTs batch to /api/client-errors, empties queue
+    on success, no-op on empty queue, swallows fetch rejections
+    silently, swallows non-OK responses silently, coalesces 3 errors
+    in a 5s fake-timer window into one POST.
+  * getErrorStats (2 tests): stable session ID across calls, session
+    ID format matches `${ts}-${random}`, queueLength reflects state.
+  * installErrorHandlers (6 tests): registers error/unhandledrejection/
+    beforeunload on window, `error` listener captures ErrorEvent
+    into queue, `error` listener forwards filename/lineno/colno as
+    context, `unhandledrejection` listener captures reason,
+    `unhandledrejection` listener coerces non-Error reason to Error,
+    no-ops on SSR.
+    * Critical implementation detail: `addEventListener` is stubbed
+      with `mockImplementation` to RECORD the listener functions but
+      NOT actually register them — prevents listener accumulation
+      across tests (each `installErrorHandlers()` call creates fresh
+      anonymous closures, so without the stub, every test would add
+      another duplicate set of listeners and they'd compound). The
+      captured listener is then invoked manually with a synthetic
+      ErrorEvent / PromiseRejectionEvent — avoids relying on jsdom
+      event bubbling AND avoids creating a real unhandled rejection
+      that vitest's global handler would flag.
+  * End-to-end (1 test): captured error round-trips through the batch
+    to the backend — verifies message + stack + url + userAgent +
+    timestamp + sessionId + context all present in the POST body.
+
+Verification:
+  * `bun run lint` — clean (eslint . exits 0, no warnings).
+  * `bun run test src/lib/errorReporter.test.ts` — all 24 tests pass
+    in 149ms.
+  * `bun run test` (full suite) — 19/20 test files pass; the only
+    failure is `src/components/RateLimitPanel.test.tsx` (7 tests)
+    which is a PRE-EXISTING failure (verified via `git stash` + rerun:
+    same 7 tests fail without my changes — fake-timer interaction
+    with the panel's polling logic, unrelated to the reporter).
+  * `python -c "import ast; ast.parse(open('api/server.py').read())"`
+    — Python syntax valid.
+  * Dev server log — clean, no compile errors, GET / returns 200 in
+    28ms.
+
+Stage Summary:
+- Created src/lib/errorReporter.ts (247 lines, 5 exports — captureError,
+  captureMessage, flush, installErrorHandlers, getErrorStats + 1
+  test-only `_resetForTests`).
+- Created src/components/ErrorReporterInit.tsx (35 lines — null-rendering
+  client component that installs handlers on mount).
+- Modified src/app/layout.tsx (added import + mounted <ErrorReporterInit
+  /> inside ThemeProvider above ErrorBoundary).
+- Modified src/components/ErrorBoundary.tsx (added captureError import
+  + call in componentDidCatch with componentStack context).
+- Modified mini-services/polymarket-bot/api/server.py (added
+  /api/client-errors to PUBLIC_PATHS + ClientError/ClientErrorBatch
+  models + POST endpoint with dedicated client_errors logger).
+- Created src/lib/errorReporter.test.ts (24 tests, 386 lines).
+- Lint: clean. Tests: 24/24 pass. Pre-existing RateLimitPanel failures
+  unrelated to this task.
+
+---
+Task ID: W14-4
+Agent: full-stack-developer
+Task: Audit log viewer + export
+
+Work Log:
+- Read context files (worklog tail, audit_logger.py, server.py /api/audit/logs
+  route handler, DecisionLedgerPanel.tsx for the panel pattern reference,
+  Sidebar.tsx for nav wiring, page.tsx for the dynamic-import + render
+  case pattern). Confirmed:
+  * Backend `GET /api/audit/logs?limit=100&category=...` returns
+    `{ logs: AuditLog[], count }` where each AuditLog mirrors the SQLite
+    `audit_events` schema: id, timestamp (epoch sec float), category,
+    event_type, token_id, slug, details (TEXT — free-form key=val or
+    JSON), pnl, strategy, idempotency_key.
+  * No `severity` column in the schema — must be inferred client-side.
+
+- Created `src/components/AuditLogPanel.tsx` (~600 lines, single file):
+  * Fetches `/api/audit/logs?limit=100` via `apiFetch` (auth header
+    auto-injected) every 15s with visibility-aware auto-pause (pauses
+    when tab hidden, resumes + refetches on visibility change).
+  * Severity inference (`inferSeverity`): prefers an explicit
+    `severity` key inside the details JSON payload (forward-compat),
+    falls back to keyword matching on `event_type` + `details`:
+    - `critical` / `fatal` → CRITICAL (magenta #e879f9)
+    - `error` / `fail`    → ERROR (red)
+    - `warn`              → WARNING (amber)
+    - otherwise           → INFO (blue)
+  * `parseDetails`: tries JSON.parse first; if that fails, parses a
+    tolerant `key=val key=val` form (handles quoted values). Plain
+    strings are surfaced as `{ message: ... }`.
+  * Stats header (StatChip strip): Total events, Errors, Warnings,
+    Critical (only renders when count > 0), Latest event age, plus a
+    tiny inline-SVG sparkline showing event count per minute for the
+    last 30 minutes (no recharts dep — avoids ResizeObserver test
+    headaches; the panel needs no chart library).
+  * Filter bar: text search (event_type + slug + token + strategy +
+    category + details), category select (all/system/trading/risk/ml/
+    security), severity select (all/info/warning/error/critical), date
+    range (from/to native date inputs), Clear-all button (renders only
+    when a filter is active), Refresh button, CSV + JSON export buttons.
+  * Audit table: shadcn/ui `Table` with sticky header. Columns:
+    Timestamp | Category | Event Type | Severity | Message | Age.
+    Each row is clickable → expands to reveal a `<pre>` with the
+    pretty-printed metadata JSON (full decoded details object + id /
+    token_id / slug / strategy / pnl / idempotency_key / timestamp
+    fields). Re-click collapses.
+  * Color-coded severity badges (INFO=blue, WARNING=amber, ERROR=red,
+    CRITICAL=magenta) per the task spec.
+  * Export:
+    - CSV: 12-column header (id, timestamp, datetime_utc, category,
+      event_type, severity, token_id, slug, strategy, pnl,
+      idempotency_key, details). All values CSV-escaped; quoted when
+      they contain commas / quotes / newlines.
+    - JSON: array of `{ ...log, severity, datetime_utc }` — preserves
+      every raw row + adds the inferred severity + ISO datetime for
+      downstream tooling.
+    - Both trigger a Blob download via `URL.createObjectURL` + a hidden
+      `<a download>` element + `setTimeout(URL.revokeObjectURL, 1000)`
+      for older-browser compatibility.
+  * Loading skeleton (8 shimmer lines), error state (AlertTriangle +
+    Retry button → calls `fetchLogs`), empty state (friendly message
+    distinguishing "no events at all" from "no events match filters").
+  * Used shadcn/ui `Button`, `Input`, `Table*` per spec. Used native
+    `<select>` for filter dropdowns — this matches the DecisionLedgerPanel
+    sibling-panel pattern exactly (consistent dark-dashboard styling
+    + trivially testable via `userEvent.selectOptions`). The shadcn
+    Radix-based Select is used elsewhere in the codebase but native
+    selects are the established convention for compact dark-theme filter
+    bars.
+  * Responsive: table scrolls horizontally inside its overflow-auto
+    container on mobile; the Age column hides below `md:`; the filter
+    bar wraps to multiple rows on narrow viewports.
+  * Accessibility: full ARIA labels on every interactive control
+    (`aria-label` on search input, filter selects, date inputs, export
+    buttons, expanded rows), `aria-expanded` on expanded rows, `role=
+    status` on the empty-state container.
+
+- Wired the panel into navigation:
+  * `src/components/Sidebar.tsx`: added `'system-audit'` to the
+    `NavSection` union; added a `{ id: 'system-audit', labelKey:
+    'nav.audit', label: 'Audit Log', shortLabel: 'Audit', icon: '📋',
+    group: 'system' }` NavItem at the end of the `system` group.
+  * `src/app/page.tsx`: added `const AuditLogPanel = lazyPanel(() =>
+    import('@/components/AuditLogPanel'), 'Loading Audit Log…')` to the
+    Wave-8 dynamic-import block (uses the existing `lazyPanel` helper
+    for ssr:false + skeleton); added a `system-audit` render case
+    wrapped in `<PanelErrorBoundary label="Audit Log">` and the
+    standard `scrollbar-thin` overflow wrapper.
+
+- Created `src/components/AuditLogPanel.test.tsx` (20 tests):
+  * Loading skeleton renders on mount before fetch resolves (title
+    + "Loading…" badge).
+  * Error state with Retry button on HTTP 500 + on fetch throw.
+  * Table renders after data loads — header row (Timestamp /
+    Category / Event Type / Severity / Message) + first row's
+    event_type visible. Verifies the fetch URL contains
+    `/api/audit/logs`, `limit=100`, and `XTransformPort=8080` (the
+    gateway-injected port).
+  * Empty state renders the friendly message when `logs: []`.
+  * Severity inference: with the 6-sample payload, asserts all four
+    tiers render (INFO≥1, WARN≥1, ERROR≥2 because auth_failure
+    matches 'fail' AND order_error matches 'error', CRIT≥1).
+  * Filter by severity: selecting ERROR keeps auth_failure +
+    order_error rows visible; hides mode_change, position_close,
+    weak_token_warning, critical_model_drift.
+  * Filter by category: selecting `trading` keeps position_close +
+    order_error; hides the others.
+  * Text search across event_type + slug + token + strategy +
+    category + details: typing `auth_failure` filters to the single
+    matching row; `insufficient_balance` matches the order_error row's
+    details substring.
+  * Clear button only renders when at least one filter is active.
+  * CSV and JSON export buttons render with `aria-label="Export CSV"`
+    and `"Export JSON"`.
+  * Export buttons disabled when no rows match the active filter.
+  * CSV export: stubs `URL.createObjectURL`, clicks the Export CSV
+    button, asserts createObjectURL was called once with a Blob whose
+    MIME is `text/csv`, then reads the Blob text and asserts it
+    contains the CSV header + `mode_change`.
+  * JSON export: same pattern, asserts MIME `application/json`,
+    JSON-parses the Blob, asserts array length === sampleLogs.length,
+    first item `event_type === 'mode_change'`, `severity === 'INFO'`
+    (verifying the inferred severity is preserved through export).
+  * Row expansion: click a row → metadata JSON `<pre>` appears with
+    `aria-label="Audit event metadata JSON"` containing the decoded
+    details (side, close_price, etc.); click again collapses.
+  * Expanded view renders the id / strategy / token_id label spans +
+    the strategy value `mm_avellaneda_stoikov`.
+  * Stats header: Total events = 6, StatChip labels Events: / Errors:
+    / Warnings: / Latest: / Critical: all present (Critical: only
+    renders when stats.criticals > 0 — the sample has 1 critical
+    event so the chip IS rendered).
+  * Polling cleanup on unmount — no leaked setState warnings.
+  * Test-infra note: stubDownload was initially over-mocking
+    `document.createElement` + `document.body.appendChild` which broke
+    React Testing Library's `render()` (which calls
+    `document.createElement('div')` internally) → "Target container is
+    not a DOM element" error. Fixed by stubbing ONLY
+    `URL.createObjectURL` + `URL.revokeObjectURL` (jsdom doesn't
+    define them natively) and letting the anchor's native `click()`
+    be a no-op (jsdom doesn't navigate on click). The Blob is then
+    inspected via `createObjectURL.mock.calls[0][0]` + `.text()` to
+    verify content.
+
+- Verification:
+  * `bun run lint` — clean (eslint exits 0, zero warnings).
+  * `bun run test src/components/AuditLogPanel.test.tsx` — all 20
+    tests pass (12.7s; "Not implemented: navigation to another
+    Document" warnings from the anchor click() are jsdom's standard
+    no-op navigation message, not test failures).
+  * `bun run test src/components/Sidebar.test.tsx` — 18/18 pass
+    (no regression from the new NavSection union member or NavItem).
+  * `bun run test` (full suite) — 452 of 459 pass. The 7 failures
+    are all in `RateLimitPanel.test.tsx` (a separate Wave's pre-
+    existing flaky test that uses `vi.useFakeTimers()` + React 19's
+    async act() pattern — reproduces in isolation independent of my
+    changes). Verified RateLimitPanel.test.tsx is an untracked new
+    file from another task; my changes are additive only
+    (AuditLogPanel.* new, Sidebar.tsx + page.tsx are additive
+    extensions).
+
+Stage Summary:
+- Created src/components/AuditLogPanel.tsx (~600 lines) — audit log
+  viewer with severity-inferred table, expandable metadata JSON,
+  category + severity + date + text-search filters, CSV + JSON export
+  of the filtered set, inline SVG severity timeline sparkline, 15s
+  visibility-aware auto-refresh, full loading / error / empty states.
+- Wired into Sidebar (added `'system-audit'` NavSection + NavItem with
+  📋 icon) and page.tsx (dynamic import via `lazyPanel` + PanelErrorBoundary
+  render case).
+- Created src/components/AuditLogPanel.test.tsx (20 tests) — loading /
+  error / empty states, table render, severity inference (all 4 tiers),
+  severity filter, category filter, text search, export button presence,
+  CSV + JSON export Blob content, row expansion + collapse, expanded
+  metadata fields, stats header, polling cleanup.
+- Lint: clean. Tests: 20/20 AuditLogPanel + 18/18 Sidebar (no regressions).
+
+---
+Task ID: W14-7
+Agent: full-stack-developer
+Task: Rate limit dashboard + analytics
+
+Work Log:
+- Read worklog tail (~150 lines — W13-6/W13-9/W14-4 batches) to baseline
+  the project state. Confirmed `recharts@2.15.4` is already installed
+  (W13-9) and `PnLBarChart` + `Sparkline` + `chartTheme` are exported
+  from `src/components/charts/`. Confirmed `ObservabilityPanel.tsx` is
+  the canonical data-heavy polling-panel pattern (dark `#13161e` card
+  surface, `#1f2335` borders, 30s visibility-aware polling, loading
+  skeleton + empty state + hard-error retry).
+- Read `mini-services/polymarket-bot/api/rate_limit.py` (shared
+  `limiter` singleton + 6 policy constants — READ/WRITE/HEAVY/TRADE/
+  ARBITRAGE/LIVE_ENABLE). Read `api/server.py` lines 720-820
+  (rate_limit_handler exception handler that derives `Retry-After`
+  + `X-RateLimit-Limit` from `exc.limit.limit.GRANULARITY.name`)
+  and lines 880-1010 (request_logging_middleware + rate_limit_headers
+  middleware that adds `X-RateLimit-Policy` to every response).
+  Confirmed `_record_rate_limit_hit` (prometheus counter) +
+  `_record_prometheus_request` (counter + histogram) are already
+  wired in both code paths.
+- Read `src/components/Sidebar.tsx` (W14-2 i18n refactor — NavSection
+  union + `labelKey`/`label` bilingual items + `useTranslation` hook
+  resolving via `src/messages/{en,fr}.json`). Read `src/app/page.tsx`
+  (lazyPanel pattern + per-section `<PanelErrorBoundary>` wrapper +
+  `<FadeIn>` transition).
+- Read `src/components/charts/Sparkline.tsx` (Recharts LineChart,
+  data: number[], `showLastDot` dot renderer, falls back to dashed
+  baseline SVG when data has < 2 samples) and `PnLBarChart.tsx`
+  (Recharts BarChart, supports horizontal + vertical layouts, per-Cell
+  sign-coloring). Read `charts/theme.ts` (chartTheme colors — primary
+  `#3b82f6`, success `#10b981`, danger `#ef4444`, warning `#f59e0b`,
+  info `#06b6d4`, muted `#6b7280`).
+
+- Created `mini-services/polymarket-bot/core/rate_limit_tracker.py`
+  (255 lines):
+  * `RateLimitHit` dataclass (timestamp, endpoint, method, client_ip,
+    limit) — stored in a `deque(maxlen=max_records)` so the tracker
+    bounds its memory footprint regardless of hit volume.
+  * `RateLimitTracker` class with `threading.Lock` guarding the deque
+    + `defaultdict(int)` request_counts dict.
+  * `record_hit(endpoint, method, client_ip, limit)` — appends to
+    deque + bumps `request_counts[endpoint]` counter.
+  * `record_request(endpoint, status)` — bumps
+    `request_counts["endpoint:status"]` (the dashboard's
+    "Most-Requested Endpoints" view filters out the `:` keys to
+    surface only the rate-limit-hit-volume view via `top_endpoints`).
+  * `get_stats()` snapshots the deque under the lock (O(N) copy where
+    N is bounded by max_records), then computes:
+      - `total_hits`: count of hits in the last 1h window.
+      - `hits_per_minute_rate`: hits / elapsed-minutes, clamped to
+        [1, 60] so a single hit at minute 0 doesn't read as 0.017/min.
+      - `hits_by_endpoint` (top 20, sorted descending).
+      - `hits_by_client` (top 10, sorted descending).
+      - `hits_per_minute` (keyed 1..60 where 1=newest, 60=oldest —
+        the dashboard labels the x-axis "60m ago ... 1m ago ... now").
+      - `top_endpoints` (raw-endpoint counters from `record_hit`,
+        top 20 — excludes the `:` keyed `record_request` entries so
+        the table reflects rate-limit-hit volume, not raw traffic).
+  * `reset()` for hermetic test isolation.
+  * Module-level singleton `rate_limit_tracker = RateLimitTracker()`
+    mirrors the pattern used by `core.cache` and
+    `core.prometheus_metrics`.
+  * Why a dedicated module (not extending prometheus): the existing
+    `rate_limit_hits_total` counter is a single monotonic counter
+    keyed on `endpoint` — fine for Grafana but lacks the per-IP /
+    per-limit / per-minute shape the dashboard renders. Adding those
+    as prometheus labels would balloon cardinality (per-IP especially
+    is a known footgun). A small in-memory tracker is the right tool
+    for a "last hour" view where a process restart is an acceptable
+    freshness boundary.
+
+- Wired `rate_limit_tracker` into `api/server.py` (4 edits):
+  * Added `from core.rate_limit_tracker import rate_limit_tracker`
+    import alongside the existing prometheus import block.
+  * In `rate_limit_handler` exception handler — added a try/except
+    block calling `rate_limit_tracker.record_hit(...)` with the
+    endpoint/method/client_ip/limit_str already computed for the
+    429 response. Best-effort: a tracker exception is logged via
+    `log.warning` but never changes the 429 response shape (the
+    rate-limit decision has already been made).
+  * In `request_logging_middleware` success path — added a
+    `rate_limit_tracker.record_request(endpoint, status)` call
+    right after `_record_prometheus_request` so the dashboard's
+    "Most-Requested Endpoints" table reflects ALL requests, not
+    just the rate-limited ones. Best-effort same contract.
+  * In `request_logging_middleware` 500 early-return path — same
+    `record_request` call with status=500 so the table surfaces
+    failure counts alongside 2xx successes.
+  * Added new route `GET /api/rate-limit/stats` (tags=["system"])
+    with `@limiter.limit(READ_LIMIT)` (30s polling is well under
+    the 120/min read cap). Returns `rate_limit_tracker.get_stats()`
+    directly. Intentionally NOT cached — a stale snapshot would
+    mask a live rate-limiting burst, which is exactly the scenario
+    the panel exists to surface.
+
+- Created `src/components/RateLimitPanel.tsx` (~480 lines):
+  * Polls `/api/rate-limit/stats` every 30s with visibility-aware
+    pause + immediate refresh on tab regain (same pattern as
+    ObservabilityPanel / useNotifications).
+  * 4 KPI cards: Total Hits (1h), Hit Rate, Top Endpoint, Top Client
+    — each with a Lucide icon, accent color tuned by severity
+    (amber for hits>0, red for rate>1/min, blue for endpoint,
+    emerald for client).
+  * Hits by Endpoint: vertical-layout `PnLBarChart` (warning-yellow
+    bars) — top 20 endpoints with hit counts.
+  * Hits per Minute (60m): `Sparkline` rendered with `width="100%"`
+    + height=220 — shows the rate-of-rate-limiting over the last
+    hour.
+  * Top Rate-Limited Endpoints table: per-endpoint row with a
+    proportional amber bar + count, max-h-72 with `scrollbar-thin`.
+  * Top Rate-Limited Clients table: per-IP row with a proportional
+    emerald bar + count.
+  * Most-Requested Endpoints table: all-requests view (uses the
+    `top_endpoints` field which surfaces raw-endpoint counters
+    incremented by record_hit, NOT the `endpoint:status` pairs
+    incremented by record_request).
+  * Rate-Limit Policy reference section: 6 policy cards (Read 120/min,
+    Write 30/min, Heavy 5/min, Trade 20/min, Arb 10/min, Live 3/min)
+    matching the W10-4 policy constants.
+  * Loading skeleton, empty state (with policy badges), and
+    hard-error retry affordance — mirrors ObservabilityPanel's
+    three-state pattern.
+
+- Wired into `src/components/Sidebar.tsx`:
+  * Added `'system-rate-limit'` to the `NavSection` union type.
+  * Added new nav item in the `system` group: `{ id:
+    'system-rate-limit', labelKey: 'nav.rate_limits', label: 'Rate
+    Limits', shortLabel: 'Limits', icon: '⏱', group: 'system' }`,
+    positioned between `system-safety` and `system-audit` so all
+    rate-related controls cluster together.
+- Wired into `src/messages/en.json` + `src/messages/fr.json`:
+  * Added `"rate_limits": "Rate Limits"` (en) and `"rate_limits":
+    "Limites Taux"` (fr) under the `nav` block. Also added the
+    pre-existing-but-missing `"audit"` key (`"Audit Log"` en /
+    `"Journal Audit"` fr) — the W14-4 Audit Log nav item was
+    referencing `nav.audit` which fell back to the key string in
+    the UI before this fix.
+- Wired into `src/app/page.tsx`:
+  * Added `const RateLimitPanel = lazyPanel(() => import('@/components/
+    RateLimitPanel'), 'Loading Rate Limits…')` alongside the other
+    System wave panels.
+  * Added the `{activeSection === 'system-rate-limit' && ...}` render
+    case (with `<PanelErrorBoundary label="Rate Limits">` wrapper +
+    `scrollbar-thin` overflow container) positioned between the
+    Audit Log case and the closing `</FadeIn>`.
+
+- Created `src/components/RateLimitPanel.test.tsx` (18 tests, 380
+  lines):
+  * Mocked `recharts.ResponsiveContainer` as a passthrough div
+    (same pattern as `charts/Charts.test.tsx`) so the BarChart +
+    Sparkline render their children directly without a real
+    ResizeObserver firing.
+  * Loading state: fetch never resolves → spinner renders, no KPI
+    labels.
+  * KPI rendering: each of the 4 KPI cards' label + value verified
+    after the first fetch resolves (Total Hits, Hit Rate, Top
+    Endpoint, Top Client).
+  * Formatting: total-hits formatted as localized integer ("42");
+    hit-rate formatted as "X.XX / min" ("0.70 / min").
+  * Empty state: when total_hits=0 + hits_by_endpoint={}, the
+    "No rate-limit hits in the last hour" message + policy badges
+    (Read/Write/Heavy/Trade/Arb/Live) render.
+  * Hard-error state: when fetch returns 500, the "Rate-limit stats
+    endpoint unavailable" message + Retry button render.
+  * Section headers + policy reference cards verified.
+  * Endpoint + client tables verified to contain expected rows
+    (using `getAllByText` for values that appear in both KPI card
+    AND table — `/api/orders` and `127.0.0.1`).
+  * Auto-refresh polling: `vi.useFakeTimers()` +
+    `act(async () => await vi.advanceTimersByTimeAsync(N))` to
+    drive the 30s interval deterministically. Verified:
+      - Initial fetch fires on mount.
+      - 30s advance triggers a second fetch.
+      - Updated payload (total_hits 42 → 99, rate 0.70 → 1.65) is
+        reflected in the rendered KPIs.
+  * Visibility-aware polling: when `document.hidden=true`, advancing
+        2 minutes triggers NO fetches; on `visibilitychange` event
+        with `hidden=false`, an immediate refresh-on-regain fetch
+        fires.
+  * Unmount cleanup: clearInterval runs without "setState on
+    unmounted component" warnings; advancing 60s post-unmount
+    triggers zero additional fetches.
+  * Manual Refresh button (aria-label "Refresh rate-limit stats")
+        fires an additional fetch outside the polling cadence.
+  * Authorization header propagation: `apiFetch` injects
+    `Authorization: Bearer <token>` into every request.
+  * NOTE: `waitFor` cannot be mixed with `vi.useFakeTimers()`
+    because waitFor itself relies on setTimeout — switched the
+    polling tests to `await act(async () => await
+    vi.advanceTimersByTimeAsync(N))` to flush the fetch microtask
+    + setState synchronously.
+
+- Created `mini-services/polymarket-bot/tests/test_rate_limit_tracker.py`
+  (21 tests, 350 lines):
+  * `TestRecordHit` (4 tests): metadata round-trips through
+    get_stats; endpoint counter increments; maxlen evicts oldest
+    (10-record cap → after 10 record_hit calls, only the last 5
+    endpoints remain in the recent-hits deque); distinct clients
+    are tracked separately.
+  * `TestGetStats` (8 tests): empty-state shape; expected keys
+    present (total_hits, hits_per_minute_rate, hits_by_endpoint,
+    hits_by_client, hits_per_minute, top_endpoints);
+    hits_per_minute buckets correctly (5 hits in current minute →
+    key 60 has value 5); caps endpoint map at 20; caps client map
+    at 10; filters out hits older than 1 hour; hit_rate is
+    hits/elapsed-minutes clamped to [1,60]; sorted descending.
+    (The Python-side `get_stats()` returns int keys for
+    hits_per_minute; FastAPI's JSON serializer converts to strings
+    on the wire — the test accepts either form.)
+  * `TestRecordRequest` (2 tests): keys by `"endpoint:status"` so
+    per-status breakdowns are tracked; the `:` keys are filtered
+    OUT of `top_endpoints` so the dashboard's "Top endpoints" table
+    reflects rate-limit-hit volume, not raw traffic.
+  * `TestThreadSafety` (3 tests): 8 threads × 250 record_hit calls
+    → final count is exactly 2000 (no lost increments under the
+    threading.Lock); same for record_request; mixed record_hit +
+    record_request + get_stats calls from 3 threads run for 100ms
+    without crashing.
+  * `TestReset` (2 tests): clears hits + request_counts.
+  * `TestSingleton` (2 tests): module-level `rate_limit_tracker`
+    is a RateLimitTracker instance; reset returns empty stats.
+  * Autouse fixture `_reset_singleton_per_test` resets the
+    module-level singleton before/after each test so direct-import
+    tests don't see state from prior tests.
+
+- Verification:
+  * `cd /home/z/my-project && bun run lint` — clean (eslint . exits 0).
+  * `cd /home/z/my-project && bun run test` — all 459 tests pass
+    (20 test files, including the new 18-test RateLimitPanel.test.tsx).
+    No regressions in existing tests (Sidebar.test.tsx still passes
+    with the new nav item — it uses `screen.getByText(label)` which
+    resolves via the i18n `t()` fallback to the key when missing,
+    but I added the `nav.rate_limits` key to en.json + fr.json so
+    the rendered label is the human-friendly "Rate Limits").
+  * `cd /home/z/my-project/mini-services/polymarket-bot && python
+    -m pytest tests/test_rate_limit_tracker.py -v` — all 21 tests
+    pass in 0.72s.
+  * Backend smoke test: `python -c "import api.server; print([r.path
+    for r in api.server.app.routes if 'rate-limit' in r.path])"`
+    confirms `/api/rate-limit/stats` is registered.
+  * Dev server log: no errors related to the new panel or route.
+
+Stage Summary:
+- Created core/rate_limit_tracker.py (255 lines — in-memory tracker
+  with thread-safe deque + defaultdict, get_stats() returns the 6-key
+  dashboard shape).
+- Modified api/server.py (5 edits — import; record_hit in
+  rate_limit_handler; record_request in success path + 500 path of
+  request_logging_middleware; new GET /api/rate-limit/stats route).
+- Created RateLimitPanel.tsx (480 lines — 4 KPI cards + endpoint bar
+  chart + per-minute sparkline + 2 tables + policy reference, 30s
+  visibility-aware polling).
+- Modified Sidebar.tsx (added `'system-rate-limit'` to NavSection
+  union + new nav item in `system` group with `nav.rate_limits`
+  labelKey).
+- Modified src/messages/en.json + fr.json (added `nav.rate_limits` +
+  previously-missing `nav.audit` keys).
+- Modified src/app/page.tsx (lazyPanel + render case wrapped in
+  PanelErrorBoundary + scrollbar-thin container).
+- Created RateLimitPanel.test.tsx (18 tests, 380 lines).
+- Created tests/test_rate_limit_tracker.py (21 tests, 350 lines).
+- Lint: clean. Frontend tests: 459/459 pass. Backend tests: 21/21 pass.
+
+---
+Task ID: W14-3
+Agent: general-purpose
+Task: CLI tool for bot management
+
+Work Log:
+- Read worklog tail (~last 200 lines — W13-6 push notifications, W13-9 Recharts viz) and `mini-services/polymarket-bot/api/server.py` head (50 lines + grepped all `@app.{get,post,put,delete}` routes — confirmed `/api/status`, `/api/positions`, `/api/orders`, `/api/trades`, `/api/health`, `/api/ml/retrain`, `/api/ml/metrics`, `/api/kill-switch/activate`, `/api/cache/stats` all exist; `/api/flags`, `/api/alerts`, `/api/circuit-breakers` are surfaced via sub-routers / referenced from frontend `src/lib/api-client.ts`).
+- Verified Step 1 was already complete: `requirements.txt` lines 30–32 already declare `rich>=13.7.0,<14.0.0` and `typer>=0.12.0,<1.0.0` (added by an earlier wave). Confirmed installed versions: `typer 0.23.1`, `rich` (no `__version__` attr, but import succeeds), `httpx 0.28.1`.
+- Created `mini-services/polymarket-bot/cli.py` (verbatim from task spec — 14 typer commands: status, balance, positions, orders, trades, health, retrain, kill-switch, flags, flag, alerts, metrics, circuit-breakers, cache). Module-level `API_URL` + `API_TOKEN` read from `BOT_API_URL` / `API_TOKEN` / `BOT_API_TOKEN` env vars; `_headers()` returns `Bearer` auth header (exits 1 if token missing); `_get` / `_post` helpers handle 401 / 429 / ConnectError → `typer.Exit(1)` and propagate `HTTPStatusError` for other 4xx/5xx. Confirmed `python cli.py --help` lists all 14 commands (Typer auto-converts `kill_switch` → `kill-switch` and `circuit_breakers` → `circuit-breakers`).
+- Added `"cli": "cd mini-services/polymarket-bot && python cli.py"` to `/home/z/my-project/package.json` scripts (after `build-storybook`).
+- Created `tests/test_cli.py` (42 tests, 513 lines) covering:
+  * App existence + 14 commands registered (derived from `registered_commands[i].callback.__name__` since typer 0.23 stores `name=None` and infers at click-convert time) + `--help` output lists every command + app description renders.
+  * `_headers()` — Bearer auth header when token set, `Exit(1)` when empty.
+  * `_get()` — URL/headers/params/timeout shape, parsed JSON return, params forwarding, 401 → Exit(1), 429 → Exit(1), 500 → `httpx.HTTPStatusError` propagates, `ConnectError` → Exit(1).
+  * `_post()` — URL/auth + Content-Type headers, body shape, empty-body default, parsed JSON return, ConnectError → Exit(1).
+  * Each of 14 commands rendered via `typer.testing.CliRunner` against a mocked `httpx.get` / `httpx.post` (FakeResponse stand-in exposing `status_code` + `json()` + `raise_for_status()`): empty-state paths, with-data table renders, P&L color, position-token truncation to 16 chars, trades `-n` / `--limit` default + override, kill-switch confirm flow (`y\n` activates + POSTs to `/api/kill-switch/activate`; `n\n` cancels without calling POST), flag get / set True (`--enabled`) / set False (`--no-enabled`), alerts severity-color mapping, metrics panel, circuit-breakers state-color mapping, cache hit-rate coloring.
+- Autouse `_stable_env` fixture pins `cli.API_TOKEN=test-token` and `cli.API_URL=http://test:8080` for every test so URL/header assertions are deterministic (overriding the conftest's `API_TOKEN=test-token-conftest` setdefault).
+- Verification:
+  * `python -m pytest tests/test_cli.py -v` — 42/42 pass (0.45s).
+  * `python -m pytest tests/` — 970 passed, 0 failed, 0 errors (64s) — includes my 42 new tests + 928 pre-existing tests. No regressions. (One flaky order-dependent migration test occasionally surfaces a false failure when run alongside specific sibling modules, but it passes 29/29 in isolation — pre-existing flake, unrelated to CLI changes.)
+  * `python cli.py --help` — renders cleanly with all 14 commands listed under "Commands" panel.
+  * `python cli.py status --help` / `trades --help` — per-command help renders with the `-n` / `--limit` option exposed on `trades` (default 20).
+
+Stage Summary:
+- Created mini-services/polymarket-bot/cli.py (14 commands)
+- Added typer + rich to requirements (already present from prior wave — verified at >=0.12.0 / >=13.7.0)
+- Created tests/test_cli.py (42 tests)
+- All tests passing (42/42 CLI; 970/970 full suite — no regressions)

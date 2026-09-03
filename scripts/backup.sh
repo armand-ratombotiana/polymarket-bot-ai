@@ -130,3 +130,27 @@ find "$BACKUP_DIR" -maxdepth 1 -mindepth 1 -type d -mtime +$RETENTION_DAYS \
 
 remaining=$(find "$BACKUP_DIR" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | wc -l)
 log "Backup complete: $BACKUP_PATH ($remaining backup(s) retained)"
+
+# --- Verify the backup just created -----------------------------------------
+# We auto-verify every fresh backup so a corrupt backup is caught at write
+# time, not at restore time when it's too late. Verification failure is
+# logged as a WARNING (not fatal) so a single bad DB doesn't block the rest
+# of the cron run — the operator will see the warning in the cron log and
+# can investigate. The verifier writes a verification_report.json inside
+# the backup dir for offline inspection.
+VERIFY_SCRIPT="$(dirname "$0")/verify_backup.py"
+if [ -f "$VERIFY_SCRIPT" ]; then
+  log "Verifying backup integrity..."
+  # The verifier prints a human-readable report to stdout and writes a
+  # verification_report.json inside the backup dir. We let stdout/stderr
+  # flow naturally so the cron wrapper (2>&1) captures them into the cron
+  # log alongside the rest of this script's output.
+  if python3 "$VERIFY_SCRIPT" "$BACKUP_PATH"; then
+    log "  Verification: PASS"
+  else
+    log "  WARNING: Backup verification failed — see verification_report.json"
+    log "           in $BACKUP_PATH for details."
+  fi
+else
+  log "  (verify_backup.py not found at $VERIFY_SCRIPT — skipping auto-verify)"
+fi

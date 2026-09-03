@@ -135,6 +135,8 @@ const ObservabilityPanel = lazyPanel(() => import('@/components/ObservabilityPan
 const RetentionPanel = lazyPanel(() => import('@/components/RetentionPanel'), 'Loading Retention…')
 const DecisionLedgerPanel = lazyPanel(() => import('@/components/DecisionLedgerPanel'), 'Loading Decision Ledger…')
 const LiveSafetyGatePanel = lazyPanel(() => import('@/components/LiveSafetyGatePanel'), 'Loading Safety Gate…')
+const AuditLogPanel = lazyPanel(() => import('@/components/AuditLogPanel'), 'Loading Audit Log…')
+const RateLimitPanel = lazyPanel(() => import('@/components/RateLimitPanel'), 'Loading Rate Limits…')
 
 // Modals
 import DepthChartModal from '@/components/DepthChartModal'
@@ -687,6 +689,24 @@ export default function Dashboard() {
               <PanelErrorBoundary label="Live Safety Gate">
               <div style={{ height: '100%', overflow: 'auto' }} className="scrollbar-thin">
                 <LiveSafetyGatePanel />
+              </div>
+              </PanelErrorBoundary>
+            )}
+
+            {/* ── System — Audit Log (W14-4) ─────────────────────────── */}
+            {activeSection === 'system-audit' && (
+              <PanelErrorBoundary label="Audit Log">
+              <div style={{ height: '100%', overflow: 'auto' }} className="scrollbar-thin">
+                <AuditLogPanel />
+              </div>
+              </PanelErrorBoundary>
+            )}
+
+            {/* ── System — Rate Limits (W14-7) ───────────────────────── */}
+            {activeSection === 'system-rate-limit' && (
+              <PanelErrorBoundary label="Rate Limits">
+              <div style={{ height: '100%', overflow: 'auto' }} className="scrollbar-thin">
+                <RateLimitPanel />
               </div>
               </PanelErrorBoundary>
             )}

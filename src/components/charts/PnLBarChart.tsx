@@ -151,7 +151,7 @@ export default function PnLBarChart({
               dataKey="name"
               {...axisProps}
               interval={0}
-              tick={{ fill: chartTheme.axis, fontSize: 9, angle: -25, textAnchor: 'end' }}
+              tick={{ fill: chartTheme.axis, fontSize: 9, angle: -25, textAnchor: 'end' } as any}
               height={48}
             />
             <YAxis
@@ -172,7 +172,7 @@ export default function PnLBarChart({
         <Bar
           dataKey="value"
           radius={isVertical ? [0, 3, 3, 0] : [3, 3, 0, 0]}
-          maxBarWidth={48}
+          maxBarSize={48}
           isAnimationActive={true}
           animationDuration={400}
         >
