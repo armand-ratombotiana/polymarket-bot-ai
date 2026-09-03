@@ -31,7 +31,7 @@ export function getWsUrl(): string {
 }
 export function getApiToken(): string {
   if (typeof window !== 'undefined') { const s = window.localStorage.getItem('polymarket_api_token'); if (s) return s }
-  return process.env.NEXT_PUBLIC_API_TOKEN ?? 'change_me_generate_a_strong_token'
+  return process.env.NEXT_PUBLIC_API_TOKEN ?? 'I76FCamSbBw0e1r_V0RRX81uG-3DUCS_pofbYNC-RgHO3x9b3DIovCPe01iDREBT'
 }
 export function authHeaders(extra?: Record<string, string>): Record<string, string> {
   const h: Record<string, string> = { ...(extra ?? {}) }; const t = getApiToken(); if (t) h['Authorization'] = `Bearer ${t}`; return h

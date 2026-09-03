@@ -363,11 +363,8 @@ class SignalTraderStrategy(BaseStrategy):
             strategy=self.name,
             edge=kelly_numerator,
             confidence=confidence,
-            liquidity={
-                'best_bid_size': book.bids[0].size if book.bids else 0,
-                'best_ask_size': book.asks[0].size if book.asks else 0,
-                'mid': mid,
-            },
+            liquidity=max(book.bids[0].size if book.bids else 0,
+                          book.asks[0].size if book.asks else 0) * mid,
             existing_exposure=store.positions.get(
                 token_id,
                 type(store.positions.get(token_id, None)).__new__(

@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-09-03T09:14:35.591369+00:00",
+  "generated_at": "2026-09-03T09:42:27.824189+00:00",
   "backend": "SQLite3 WAL (Cold Standby)",
   "is_clean": true,
   "tables": {
@@ -15,13 +15,13 @@
     },
     "fundamental_news": {
       "engine_accepted_writes": 0,
-      "storage_rows": 100,
-      "drift": -100
+      "storage_rows": 110,
+      "drift": -110
     },
     "ml_feature_store": {
       "engine_accepted_writes": 0,
-      "storage_rows": 16181,
-      "drift": -16181
+      "storage_rows": 16192,
+      "drift": -16192
     },
     "strategy_decisions": {
       "engine_accepted_writes": 0,

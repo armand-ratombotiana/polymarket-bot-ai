@@ -45,7 +45,24 @@ interface DeepAnalysisData {
   timestamp: number
 }
 
-export default function DeepAnalysisView({ onOpenChart }: { onOpenChart?: (m: { tokenId: string; slug: string }) => void }) {
+interface DeepAnalysisViewProps {
+  /**
+   * Open the price-history modal (MarketChartModal) for a market.
+   * Wired in page.tsx to `setChartMarket`.
+   */
+  onOpenChart?: (m: { tokenId: string; slug: string }) => void
+  /**
+   * W13 — One-click trade shortcut. Opens the DepthChartModal
+   * (depth book + trade ticket) pre-loaded with the clicked row's
+   * token_id and slug. Mirrors the `onSelectMarket` callback pattern
+   * used by MarketsPanel / MarketScreener — same two-arg signature
+   * `(tokenId, slug) => void`. Wired in page.tsx to
+   * `setSelectedMarket`, which mounts the DepthChartModal.
+   */
+  onSelectMarket?: (tokenId: string, slug: string) => void
+}
+
+export default function DeepAnalysisView({ onOpenChart, onSelectMarket }: DeepAnalysisViewProps) {
   const [data, setData] = useState<DeepAnalysisData | null>(null)
   const [selectedToken, setSelectedToken] = useState<string | null>(null)
   const [singleAnalysis, setSingleAnalysis] = useState<MarketAnalysis | null>(null)
@@ -227,6 +244,8 @@ export default function DeepAnalysisView({ onOpenChart }: { onOpenChart?: (m: { 
                 <th scope="col" className="text-center">Regime Tag</th>
                 <th scope="col" className="text-right">OFI Flow</th>
                 <th scope="col" className="text-center">Action</th>
+                {/* W13 — One-click Trade column. Opens DepthChartModal for the row's market. */}
+                <th scope="col" className="text-center">Trade</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-[#1f2335]/50">
@@ -277,6 +296,25 @@ export default function DeepAnalysisView({ onOpenChart }: { onOpenChart?: (m: { 
                       >
                         {opp.suggested_action?.replace('TRADE_', '') || 'MONITOR'}
                       </span>
+                    </td>
+                    {/* W13 — One-click Trade button. Stops propagation so it does NOT
+                        re-trigger the row's `fetchSingleMarket` onClick; instead it
+                        invokes the onSelectMarket callback (same pattern as
+                        MarketsPanel) to mount the DepthChartModal pre-loaded with
+                        this row's token_id + slug. */}
+                    <td className="text-center py-1">
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          onSelectMarket && onSelectMarket(opp.token_id, opp.slug)
+                        }}
+                        disabled={!onSelectMarket}
+                        aria-label={`Open depth chart and trade ticket for ${rowTitle}`}
+                        title={onSelectMarket ? `Open depth chart and trade ticket for ${rowTitle}` : 'Trade not available'}
+                        className="btn btn-primary btn-xs font-bold shadow-md hover:shadow-cyan-500/20 px-2.5 py-0.5 rounded text-[10px] disabled:opacity-40 disabled:cursor-not-allowed disabled:shadow-none"
+                      >
+                        ⚡ Trade
+                      </button>
                     </td>
                   </tr>
                 )

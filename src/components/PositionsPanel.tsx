@@ -13,9 +13,14 @@ interface Props {
   // S1 — optional close handler. When provided, renders a "✕ Close" button
   // next to the existing Trade button for each position row.
   onClosePosition?: (tokenId: string) => void
+  // W12 — per-token_id price-flash direction map (mirrors useBot.priceFlashes).
+  // When present, the Mark (current_price) cell on each row picks up the
+  // `.price-up` / `.price-down` CSS class so the cell briefly flashes
+  // green/red on a tick move (cleared automatically by the hook after ~500ms).
+  priceFlashes?: Record<string, 'up' | 'down'>
 }
 
-export default function PositionsPanel({ positions, dailyPnl, onSelectMarket, onClosePosition }: Props) {
+export default function PositionsPanel({ positions, dailyPnl, onSelectMarket, onClosePosition, priceFlashes }: Props) {
   const [filterQuery, setFilterQuery] = useState('')
   const [outcomeFilter, setOutcomeFilter] = useState<'ALL' | 'YES' | 'NO'>('ALL')
   const [sortBy, setSortBy] = useState<'size' | 'pnl' | 'market'>('size')
@@ -202,6 +207,9 @@ export default function PositionsPanel({ positions, dailyPnl, onSelectMarket, on
                 const utilizationPct = Math.min((p.total_invested / MAX_PER_MARKET) * 100, 100)
                 const isYes = p.yes_shares > 0
                 const isNearCap = utilizationPct > 80
+                // W12 — Resolve this row's price-flash direction once per render.
+                // Undefined (no flash active) yields no extra class on the Mark cell.
+                const flashDir = priceFlashes?.[p.token_id]
 
                 return (
                   <tr
@@ -252,8 +260,10 @@ export default function PositionsPanel({ positions, dailyPnl, onSelectMarket, on
                     </td>
 
                     {/* S1 — Mark (current price). Falls back to "—" when the
-                        backend hasn't populated current_price yet. */}
-                    <td className="mono text-right text-[#dde1ed] text-xs">
+                        backend hasn't populated current_price yet.
+                        W12: apply .price-up / .price-down when a flash is
+                        active for this row's token_id. */}
+                    <td className={`mono text-right text-[#dde1ed] text-xs${flashDir === 'up' ? ' price-up' : flashDir === 'down' ? ' price-down' : ''}`}>
                       {typeof p.current_price === 'number'
                         ? `$${p.current_price.toFixed(3)}`
                         : <span className="text-[#3e4560]">—</span>}

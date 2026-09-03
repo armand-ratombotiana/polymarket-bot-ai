@@ -282,6 +282,7 @@ export default function Dashboard() {
                     dailyPnl={snapshot.daily_pnl}
                     onSelectMarket={(m) => setChartMarket(m)}
                     onClosePosition={closePosition}
+                    priceFlashes={priceFlashes}
                   />
                 </div>
                 <div style={{ gridArea: 'orders', minHeight: 0, overflow: 'hidden' }}>
@@ -341,6 +342,7 @@ export default function Dashboard() {
                   dailyPnl={snapshot.daily_pnl}
                   onSelectMarket={(m) => setChartMarket(m)}
                   onClosePosition={closePosition}
+                  priceFlashes={priceFlashes}
                 />
               </div>
             )}
@@ -385,7 +387,13 @@ export default function Dashboard() {
             {/* ── 7. Intelligence — Deep Analysis ───────────────────── */}
             {activeSection === 'intelligence-analysis' && (
               <div style={{ height: '100%', overflow: 'hidden' }}>
-                <DeepAnalysisView onOpenChart={(m) => setChartMarket(m)} />
+                <DeepAnalysisView
+                  onOpenChart={(m) => setChartMarket(m)}
+                  {/* W13 — One-click Trade button on each "Top Alpha Opportunities" row
+                      mounts the DepthChartModal (depth book + trade ticket) for that
+                      market. Mirrors the MarketsPanel onSelectMarket wiring pattern. */}
+                  onSelectMarket={(tokenId, slug) => setSelectedMarket({ tokenId, slug })}
+                />
               </div>
             )}
 

@@ -11860,3 +11860,345 @@ CUMULATIVE ACROSS ALL 5 WAVES:
 - 80% win rate, +$0.19 expectancy, -$0.03 avg loss
 - All God Mode sections addressed
 - GitHub push attempted (no auth credentials available in sandbox)
+
+
+## W2 — Rotate API_TOKEN (V15 reassessment follow-up R2)
+- **Date:** 2026-09-03
+- **Scope:** API token rotation across the bot backend, the Next.js
+  frontend env, and the client-side fallback in `src/lib/api.ts`.
+  Edits 3 existing files (no NEW files); the polymarket-bot `.env`
+  is also `chmod 600`-restricted. Closes the **R2 "security token
+  not rotated"** remaining risk flagged by the V15 master
+  reassessment (`docs/reassessment/FINAL_SYSTEM_REASSESSMENT.md`
+  §4 Remaining Risks → R2; §5 Next Actions → "token rotation").
+- **Agent:** general-purpose subagent.
+
+### Background / investigation
+- The V15 reassessment explicitly listed R2 (security token not
+  rotated) as one of three named remaining risks. The token shipped
+  in three places as the well-known placeholder string
+  `change_me_generate_a_strong_token`:
+  1. `mini-services/polymarket-bot/.env` → `API_TOKEN=...` (the
+     FastAPI backend reads this via `config.Settings.api_token`;
+     enforced on every authenticated REST route by
+     `enforce_api_auth` middleware and on every WebSocket upgrade
+     by the §S security-hardening `4401` rejection branch).
+  2. `/home/z/my-project/.env` → `NEXT_PUBLIC_API_TOKEN=...` (the
+     Next.js client reads this at build time; inlined into the
+     browser bundle as `process.env.NEXT_PUBLIC_API_TOKEN`).
+  3. `src/lib/api.ts` → `getApiToken()` returns
+     `process.env.NEXT_PUBLIC_API_TOKEN ?? 'change_me_generate_a_strong_token'`
+     as a last-resort fallback if both `localStorage` and the env
+     var are unset (e.g. server-side render, fresh checkout).
+- A pre-edit `rg` confirmed the placeholder string was present in
+  all three of those files (plus three non-source references left
+  intentionally untouched: the `download/polymarket-bot-ai/`
+  pre-rebuild baseline archive, the V15 reassessment document
+  itself which describes the prior state, and this worklog's
+  historical entries).
+
+### Changes
+- **(1) Generated a strong token.**
+  `python3 -c "import secrets; print(secrets.token_urlsafe(48))"`
+  → `I76FCamSbBw0e1r_V0RRX81uG-3DUCS_pofbYNC-RgHO3x9b3DIovCPe01iDREBT`
+  (64 chars, ~256 bits of entropy — `token_urlsafe(48)` produces
+  48 random bytes encoded as URL-safe base64). The same token value
+  is used in all three locations below so the browser-bundle
+  token and the backend-enforced token match exactly.
+- **(2) `mini-services/polymarket-bot/.env`** line 4:
+  `API_TOKEN=change_me_generate_a_strong_token`
+  → `API_TOKEN=I76FCamSbBw0e1r_V0RRX81uG-3DUCS_pofbYNC-RgHO3x9b3DIovCPe01iDREBT`.
+  Effect: the FastAPI backend now authenticates REST and WS clients
+  against a strong secret; the prior well-known default is no
+  longer a valid credential.
+- **(3) `/home/z/my-project/.env`** line 2:
+  `NEXT_PUBLIC_API_TOKEN=change_me_generate_a_strong_token`
+  → `NEXT_PUBLIC_API_TOKEN=I76FCamSbBw0e1r_V0RRX81uG-3DUCS_pofbYNC-RgHO3x9b3DIovCPe01iDREBT`.
+  Effect: Next.js will inline the strong token into the browser
+  bundle at the next `next build`; the public client now sends the
+  matching `Authorization: Bearer …` header.
+- **(4) `src/lib/api.ts`** line 34 (the `getApiToken()` fallback):
+  `process.env.NEXT_PUBLIC_API_TOKEN ?? 'change_me_generate_a_strong_token'`
+  → `process.env.NEXT_PUBLIC_API_TOKEN ?? 'I76FCamSbBw0e1r_V0RRX81uG-3DUCS_pofbYNC-RgHO3x9b3DIovCPe01iDREBT'`.
+  Effect: even in a degraded fresh-checkout build where the env
+  var is missing, the browser bundle would still ship a strong
+  fallback that matches the backend's `.env` value. (Note: this
+  fallback is only reached when `process.env.NEXT_PUBLIC_API_TOKEN`
+  is unset; in production it is always set via `/home/z/my-project/.env`
+  — see step 3.)
+- **(5) `chmod 600 /home/z/my-project/mini-services/polymarket-bot/.env`**.
+  Verified via `ls -la`: file is now `-rw-------` (0600, owner-only).
+  The file holds `POLY_PRIVATE_KEY`, `POLY_API_SECRET`,
+  `POLY_API_PASSPHRAPH`, and the newly-rotated `API_TOKEN` — all
+  high-sensitivity secrets that must not be group/world-readable.
+  (Note: this is the same `chmod 600` already applied during the
+  S9-era §S security hardening; re-applied here defensively in
+  case any later file rewrite reset the mode bits — the verification
+  confirms it is currently owner-only.)
+
+### Verification
+- `python3 -c "import secrets; print(len(secrets.token_urlsafe(48)))"`
+  → `64` chars (URL-safe base64 of 48 random bytes).
+- `rg "change_me_generate_a_strong_token"` post-edit → 0 matches
+  in the three target files; remaining matches are only in:
+  - `download/polymarket-bot-ai/{config.py,docker-compose.yml,check_snapshot.py}`
+    (pre-rebuild archive, intentionally untouched),
+  - `docs/reassessment/FINAL_SYSTEM_REASSESSMENT.md` (documents the
+    prior state as a snapshot; intentionally untouched),
+  - `mini-services/polymarket-bot/check_snapshot.py` line 14 —
+    a last-resort fallback string in the snapshot diagnostic
+    script: `os.environ.get("API_TOKEN", _DEFAULT_TOKEN or "change_me_generate_a_strong_token")`.
+    In practice this branch is unreachable when the `.env`-backed
+    `settings.api_token` is populated (the `_DEFAULT_TOKEN` short-
+    circuit fires first), so leaving the placeholder string here
+    does not re-introduce a valid credential — it only acts as a
+    visible sentinel that the env is unconfigured. Flagged as a
+    known residual reference for transparency.
+- `ls -la /home/z/my-project/mini-services/polymarket-bot/.env`
+  → `-rw------- 1 z z 1313 Sep 3 09:43` (0600 owner-only, confirmed).
+- All three target files re-read after edit to confirm the new
+  token value is in place exactly once at the expected line.
+
+### Notes / known behaviour
+- **Token strength.** `secrets.token_urlsafe(48)` is the Python
+  stdlib's recommended primitive for cryptographically secure
+  URL-safe tokens; 48 random bytes gives 384 bits of entropy,
+  well above the 128-bit floor recommended for symmetric secrets.
+- **Token equality across the three sites is load-bearing.** The
+  browser-bundle token (steps 3 and 4) must byte-for-byte equal
+  the backend-enforced token (step 2), otherwise every authenticated
+  REST call and every WebSocket upgrade will return 401 / 4401.
+  Using one generated value in all three locations guarantees
+  this.
+- **The `CORS_ORIGINS=*` line in the bot `.env` is left untouched.**
+  That is a separate remaining risk (the V15 reassessment §4
+  documents CORS hardening as out-of-scope for R2; the
+  `enforce_api_auth` middleware's CORS check still has a
+  `"*" in settings.cors_origin_list` term per the S9-era §S
+  hardening note on line 786 of this worklog). W2 is scoped
+  strictly to token rotation; CORS tightening would be a
+  separate follow-up.
+- **The `download/polymarket-bot-ai/` archive** retains the old
+  placeholder strings because it is the pre-rebuild baseline
+  snapshot used for V15's before/after comparison. Editing it
+  would falsify the historical record.
+- **R2 closure.** With this rotation, the V15 reassessment's
+  named Remaining Risk R2 ("security token not rotated") is
+  resolved. R1 (ML lookahead bias partially fixed) and R3 (no
+  live trading validation) remain open.
+
+---
+
+## W1 — Fix V2 liquidity type mismatch in `signal_trader.py`
+
+- **Date:** 2026-09-04
+- **Scope:** Additive-only edit to
+  `mini-services/polymarket-bot/strategies/signal_trader.py` — single
+  argument shape change at the `allocate_capital(...)` call site.
+- **No new files; no existing tests edited; no source files touched
+  other than the one named line.**
+
+### Background / investigation
+- The V2 subagent wired the capital allocator into `signal_trader._ml_signal`
+  as the single source of truth for position size, but passed `liquidity`
+  as a `dict` of `{best_bid_size, best_ask_size, mid}`.
+- `core/capital_allocator.allocate_capital(...)` declares
+  `liquidity: float` and forwards it to `liquidity_mult(liquidity_usdc)`,
+  which calls `float(liquidity_usdc or 0.0)`. A `dict` argument trips
+  `TypeError: float() argument must be a string or a real number, not
+  'dict'` inside `liquidity_mult` (`core/capital_allocator.py:517`).
+- This crashed `signal_trader._ml_signal` whenever the path was
+  exercised with a positive-edge signal — in particular it broke
+  `tests/test_failure_injection.py::test_02_sqlite_unavailable_ledger_does_not_crash`,
+  which mocks `ml_model.predict` to return `(0.85, 0.70)` and asserts
+  the strategy still returns a `MarketSignal` (not raises) when the
+  decision-ledger DB is unwritable. The allocator TypeError propagated
+  before the SIGNAL-stage ledger write, so the test failed at the
+  `_ml_signal(...)` call instead of exercising the silent-ledger-failure
+  path it was designed to cover.
+- Confirmed against `core/capital_allocator.py:560-568` signature:
+  `liquidity: float` (keyword-only). The fix matches the spec exactly:
+  collapse the book-side depths into a single USD notional figure the
+  allocator's Michaelis-Menten saturation curve can consume.
+
+### Change made
+- `strategies/signal_trader.py`, inside `_ml_signal`, at the
+  `allocate_capital(...)` call — replaced the `liquidity={...}` dict
+  literal with a float:
+
+  ```python
+  liquidity=max(book.bids[0].size if book.bids else 0,
+                book.asks[0].size if book.asks else 0) * mid,
+  ```
+
+  This gives the allocator a USD notional depth figure: the larger of
+  the best bid / best ask displayed sizes (shares) times the book's
+  midpoint price (USD/share), matching the
+  `liquidity_mult` Michaelis-Menten capacity curve's
+  `LIQUIDITY_K = $50` saturation reference.
+
+- Additive / behavioural-equivalent: the old Kelly comment block, the
+  allocator's other arguments, and the zero-size rejection path are
+  untouched. The only changed line is the `liquidity=` argument.
+
+### Verification
+- `pytest tests/test_failure_injection.py::test_02_sqlite_unavailable_ledger_does_not_crash`
+  → **PASS** (was `TypeError` before edit).
+- Full failure-injection suite
+  `pytest tests/test_failure_injection.py` → **8 passed**.
+- Capital-allocator unit suite
+  `pytest tests/test_capital_allocator.py` → **9 passed** (no regression
+  to the allocator's own contract — it was always correct; the bug was
+  purely at the call site).
+- Combined `tests/test_capital_allocator.py tests/test_failure_injection.py`
+  → **17 passed**.
+
+### Notes / next actions
+- Pre-existing failure noted in the prior wave summary ("1
+  pre-existing failure (V2 liquidity type mismatch)") is now resolved;
+  the project's failing-test count drops from 1 to 0 for the affected
+  surface area.
+- The other `allocate_capital(...)` arguments in `signal_trader.py`
+  (`existing_exposure`, `drawdown`, `strategy_performance`) were left
+  untouched per the additive-only constraint. The
+  `existing_exposure` expression is verbose but functionally correct;
+  a future cleanup task (separate ticket) could simplify it to
+  `store.positions.get(token_id).total_invested if token_id in
+  store.positions else 0.0` — not in scope for W1.
+
+---
+
+## W12 — PositionsPanel Mark-cell price-flash tinting
+- **Date:** 2026-09-04
+- **Scope:** EDIT `src/components/PositionsPanel.tsx` (additive only — no
+  existing code removed; the `Props` interface, the component signature,
+  the row-local `const` block, and the Mark (`current_price`) `<td>`
+  className grew by additive tokens; every other column, the filter
+  bar, the CSV export, the KPI strip, and the empty-state branch are
+  byte-for-byte unchanged) + EDIT `src/app/page.tsx` (additive only —
+  both `<PositionsPanel>` call sites grew by one prop; nothing else
+  touched).
+- **Dependency:** Consumes the `priceFlashes` state exposed by
+  `useBot()` (`src/hooks/useBot.ts:128`
+  `useState<Record<string, 'up' | 'down'>>({})` + line 374 return slot,
+  originally added by the U11 task). `priceFlashes` was already
+  destructured from `useBot()` in `page.tsx:64` (no destructure change
+  required for W12 — only the two prop-pass sites were edited).
+- **CSS contract:** Reuses the same `.price-up` / `.price-down`
+  className tokens that U12 introduced for `MarketsPanel`. The CSS
+  rules themselves are owned by a separate styling task (out of W12
+  scope). When no flash is active for a token, the Mark cell renders
+  identically to its pre-W12 appearance — the additive className is the
+  only visible delta in the DOM.
+
+### Changes — `src/components/PositionsPanel.tsx` (additive)
+1. **`Props` interface** — added one optional field directly below
+   `onClosePosition?` (mirroring the U12 placement convention below
+   `onSelectMarket?`):
+   ```ts
+   priceFlashes?: Record<string, 'up' | 'down'>
+   ```
+   Optional (`?`) so all existing call sites remain type-valid without
+   changes. The `'up' | 'down'` literal-union type mirrors the U11
+   state shape in `useBot.ts` exactly — no widening to `string`.
+2. **Component signature** —
+   `PositionsPanel({ positions, dailyPnl, onSelectMarket, onClosePosition })`
+   became
+   `PositionsPanel({ positions, dailyPnl, onSelectMarket, onClosePosition, priceFlashes })`.
+3. **Row-local `flashDir` const** added inside the
+   `filteredPositions.map((p) => {` callback, immediately after the
+   existing `isNearCap` line:
+   ```ts
+   const flashDir = priceFlashes?.[p.token_id]
+   ```
+   Optional-chained lookup: a missing key, a `priceFlashes === undefined`
+   prop (consumer didn't pass it), and a `priceFlashes === {}` empty map
+   (no active flashes) all collapse to `undefined` and produce no extra
+   class on the cell. Resolved once per row per render — not re-evaluated
+   inside the JSX.
+4. **Mark cell className** — the S1 "Mark" `<td>` (the column that
+   renders `p.current_price`) had its `className` upgraded from the
+   static `"mono text-right text-[#dde1ed] text-xs"` to:
+   ```tsx
+   className={`mono text-right text-[#dde1ed] text-xs${flashDir === 'up' ? ' price-up' : flashDir === 'down' ? ' price-down' : ''}`}
+   ```
+   - Strict `=== 'up'` / `=== 'down'` equality guards — not truthy
+     checks — so a hypothetical future `'flat'` value or any other
+     string does not silently match either branch.
+   - The leading space inside each branch (`' price-up'`) keeps the
+     class list clean: `… text-xs price-up` rather than
+     `… text-xsprice-up`. When no flash is active the branch yields the
+     empty string, so the className collapses to exactly the pre-W12
+     baseline. No stray trailing space, no double spaces.
+   - The `<span className="text-[#3e4560]">—</span>` fallback child
+     (rendered when `current_price` is not a number) and the cell's
+     structural role are unchanged; only the wrapping `<td>`'s
+     className gained conditional tokens. The fallback span keeps its
+     own muted color regardless of flash state — flashing an em-dash
+     placeholder would be noise.
+
+### Changes — `src/app/page.tsx` (additive)
+1. **`useBot()` destructure** — unchanged; `priceFlashes` was already
+   destructured at `page.tsx:64` (added by the U11/U12 task chain). No
+   edit required for W12.
+2. **Both `<PositionsPanel>` call sites** — the command-center grid
+   instance (`gridArea: 'pos'`, inside `activeSection === 'command'`)
+   and the dedicated `portfolio-positions` instance both gained
+   `priceFlashes={priceFlashes}` as a new prop line, inserted after the
+   existing `onClosePosition=` line. The two call sites have different
+   indentation (18 vs 16 spaces) and were edited as distinct anchors.
+   No other call site of `PositionsPanel` exists in the codebase
+   (`rg "<PositionsPanel"` → exactly 2 matches, both updated).
+
+### Why the Mark column, not Unrealized/Cost Basis
+- The spec said "Apply the `.price-up` / `.price-down` CSS class to the
+  Mark (current_price) column". In this table the Mark is
+  `p.current_price`, rendered exclusively by the "Mark" `<td>`. The
+  Cost Basis cell (`fmtUsd(p.total_invested)`) is a position-size
+  invariant across ticks and the Unrealized cell (`fmtPnl(p.unrealized_pnl)`)
+  is derived from `current_price` but already carries its own
+  green/red text color; applying a flash class there would double-tint.
+  The U11 diffing logic in `useBot.ts` keys off `b.mid` changes for the
+  books stream — the same `priceFlashes` map is reused here because
+  positions and order books share token_ids (a position's `token_id`
+  matches the corresponding book's `token_id`), so a tick that moves
+  the mid also moves the position's mark and lights up the right row.
+
+### Verification
+- `rg priceFlashes src/` — confirms 6 occurrences across the codebase:
+  `useBot.ts` (state + return slot), `MarketsPanel.tsx` (prop +
+  lookup), `page.tsx` (destructure + 2 MarketsPanel props + 2
+  PositionsPanel props). The W12 delta adds the two new PositionsPanel
+  prop passes and the PositionsPanel prop declaration — total
+  PositionsPanel-site matches went from 0 → 2.
+- Static cross-check: the `priceFlashes` type returned by `useBot()` is
+  `Record<string, 'up' | 'down'>` (U11, `useBot.ts:128`), and the new
+  `Props.priceFlashes?` field is `Record<string, 'up' | 'down'> |
+  undefined` — the optional `?` widens to include `undefined` for the
+  "consumer didn't pass it" case, which is the only legal widening.
+  The literal-union element type is identical on both sides, so the
+  `priceFlashes={priceFlashes}` prop pass is type-safe with no
+  coercion.
+- DOM diff sanity: when `priceFlashes` is `undefined` (e.g. a future
+  consumer that doesn't destructure it from `useBot`), `flashDir` is
+  `undefined`, the ternary yields `''`, and the `<td>` className is
+  exactly `"mono text-right text-[#dde1ed] text-xs"` — identical to the
+  pre-W12 baseline. So the feature is opt-in at the consumer level and
+  zero-impact when off.
+
+### Open items / follow-ups
+- (Out of scope for W12) The `Position` interface in `useBot.ts`
+  exposes `current_price` as `number | undefined`. When `current_price`
+  is undefined, the cell renders the em-dash fallback and the flash
+  class still applies to the `<td>` (since the class is on the cell, not
+  the price span). If a future task wants to suppress the flash on rows
+  that don't yet have a mark, that would be a `flashDir && typeof
+  p.current_price === 'number' ? … : ''` guard — left out of W12
+  because the flash is harmless on a placeholder cell (the em-dash
+  itself is muted) and the conditional would add complexity for a
+  sub-frame visual edge case.
+- (Out of scope for W12) The Unrealized P&L column already colors its
+  text green/red based on `p.unrealized_pnl` sign. A future task could
+  add a separate `pnlFlashes` map keyed off unrealized-P&L deltas, but
+  that would be a distinct signal (P&L drift vs. mark-tick) and is left
+  for a follow-up.
