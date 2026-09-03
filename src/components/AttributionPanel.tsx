@@ -51,6 +51,7 @@ import {
   Database,
   Minus,
 } from 'lucide-react'
+import { PnLBarChart } from '@/components/charts'
 
 // ── Types ────────────────────────────────────────────────────────────────
 interface AttributionBucket {
@@ -740,7 +741,49 @@ export default function AttributionPanel() {
                 </span>
               </div>
 
-              {/* Waterfall bars */}
+              {/* W13-9 — Recharts bar chart summarising each dimension's total
+                  P&L. Complements the cumulative waterfall track below with a
+                  proper responsive chart (bars colored green/red by sign). */}
+              <div className="mb-4">
+                <div className="flex items-center justify-between mb-1.5">
+                  <span className="text-[9.5px] uppercase tracking-wider text-[#5a637a] font-bold">
+                    Dimension P&amp;L — Recharts
+                  </span>
+                  <span className="text-[9px] text-[#5a637a] mono">
+                    green=+ / red=−
+                  </span>
+                </div>
+                <PnLBarChart
+                  data={DIMENSIONS.map((dim) => ({
+                    name: dim.label,
+                    value: sumDimensionPnl(data[dim.key] ?? []),
+                  }))}
+                  height={180}
+                  layout="horizontal"
+                  formatValue={(v) =>
+                    v >= 0 ? `+${v.toFixed(2)}` : `−${Math.abs(v).toFixed(2)}`
+                  }
+                  formatTooltip={(d) => (
+                    <div
+                      style={{
+                        backgroundColor: '#13161e',
+                        border: '1px solid #1f2335',
+                        borderRadius: '6px',
+                        color: '#e6edf3',
+                        fontSize: '12px',
+                        padding: '6px 10px',
+                      }}
+                    >
+                      <div style={{ fontWeight: 600, marginBottom: 2 }}>{d.name}</div>
+                      <div>{d.value >= 0 ? '+' : '−'}${Math.abs(d.value).toFixed(2)}</div>
+                    </div>
+                  )}
+                />
+              </div>
+
+              {/* Cumulative waterfall track (existing CSS-based visualization,
+                  kept as the chart's complement — shows bucket-level detail
+                  stacked toward the running total). */}
               <div className="space-y-2">
                 {(() => {
                   // Each dimension contributes its BEST bucket's P&L as the

@@ -8,6 +8,7 @@ import asyncio
 import hmac
 import json
 import logging
+import os
 import time
 from contextlib import asynccontextmanager
 
@@ -17,6 +18,7 @@ from fastapi import (
     HTTPException,
     Query,
     Request,
+    Response,
     WebSocket,
     WebSocketDisconnect,
 )
@@ -58,6 +60,7 @@ from core.cache import (
 )
 
 from config import settings
+from core.api_versioning import get_version_info, versioning_middleware
 from core.audit_logger import audit_logger
 from core.book_poller import book_poller
 from core.clob_client import OrderArgs
@@ -76,6 +79,21 @@ from core.fundamental_ingest import fundamental_engine
 from core.gamma_client import gamma_client
 from core.portfolio import compute_exposure, compute_reconciliation, leaderboard
 from core.position_manager import position_manager
+# W13-1 — Prometheus metrics. Module-level singleton registry covering
+# HTTP / trading / ML / system surfaces. The ``/metrics`` route handler
+# (defined below) and the request-logging / auth / rate-limit
+# middlewares all import the same singletons from this module so a
+# single prometheus_client registry is shared process-wide.
+from core.prometheus_metrics import (
+    CONTENT_TYPE_LATEST,
+    auth_failures_total,
+    get_metrics as _get_prometheus_metrics,
+    http_requests_in_progress,
+    rate_limit_hits_total,
+    record_auth_failure as _record_auth_failure,
+    record_rate_limit_hit as _record_rate_limit_hit,
+    record_request as _record_prometheus_request,
+)
 from core.security import validate_token_strength
 from core.settlement import settlement_engine
 from core.watchdog import watchdog
@@ -100,10 +118,17 @@ setup_logging()
 log = logging.getLogger(__name__)
 
 # ── Auth Policy ────────────────────────────────────────────────────────────────
-# Only the liveness probe (/api/health) is unauthenticated. Everything else
-# requires `Authorization: Bearer <API_TOKEN>` (fail-closed; 503 if unconfigured).
+# Only the liveness probe (/api/health) and the API version info endpoint
+# (/api/version) are unauthenticated. Everything else requires
+# `Authorization: Bearer <API_TOKEN>` (fail-closed; 503 if unconfigured).
+# /api/version is public so a client can negotiate the API version BEFORE
+# presenting credentials (W13-3 — API versioning).
+# W13-1: ``/metrics`` is intentionally unauthenticated — Prometheus scrapers
+# use their own auth (mTLS / OAuth2 proxy /w Basic-auth) at the ingress layer
+# and don't carry the application API token. The endpoint emits only
+# Prometheus-format metric values (no PII, no order body, no secrets).
 
-PUBLIC_PATHS = {"/api/health", "/docs", "/redoc", "/openapi.json"}
+PUBLIC_PATHS = {"/api/health", "/api/version", "/docs", "/redoc", "/openapi.json", "/metrics"}
 if settings.trading_mode == "live":
     PUBLIC_PATHS.discard("/docs")
     PUBLIC_PATHS.discard("/redoc")
@@ -218,6 +243,51 @@ async def _state_persistence_loop() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _seeded_tokens
+
+    # ── W13-7 — SQLite schema migrations ────────────────────────────────────
+    # Run additive ``CREATE TABLE IF NOT EXISTS`` / ``CREATE INDEX IF NOT
+    # EXISTS`` migrations against every SQLite DB at startup. The system is
+    # idempotent: existing module-level ``_init_db()`` calls (which fire at
+    # import time) already created the tables, so the migration runner
+    # records the migration name in ``_migrations`` and skips on every
+    # subsequent boot. Migrations never block startup — a failure is logged
+    # at ``error`` level and the lifespan continues (mirrors the defensive
+    # init pattern used by every other SQLite module).
+    try:
+        from pathlib import Path as _Path
+
+        from core.db.migration_manager import run_migrations as _run_migrations
+
+        _data_dir = _Path(os.environ.get("BOT_DATA_DIR", "/app/data"))
+        _data_dir.mkdir(parents=True, exist_ok=True)
+        for _db_name in (
+            "decision_ledger",
+            "execution_quality",
+            "observability",
+            "closed_positions",
+            "alerts",
+            "feature_flags",
+            "audit_trail",
+            "order_state_machine",
+            "shadow_trades",
+            "market_intelligence",
+        ):
+            _db_path = _data_dir / f"{_db_name}.db"
+            _result = _run_migrations(_db_path, _db_name)
+            if _result["applied"]:
+                log.info(
+                    "Migrations applied to %s: %s",
+                    _db_name,
+                    _result["applied"],
+                )
+            if _result["errors"]:
+                log.error(
+                    "Migration errors on %s: %s",
+                    _db_name,
+                    _result["errors"],
+                )
+    except Exception as _mig_exc:  # pragma: no cover — defensive: migrations must not kill startup
+        log.error("Migration runner crashed at startup: %s", _mig_exc)
 
     # ── W11-6 (OWASP A07) — Token strength check at startup ────────────────
     # Fail-LOUD on placeholder / weak tokens: emit a WARNING log line (so
@@ -573,6 +643,26 @@ the backend (port 8080) via the `?XTransformPort=8080` query parameter.
 - Swagger UI: `/docs`
 - ReDoc: `/redoc`
 - OpenAPI JSON: `/openapi.json`
+
+### API Versioning (W13-3)
+This API supports versioning via:
+1. URL prefix: `/api/v1/...` (parsed from the path; sets the
+   effective version for the request)
+2. Header: `Accept-Version: v1` (used when no URL prefix is present)
+
+Current version: `v1` (configurable via the `API_VERSION` env var).
+
+Discovery:
+- `GET /api/version` (public, no auth) returns the current / supported
+  / deprecated version sets.
+- Every response carries `X-API-Version` (the version that actually
+  served the request) and `X-API-Supported-Versions` (the full
+  allow-list). A deprecated version additionally carries the
+  `Deprecation` and `Sunset` headers (RFC 8594 / RFC 7231).
+
+Unsupported versions are rejected with HTTP 400 before any
+authentication check fires, so a misconfigured client learns the
+version mismatch first.
 """,
     version="1.0.0",
     contact={
@@ -605,6 +695,7 @@ the backend (port 8080) via the `?XTransformPort=8080` query parameter.
         {"name": "shadow", "description": "Shadow trading inspection (counterfactual trades)"},
         {"name": "live", "description": "Live-trading readiness gate and enable control"},
         {"name": "retention", "description": "Data retention policy enforcement"},
+        {"name": "monitoring", "description": "Prometheus /metrics endpoint + Grafana dashboard"},
     ],
     docs_url="/docs",
     redoc_url="/redoc",
@@ -673,6 +764,12 @@ async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
     else:
         retry_after_secs = 60
         limit_str = "100/minute"
+    # W13-1 — Prometheus: increment the rate-limit-hit counter so a Grafana
+    # panel can surface "429 per endpoint" without scraping server logs.
+    # Best-effort: a prometheus registry hiccup must never change the 429
+    # response (the rate-limit decision has already been made; the counter
+    # is purely observability).
+    _record_rate_limit_hit(endpoint=request.url.path)
     return JSONResponse(
         status_code=429,
         content={
@@ -720,6 +817,9 @@ async def enforce_api_auth(request: Request, call_next):
 
     if not settings.api_token:
         await _audit_auth_failure(request, mode="not_configured")
+        # W13-1 — Prometheus: count the auth failure (operator dashboards alert
+        # on a sustained >0 rate, correlating with the audit-trail 401 burst).
+        _record_auth_failure()
         return JSONResponse(
             status_code=503,
             content={"detail": "API authentication not configured — set API_TOKEN in .env", "code": "AUTH_NOT_CONFIGURED"},
@@ -733,6 +833,10 @@ async def enforce_api_auth(request: Request, call_next):
         # token-enumeration attempt); neither path persists the token.
         mode = "missing" if not request.headers.get("authorization") else "invalid"
         await _audit_auth_failure(request, mode=mode)
+        # W13-1 — Prometheus: same counter as the 503 branch above so a
+        # single ``rate()`` graph on ``polymarket_auth_failures_total``
+        # surfaces both failure modes.
+        _record_auth_failure()
         return JSONResponse(
             status_code=401,
             content={"detail": "Unauthorized — missing or invalid API token"},
@@ -744,6 +848,24 @@ async def enforce_api_auth(request: Request, call_next):
         response.headers["access-control-allow-origin"] = origin
         response.headers["access-control-allow-credentials"] = "true"
     return response
+
+
+# ── API versioning middleware (W13-3) ────────────────────────────────────────
+# Added AFTER ``enforce_api_auth`` in source-code order — Starlette's
+# "last-added = first-executed" rule means this dispatch runs BEFORE
+# auth in the request flow, so a client negotiating an unsupported
+# version learns about it via 400 BEFORE burning a 401 (and before the
+# audit trail logs an "invalid token" entry for a request that was
+# doomed anyway by the version check).
+#
+# See ``core/api_versioning.py`` for the version-resolution + validation
+# logic; the wrapper below exists only so the module-level ``app`` and
+# the middleware can be tested independently (the actual dispatch is
+# importable as ``versioning_middleware`` from ``core.api_versioning``,
+# which is what the W13-3 tests exercise directly).
+@app.middleware("http")
+async def api_versioning(request: Request, call_next):
+    return await versioning_middleware(request, call_next)
 
 
 # ── Request logging middleware (outermost — added AFTER enforce_api_auth so
@@ -779,55 +901,89 @@ async def request_logging_middleware(request: Request, call_next):
     # the var on the way out — without ``reset(token)`` the value would
     # leak into the next request served by this same task slot.
     request_id_token = request_id_var.set(request_id)
+    # W13-1 — Prometheus: count the in-flight request so a Grafana gauge
+    # panel can surface concurrent-load without scraping the access log.
+    # ``http_requests_in_progress`` is a Gauge (not Counter) — incremented
+    # here and decremented in the ``finally`` block below so the value
+    # always reflects the true concurrent-request count, even if the
+    # downstream handler raises.
+    http_requests_in_progress.inc()
     start = time.time()
+    response: object = None
     try:
-        response = await call_next(request)
-    except Exception:
-        # ``call_next`` should never raise — Starlette converts route exceptions
-        # into 500 responses via the server exception middleware — but if it
-        # ever does (e.g. middleware itself raises), surface a clean 500
-        # instead of letting the ASGI server kill the connection.
+        try:
+            response = await call_next(request)
+        except Exception:
+            # ``call_next`` should never raise — Starlette converts route exceptions
+            # into 500 responses via the server exception middleware — but if it
+            # ever does (e.g. middleware itself raises), surface a clean 500
+            # instead of letting the ASGI server kill the connection.
+            duration = time.time() - start
+            log.error(
+                "[request] %s %s → 500 (unhandled in middleware chain) (%.3fs)",
+                request.method,
+                request.url.path,
+                duration,
+                exc_info=True,
+                extra={
+                    "request_id": request_id,
+                    "method": request.method,
+                    "path": str(request.url.path),
+                    "status": 500,
+                    "duration_ms": round(duration * 1000, 3),
+                },
+            )
+            # W13-1 — Prometheus: record the request (status=500 — matches the
+            # JSONResponse returned immediately below). The in-flight gauge is
+            # decremented in the outer ``finally`` block.
+            _record_prometheus_request(
+                method=request.method,
+                endpoint=request.url.path,
+                status=500,
+                duration=duration,
+            )
+            request_id_var.reset(request_id_token)
+            return JSONResponse(
+                status_code=500,
+                content={"detail": "Internal server error", "path": str(request.url.path)},
+                headers={"X-Request-ID": request_id},
+            )
         duration = time.time() - start
-        log.error(
-            "[request] %s %s → 500 (unhandled in middleware chain) (%.3fs)",
+        # W13-1 — Prometheus: record the request count + latency histogram for
+        # the final response. Done BEFORE the log.info so the metric is observable
+        # even if a downstream log shipper drops the log line. Best-effort —
+        # the helper swallows registry errors internally.
+        _record_prometheus_request(
+            method=request.method,
+            endpoint=request.url.path,
+            status=response.status_code if response is not None else 500,
+            duration=duration,
+        )
+        # Echo the id back to the client so support / debugging can self-service
+        # a log trace without operator intervention.
+        response.headers["X-Request-ID"] = request_id
+        log.info(
+            "[request] %s %s → %d (%.3fs)",
             request.method,
             request.url.path,
+            response.status_code,
             duration,
-            exc_info=True,
             extra={
                 "request_id": request_id,
                 "method": request.method,
                 "path": str(request.url.path),
-                "status": 500,
+                "status": response.status_code,
                 "duration_ms": round(duration * 1000, 3),
             },
         )
         request_id_var.reset(request_id_token)
-        return JSONResponse(
-            status_code=500,
-            content={"detail": "Internal server error", "path": str(request.url.path)},
-            headers={"X-Request-ID": request_id},
-        )
-    duration = time.time() - start
-    # Echo the id back to the client so support / debugging can self-service
-    # a log trace without operator intervention.
-    response.headers["X-Request-ID"] = request_id
-    log.info(
-        "[request] %s %s → %d (%.3fs)",
-        request.method,
-        request.url.path,
-        response.status_code,
-        duration,
-        extra={
-            "request_id": request_id,
-            "method": request.method,
-            "path": str(request.url.path),
-            "status": response.status_code,
-            "duration_ms": round(duration * 1000, 3),
-        },
-    )
-    request_id_var.reset(request_id_token)
-    return response
+        return response
+    finally:
+        # W13-1 — Prometheus: ALWAYS decrement the in-flight gauge, even on
+        # the early-return 500 path above. Without this, an exception inside
+        # ``call_next`` would leave the gauge stuck at +1 forever and the
+        # Grafana "concurrent requests" panel would drift up over time.
+        http_requests_in_progress.dec()
 
 
 # ── Rate-limit policy header middleware (W10-4) ──────────────────────────────
@@ -981,6 +1137,77 @@ class StrategyConfigUpdate(BaseModel):
 @limiter.limit(READ_LIMIT)
 async def health(request: Request):
     return {"status": "ok", "timestamp": time.time(), "paper": settings.paper_trade}
+
+
+# ── Prometheus metrics endpoint (W13-1) ───────────────────────────────────────
+# Public (unauthenticated) — Prometheus scrapers use their own auth (mTLS /
+# OAuth2 proxy /w Basic-auth) at the ingress layer and don't carry the
+# application API token. The endpoint emits only Prometheus-format metric
+# values (counters / gauges / histograms) — no PII, no order bodies, no
+# secrets — so unauthenticated exposure is safe. Path is added to
+# ``PUBLIC_PATHS`` above so the ``enforce_api_auth`` middleware short-circuits
+# without consulting ``settings.api_token`` (otherwise a misconfigured token
+# would 503 the scraper and Grafana panels would go dark).
+#
+# Rate-limit is intentionally NOT applied to ``/metrics``: a scrape cadence
+# faster than the slowapi limit would 429 the scraper (default 120/min read
+# limit is generous, but production deployments frequently scrape at 5-15s
+# intervals across multiple Prometheus shards — combined load could exceed
+# the limit). The endpoint is cheap (single ``generate_latest()`` call
+# against an in-process registry), so unauthenticated + unthrottled is the
+# standard Prometheus scraping contract.
+@app.get(
+    "/metrics",
+    tags=["monitoring"],
+    summary="Prometheus metrics",
+    description=(
+        "Prometheus-format metrics endpoint. Exposes counters, gauges, and "
+        "histograms covering HTTP request count / latency / status codes, "
+        "trading (orders placed / filled, P&L, open positions), ML (predictions, "
+        "drift PSI, Brier score, ROC AUC), and system surfaces (cache hit "
+        "rates, DB sizes, active alerts). Scrape with Prometheus at 15s "
+        "intervals; the Grafana dashboard in ``grafana/dashboard.json`` "
+        "renders the panels from this endpoint's data."
+    ),
+)
+async def prometheus_metrics():
+    """Return the Prometheus-format metrics payload.
+
+    The response is the canonical Prometheus text exposition format
+    (``# HELP`` / ``# TYPE`` headers followed by ``name{labels} value``
+    rows). ``media_type`` is set to ``CONTENT_TYPE_LATEST`` (exported
+    from ``core.prometheus_metrics``) so a Prometheus scraper correctly
+    parses the histogram summaries and counter increments.
+    """
+    return Response(
+        content=_get_prometheus_metrics(),
+        media_type=CONTENT_TYPE_LATEST,
+    )
+
+
+# ── API version info (W13-3) ────────────────────────────────────────────────
+# Public (unauthenticated) so a client can negotiate the API version BEFORE
+# presenting credentials. Mirrors the W11-6 contract-doc-first philosophy:
+# the version info must be discoverable without an authenticated round-trip
+# so a misconfigured client (wrong version, wrong token) can self-correct
+# one issue at a time instead of seeing only a 401 / 400 cascade.
+@app.get(
+    "/api/version",
+    tags=["system"],
+    summary="API version information",
+    description=(
+        "Returns the active API version, the list of supported versions, "
+        "and the list of deprecated versions. Public (no auth required) "
+        "so a client can negotiate the version before authenticating. "
+        "Per-request version selection is performed by the versioning "
+        "middleware via either the URL prefix `/api/v1/...` or the "
+        "`Accept-Version` request header; the effective version is "
+        "echoed back on every response as `X-API-Version`."
+    ),
+)
+async def api_version():
+    """Get API version information."""
+    return get_version_info()
 
 
 @app.get(

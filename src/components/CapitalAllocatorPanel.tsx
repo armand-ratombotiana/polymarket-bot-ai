@@ -48,6 +48,7 @@ import {
   Wallet,
   Zap,
 } from 'lucide-react'
+import { GaugeChart } from '@/components/charts'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -458,6 +459,11 @@ function EdgeSizeCurve({
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Capital utilization circular gauge
+//
+// W13-9 — Now backed by the shared Recharts GaugeChart component from
+// @/components/charts. This wrapper preserves the panel's local API
+// (pct + deployed + capital) and the "Near Cap / Moderate / Healthy"
+// status badge so call sites don't need to change.
 // ─────────────────────────────────────────────────────────────────────────────
 function UtilizationGauge({
   pct,
@@ -468,69 +474,18 @@ function UtilizationGauge({
   deployed: number
   capital: number
 }) {
-  const W = 180
-  const H = 180
-  const r = 70
-  const cx = W / 2
-  const cy = H / 2
-  const circ = 2 * Math.PI * r
   const clampedPct = Math.max(0, Math.min(100, pct))
-  const dash = (clampedPct / 100) * circ
   const style = utilizationStyle(clampedPct)
 
   return (
     <div className="flex flex-col items-center justify-center">
-      <svg viewBox={`0 0 ${W} ${H}`} className="w-32 h-32" role="img" aria-label={`Capital utilization ${clampedPct.toFixed(1)} percent`}>
-        {/* Track */}
-        <circle
-          cx={cx}
-          cy={cy}
-          r={r}
-          fill="none"
-          stroke="#1f2335"
-          strokeWidth="10"
-        />
-        {/* Progress arc */}
-        <circle
-          cx={cx}
-          cy={cy}
-          r={r}
-          fill="none"
-          stroke={style.stroke}
-          strokeWidth="10"
-          strokeLinecap="round"
-          strokeDasharray={`${dash} ${circ - dash}`}
-          transform={`rotate(-90 ${cx} ${cy})`}
-          style={{ transition: 'stroke-dasharray 0.6s cubic-bezier(0.22,1,0.36,1), stroke 0.4s' }}
-        />
-        {/* Center label */}
-        <text
-          x={cx}
-          y={cy - 4}
-          textAnchor="middle"
-          fill={style.stroke}
-          fontSize="26"
-          fontWeight="800"
-          fontFamily="JetBrains Mono, monospace"
-        >
-          {clampedPct.toFixed(1)}%
-        </text>
-        <text
-          x={cx}
-          y={cy + 14}
-          textAnchor="middle"
-          fill="#7e8aaa"
-          fontSize="9.5"
-          fontWeight="600"
-          fontFamily="Inter, sans-serif"
-          letterSpacing="0.05em"
-        >
-          DEPLOYED
-        </text>
-      </svg>
-      <div className="text-[10px] text-[#7e8aaa] mono mt-1">
-        {fmtUsd(deployed)} <span className="text-[#3e4560]">/</span> {fmtUsd(capital)}
-      </div>
+      <GaugeChart
+        value={clampedPct}
+        label="DEPLOYED"
+        sublabel={`${fmtUsd(deployed)} / ${fmtUsd(capital)}`}
+        color={style.stroke}
+        height={180}
+      />
       <span className={`badge ${style.badge} text-[9.5px] mt-1.5`}>
         {clampedPct > 80 ? 'Near Cap' : clampedPct >= 50 ? 'Moderate' : 'Healthy'}
       </span>

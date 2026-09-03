@@ -20,6 +20,7 @@ from eth_account import Account
 from eth_account.messages import encode_defunct
 
 from config import settings
+from core.circuit_breaker import CircuitBreakerOpenError, clob_breaker
 from core.data_store import Side
 
 log = logging.getLogger(__name__)
@@ -113,33 +114,60 @@ class ClobClient:
     # ── Internal request helpers ──────────────────────────────────────────
 
     async def _get(self, path: str, params: dict | None = None, auth: bool = False) -> Any:
+        # W13-2 — circuit breaker: fail fast if the CLOB endpoint is in a
+        # sustained failure run. ``can_execute`` returns True while the
+        # breaker is CLOSED (the steady state); only OPEN breaks the call.
+        if not clob_breaker.can_execute():
+            raise CircuitBreakerOpenError(f"Circuit 'clob_api' is OPEN")
         client = await self._ensure_http()
         headers = {}
         if auth and self._creds:
             headers = _l2_headers(self._creds, "GET", path)
-        resp = await client.get(path, params=params or {}, headers=headers)
-        resp.raise_for_status()
-        return resp.json()
+        try:
+            resp = await client.get(path, params=params or {}, headers=headers)
+            resp.raise_for_status()
+            result = resp.json()
+            clob_breaker.record_success()
+            return result
+        except Exception as e:
+            clob_breaker.record_failure(e)
+            raise
 
     async def _post(self, path: str, body: Any, auth: bool = True) -> Any:
+        if not clob_breaker.can_execute():
+            raise CircuitBreakerOpenError(f"Circuit 'clob_api' is OPEN")
         client = await self._ensure_http()
         raw = json.dumps(body)
         headers = {}
         if auth and self._creds:
             headers = _l2_headers(self._creds, "POST", path, raw)
-        resp = await client.post(path, content=raw, headers=headers)
-        resp.raise_for_status()
-        return resp.json()
+        try:
+            resp = await client.post(path, content=raw, headers=headers)
+            resp.raise_for_status()
+            result = resp.json()
+            clob_breaker.record_success()
+            return result
+        except Exception as e:
+            clob_breaker.record_failure(e)
+            raise
 
     async def _delete(self, path: str, body: Any = None, auth: bool = True) -> Any:
+        if not clob_breaker.can_execute():
+            raise CircuitBreakerOpenError(f"Circuit 'clob_api' is OPEN")
         client = await self._ensure_http()
         raw = json.dumps(body or {})
         headers = {}
         if auth and self._creds:
             headers = _l2_headers(self._creds, "DELETE", path, raw)
-        resp = await client.request("DELETE", path, content=raw, headers=headers)
-        resp.raise_for_status()
-        return resp.json()
+        try:
+            resp = await client.request("DELETE", path, content=raw, headers=headers)
+            resp.raise_for_status()
+            result = resp.json()
+            clob_breaker.record_success()
+            return result
+        except Exception as e:
+            clob_breaker.record_failure(e)
+            raise
 
     # ── L1 Authentication ─────────────────────────────────────────────────
 

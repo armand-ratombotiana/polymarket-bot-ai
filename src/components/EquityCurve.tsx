@@ -4,6 +4,7 @@
 import { useEffect, useState } from 'react'
 import { getApiUrl, apiFetch } from '@/lib/api'
 import { fmtUsd, fmtPnl, fmtPct, colors } from '@/lib/design-tokens'
+import { EquityCurveChart } from '@/components/charts'
 
 interface EquityPoint {
   timestamp: number
@@ -77,64 +78,30 @@ export default function EquityCurve() {
     )
   }
 
-  // Calculate SVG path with $100 baseline reference
+  // Footer min/max (the chart itself computes its own Y-domain via Recharts).
   const baseline = 100.0
   const allValues = [...points.map((p) => p.equity), baseline]
-  const minEq = Math.min(...allValues) * 0.998
-  const maxEq = Math.max(...allValues) * 1.002
-  const range = maxEq - minEq || 1
+  const minEq = Math.min(...allValues)
+  const maxEq = Math.max(...allValues)
 
-  const width = 300
-  const height = 85
-  const padding = 6
-
-  const coords = points.map((p, i) => {
-    const x = padding + (i / (points.length - 1)) * (width - 2 * padding)
-    const y = height - padding - ((p.equity - minEq) / range) * (height - 2 * padding)
-    return { x, y }
-  })
-
-  const baselineY = height - padding - ((baseline - minEq) / range) * (height - 2 * padding)
-
-  const pathD = coords.reduce((acc, pt, i) => (i === 0 ? `M ${pt.x},${pt.y}` : `${acc} L ${pt.x},${pt.y}`), '')
-  const areaD = `${pathD} L ${coords[coords.length - 1].x},${height} L ${coords[0].x},${height} Z`
-
-  const isProfit = currentPnl >= 0
-  const strokeColor = isProfit ? '#22c55e' : '#ef4444'
-
-  // W14 — Drawdown from peak overlay.
-  // drawdown[i] = (equity[i] - max(equity[0..i])) / max(equity[0..i])
-  // Always <= 0; 0 means equity is at a new all-time-high.
+  // W14 — drawdown from peak (running peak-to-trough excursion).
   let runningPeak = -Infinity
   const drawdowns = points.map((p) => {
     runningPeak = Math.max(runningPeak, p.equity)
     return runningPeak > 0 ? (p.equity - runningPeak) / runningPeak : 0
   })
-  // Most negative drawdown observed so far (worst peak-to-trough excursion).
   const maxDrawdown = drawdowns.reduce((m, d) => Math.min(m, d), 0)
   const maxDrawdownPct = Math.abs(maxDrawdown) // 0..1 magnitude for display
 
-  // W14 — Map drawdown magnitude to vertical pixels below the equity line.
-  // ~140px per unit drawdown means a 5% drawdown ~ 7px deep, 20% ~ 28px.
-  // Clamped to the chart's bottom padding so the band never overflows.
-  const ddPxScale = 140
-  const drawdownBottom = coords.map((c, i) => ({
-    x: c.x,
-    y: Math.min(c.y + Math.abs(drawdowns[i]) * ddPxScale, height - padding),
-  }))
+  const isProfit = currentPnl >= 0
 
-  // W14 — Red filled area: top edge = equity line, bottom edge = drawdown-scaled.
-  const ddTopPath = pathD // reuse equity polyline as the top of the band
-  const ddBottomPathReversed = [...drawdownBottom]
-    .reverse()
-    .map((pt) => `L ${pt.x},${pt.y}`)
-    .join(' ')
-  const drawdownAreaD = `${ddTopPath} ${ddBottomPathReversed} Z`
-  // Outline of the drawdown band's lower edge (subtle redFg stroke for legibility).
-  const drawdownBottomPathD = drawdownBottom.reduce(
-    (acc, pt, i) => (i === 0 ? `M ${pt.x},${pt.y}` : `${acc} L ${pt.x},${pt.y}`),
-    ''
-  )
+  // Map to EquityCurveChart input shape — includes the precomputed drawdown
+  // per timestamp so the chart's red overlay matches W14's contract.
+  const chartData = points.map((p, i) => ({
+    timestamp: p.timestamp,
+    equity: p.equity,
+    drawdown: drawdowns[i],
+  }))
 
   return (
     <div className="card p-3 flex flex-col justify-between min-h-[160px] bg-[#13161e] border border-[#1f2335] shadow-md">
@@ -161,54 +128,18 @@ export default function EquityCurve() {
         </div>
       </div>
 
-      {/* SVG Chart */}
+      {/* W13-9 — Recharts AreaChart via the shared EquityCurveChart.
+          Replaces the hand-rolled SVG. Keeps the gradient fill, drawdown
+          overlay band, baseline reference line, and hover tooltip. */}
       <div className="flex-1 flex items-center justify-center py-1 relative">
-        <svg viewBox={`0 0 ${width} ${height}`} className="w-full h-full overflow-visible" role="img" aria-label="Portfolio equity curve chart">
-          <defs>
-            <linearGradient id="eqGrad" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor={strokeColor} stopOpacity="0.25" />
-              <stop offset="100%" stopColor={strokeColor} stopOpacity="0.0" />
-            </linearGradient>
-            {/* W14 — Drawdown overlay gradient (red tokens). */}
-            <linearGradient id="ddGrad" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor={colors.red} stopOpacity="0.45" />
-              <stop offset="100%" stopColor={colors.red} stopOpacity="0.08" />
-            </linearGradient>
-          </defs>
-          
-          {/* Baseline reference line ($100) */}
-          <line
-            x1={padding}
-            y1={baselineY}
-            x2={width - padding}
-            y2={baselineY}
-            stroke="#3e4560"
-            strokeDasharray="3 3"
-            strokeWidth="1"
-          />
-          
-          <path d={areaD} fill="url(#eqGrad)" />
-          {/* W14 — Drawdown overlay: red filled area below the equity line,
-               depth proportional to peak-to-trough drawdown magnitude. */}
-          <path d={drawdownAreaD} fill="url(#ddGrad)" />
-          <path
-            d={drawdownBottomPathD}
-            fill="none"
-            stroke={colors.redFg}
-            strokeWidth="0.6"
-            strokeOpacity="0.55"
-            strokeLinejoin="round"
-          />
-          <path d={pathD} fill="none" stroke={strokeColor} strokeWidth="1.75" strokeLinecap="round" />
-          {coords.length > 0 && (
-            <circle
-              cx={coords[coords.length - 1].x}
-              cy={coords[coords.length - 1].y}
-              r="3"
-              fill={strokeColor}
-            />
-          )}
-        </svg>
+        <EquityCurveChart
+          data={chartData}
+          height={85}
+          baseline={baseline}
+          showDrawdown
+          formatX={(ts) => new Date(ts).toISOString().slice(14, 19)}
+          formatY={(eq) => `$${eq.toFixed(2)}`}
+        />
       </div>
 
       <div className="flex justify-between items-center text-[10px] text-[#7e8aaa] pt-1 mono border-t border-[#1f2335]">

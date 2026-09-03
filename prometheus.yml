@@ -1,0 +1,35 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# Prometheus scrape configuration (W13-1).
+#
+# Targets the polymarket-bot backend service at its in-container port 8080.
+# The /metrics endpoint is unauthenticated (PUBLIC_PATH) — Prometheus
+# scrapers don't carry the application API token; they rely on
+# network-level isolation (Docker private network) + optional ingress
+# auth (mTLS / OAuth2 proxy) for production deployments.
+#
+# Scrape cadence:
+#   * 15s default — balances dashboard freshness (Grafana refresh=15s)
+#     against scrape load (each scrape is a single in-process
+#     ``generate_latest()`` call — sub-millisecond).
+#   * Override per-job via the ``scrape_interval`` field on a specific
+#     job if a denser cadence is needed (e.g. 5s for the ML drift
+#     panel during a model promotion window).
+#
+# Evaluation interval (rule recording) is set to 15s to match the
+# scrape cadence — recording rules (if added later) compute the same
+# roll-ups Grafana panels query, so they should fire at the same rate
+# the underlying series updates.
+# ──────────────────────────────────────────────────────────────────────────────
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: 'polymarket-bot'
+    metrics_path: '/metrics'
+    static_configs:
+      - targets: ['backend:8080']
+        labels:
+          service: 'polymarket-bot'
+          environment: 'production'

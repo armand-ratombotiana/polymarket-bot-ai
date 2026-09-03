@@ -11,6 +11,7 @@ from typing import Any
 import httpx
 
 from config import settings
+from core.circuit_breaker import CircuitBreakerOpenError, gamma_breaker
 
 log = logging.getLogger(__name__)
 
@@ -36,16 +37,24 @@ class GammaClient:
             await self._client.aclose()
 
     async def _get(self, path: str, params: dict | None = None) -> Any:
+        # W13-2 — circuit breaker: fail fast when the Gamma API is in a
+        # sustained failure run. While CLOSED the breaker is transparent.
+        if not gamma_breaker.can_execute():
+            raise CircuitBreakerOpenError(f"Circuit 'gamma_api' is OPEN")
         client = await self._ensure_client()
         try:
             resp = await client.get(path, params=params or {})
             resp.raise_for_status()
-            return resp.json()
+            result = resp.json()
+            gamma_breaker.record_success()
+            return result
         except httpx.HTTPStatusError as e:
             log.error("Gamma API HTTP error %s: %s", e.response.status_code, path)
+            gamma_breaker.record_failure(e)
             raise
         except Exception as e:
             log.error("Gamma API error: %s", e)
+            gamma_breaker.record_failure(e)
             raise
 
     async def get_markets(

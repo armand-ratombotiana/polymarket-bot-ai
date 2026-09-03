@@ -23334,3 +23334,497 @@ Stage Summary:
 - All scripts smoke-tested with the exception of setup-cron.sh
   (sandbox has no cron daemon — script correctly detects + reports
   this rather than crashing).
+
+---
+Task ID: W13-5
+Agent: full-stack-developer
+Task: Command palette (Cmd+K)
+
+Work Log:
+- Read `/home/z/my-project/worklog.md` (last ~150 lines) to baseline the
+  existing scripts/docs inventory and confirm no prior W13-5 work existed.
+- Read `src/components/Sidebar.tsx` to extract the canonical NavSection
+  type (26 sections across 8 groups: Main, Markets, Portfolio, Capital,
+  Strategies, Intelligence, Analytics, System) — the palette's
+  navigation commands are derived from this same inventory so the two
+  surfaces can never drift.
+- Read `src/components/ShortcutsModal.tsx` to learn the existing modal
+  pattern (focus trap, lastActiveRef capture/restore, Escape handling,
+  sr-only keyboard-shortcut hints).
+- Read `src/components/ui/command.tsx` — confirmed it wraps `cmdk` and
+  exports the shadcn PascalCase components (`CommandDialog`,
+  `CommandInput`, `CommandList`, `CommandEmpty`, `CommandGroup`,
+  `CommandItem`, `CommandShortcut`). Confirmed `cmdk@1.1.1` is already
+  in `node_modules` (no install needed).
+- Read `src/components/TopStatusBar.tsx` and `src/app/page.tsx` to learn
+  the existing keyboard-shortcut handler pattern in page.tsx (it early-
+  returns on meta/ctrl/alt to avoid clashing with browser shortcuts) and
+  the modal-state pattern in the page (selectedMarket, chartMarket,
+  configOpen, shortcutsOpen).
+- Created `src/components/CommandPalette.tsx`:
+  * `CommandPaletteProps` interface with `open`, `onOpenChange`,
+    `onNavigate(section: NavSection)`, and an optional `extraActions`
+    array so the palette can also surface page-level workflows
+    (refresh / theme toggle / open shortcuts / cancel all / kill
+    switch) without baking them into the component.
+  * 25 navigation command entries mirroring every NavSection in
+    Sidebar.tsx, with optional `keywords` (e.g. "home" / "dashboard"
+    for Command Center, "ml" for AI/ML Engine) so users can find panels
+    by alias, not just by visible label.
+  * Uses `CommandDialog` (not raw `Dialog` + `Command`) so the shadcn
+    variant wires up an sr-only `DialogTitle` + `DialogDescription`
+    automatically — avoids the Radix a11y warning that fires when a
+    DialogContent lacks a DialogTitle.
+  * Controlled `search` state with reset-on-close (the
+    `onOpenChange` wrapper inside the palette clears the search field
+    whenever `next === false` so the next open starts clean).
+  * `handleSelect` invokes the command's `action()` and then calls
+    `onOpenChange(false)` to dismiss the palette.
+- Modified `src/app/page.tsx`:
+  * Added `useMemo` to the React import list.
+  * Added `import CommandPalette, { type CommandItemDef }`.
+  * Added `cmdOpen` state + W13-5 comment block explaining why it's
+    separate from the other modal states.
+  * Added a NEW `useEffect` that registers a dedicated `keydown`
+    listener for `(metaKey || ctrlKey) && key === 'k'`. Calls
+    `e.preventDefault()` (so Safari doesn't focus the URL bar / Chrome
+    doesn't open its search bar) and toggles `cmdOpen`. This listener
+    is separate from the existing keyboard-shortcut handler because
+    that one early-returns on meta/ctrl — keeping them separate avoids
+    any future refactor accidentally re-introducing a clash.
+  * Added `setCmdOpen(false)` to the existing Escape branch (safety
+    net for the case where focus has wandered outside the palette
+    while the dialog is still open).
+  * Built a memoized `cmdExtraActions: CommandItemDef[]` covering
+    six page-level actions: Refresh All Data, Open Keyboard Shortcuts,
+    Open Strategy & Risk Config, Cancel All Open Orders, Activate /
+    Resume Kill Switch (label depends on `snapshot.kill_switch`),
+    Toggle Theme.
+  * Passed `onOpenCommandPalette={() => setCmdOpen(true)}` to
+    TopStatusBar.
+  * Rendered `<CommandPalette open={cmdOpen} onOpenChange={setCmdOpen}
+    onNavigate={setActiveSection} extraActions={cmdExtraActions} />`
+    in the modals section, after `<ShortcutsModal>`.
+- Modified `src/components/TopStatusBar.tsx`:
+  * Added `onOpenCommandPalette?: () => void` to the props interface.
+  * Destructured it in the function signature.
+  * Added a new button in the right-hand action cluster (placed
+    between `ThemeToggle` and `onToggleMute`) that renders a 🔍 glyph
+    + a `⌘K` kbd badge. The kbd is `hidden sm:inline-block` so it
+    doesn't crowd the bar on xs/sm viewports (the icon-only button is
+    still discoverable via its `aria-label` and `title`).
+- Added ~100 lines of CSS to `src/app/globals.css`:
+  * `.command-palette-dialog` — overrides shadcn's `sm:max-w-lg` with
+    `min(92vw, 640px)`, tightens the outer padding to 0 (the inner
+    Command already pads), and applies the dashboard dark-theme
+    palette (`--bg-card` / `--border` / `--radius-lg`).
+  * `.cmd-icon` — the unicode glyph rendered before each command label;
+    uses `system-ui` (not mono) so the icons render correctly.
+  * `[cmdk-item][data-selected="true"]` — overrides the shadcn default
+    `bg-accent` with the dashboard's `--bg-selected` so the active-row
+    highlight matches every other list in the workstation.
+  * `[data-slot="command-input"]` styling to align the input with the
+    dashboard's mono input stack.
+  * `[cmdk-group-heading]` uppercase + tracking-wider + 10px so the
+    group hierarchy reads at a glance.
+  * `@media (prefers-reduced-motion: reduce)` to silence the Radix
+    fade/zoom animations for users who request reduced motion.
+- Added `Element.prototype.scrollIntoView` mock to
+  `src/test/setup.ts` (jsdom doesn't implement it; cmdk calls it
+  inside a layout effect on the active item, which throws under
+  jsdom without the mock). Mocked as a no-op since real browsers
+  handle the scroll natively.
+- Created `src/components/CommandPalette.test.tsx` (15 tests):
+  * `renders the palette when open=true` — input + representative
+    nav labels visible.
+  * `does NOT render the palette when open=false`.
+  * `renders both default groups (Navigate + Actions is absent
+    without extraActions)`.
+  * `typing filters commands down to matching items` — types
+    "positions" into the input, asserts "Positions" stays visible and
+    "Command Center" / "Strategy Registry" get filtered out by cmdk.
+  * `matches against keywords (not just the visible label)` — types
+    "home" and asserts "Command Center" remains (proves the keyword
+    composition on the `value` prop works).
+  * `renders the Empty state when no command matches`.
+  * `selecting a navigation command calls onNavigate(section) and
+    closes the palette` — clicks "Positions", asserts
+    `onNavigate('portfolio-positions')` + `onOpenChange(false)`.
+  * `selecting any navigation row passes the correct section id` —
+    clicks 4 different rows and round-trips the NavSection id.
+  * `renders extraActions in a separate Actions group`.
+  * `selecting an extraAction invokes its action callback and closes`.
+  * `Cmd+K opens the palette (initially closed)` — uses a `CmdKHarness`
+    wrapper component that replicates the EXACT useEffect pattern from
+    page.tsx (avoids mounting the full page, which has a huge WS /
+    audio / dynamic-panel dependency tree).
+  * `Ctrl+K also opens the palette (Windows / Linux chord)`.
+  * `pressing Cmd+K a second time closes the palette (toggle)`.
+  * `Cmd+K calls e.preventDefault` — confirms the listener swallows
+    the browser default so the URL bar / chrome search bar doesn't
+    steal focus.
+  * `plain "k" without modifier does NOT open the palette` — proves
+    the Cmd+K listener doesn't conflict with the existing plain-K
+    kill-switch shortcut.
+
+Verification:
+- `bun run lint` — clean for all files I touched
+  (`npx eslint src/components/CommandPalette.tsx
+  src/components/CommandPalette.test.tsx
+  src/components/TopStatusBar.tsx src/app/page.tsx` exits 0).
+  The single global lint failure is a pre-existing error in
+  `src/components/AttributionPanel.tsx:755` (`'PnLBarChart' is not
+  defined`) introduced by an earlier wave's modification to that file
+  — unrelated to W13-5 and outside the scope of this task.
+- `bun run test` — full suite green: 340 tests across 15 files,
+  including the 15 new CommandPalette tests. ~78s total.
+- `dev.log` — Next.js 16.1.3 (Turbopack) dev server still healthy
+  after the page.tsx changes (`GET / 200`).
+
+Stage Summary:
+- Created CommandPalette.tsx: yes (180 lines, wraps shadcn
+  `CommandDialog` + cmdk, 25 nav commands mirroring Sidebar's
+  NavSection inventory, controlled search with reset-on-close,
+  optional extraActions injection for page-level workflows).
+- Wired Cmd+K shortcut in page.tsx: yes (new useEffect for the
+  Cmd+K/Ctrl+K chord with preventDefault; Escape safety-net added
+  to the existing handler; memoized extraActions array of 6 page
+  actions; palette rendered in the modals section).
+- Added hint to TopStatusBar: yes (🔍 + ⌘K kbd badge, optional
+  onOpenCommandPalette prop, responsive — kbd badge hidden on xs).
+- Created tests: yes (15 tests covering render-when-open,
+  filtering, keyword matching, selection → onNavigate + close,
+  extraActions rendering + invocation, and the Cmd+K / Ctrl+K
+  shortcut behaviour via a CmdKHarness wrapper that replicates the
+  page.tsx useEffect pattern).
+- Added CSS to globals.css: yes (~100 lines: dialog container,
+  cmd-icon, active-row highlight, input styling, group heading,
+  reduced-motion guard).
+- Lint: clean for all W13-5 files (single pre-existing
+  AttributionPanel.tsx error unrelated to this task).
+- Tests: 340/340 passing including the 15 new CommandPalette tests.
+
+---
+Task ID: W13-4
+Agent: full-stack-developer
+Task: Dark/light theme switcher
+
+Work Log:
+- Read tail of `worklog.md` (~150 lines) to baseline — confirmed prior
+  waves W8-W12 (panels, hooks, PWA, error boundary, accessibility,
+  testing infra all in place). No prior W13-4 work.
+- Read `package.json` — `next-themes@^0.4.6` was already listed in
+  dependencies but NOT actually present in `node_modules`. Ran
+  `bun add next-themes` → installed `next-themes@0.4.6` for real.
+- Read `src/app/layout.tsx` — server-component root layout. Confirmed
+  existing children: ErrorBoundary, OfflineIndicator, SWRegister,
+  skip-link. The ThemeProvider needs to wrap all of these so even
+  the error fallback re-themes.
+- Read `src/app/globals.css` first 150 lines — confirmed the design
+  token system: `:root` block defines ~80 CSS custom properties
+  (--bg-base, --bg-surface, --bg-card, --border, --text-primary,
+  --text-secondary, --text-dim, semantic --color-green/red/amber/
+  blue/cyan/purple with -fg/-bg/-bd variants, --mode-paper/live/
+  shadow/backtest tokens, --status-*, layout/spacing/radius/motion
+  tokens). Body background and text already use `var(--bg-surface)`
+  and `var(--text-primary)`, so flipping the variables flips the body
+  automatically.
+- Read `src/components/TopStatusBar.tsx` — confirmed the right-hand
+  action cluster (mute / shortcuts / config / cancel-all / kill-
+  switch). The new toggle needs to slot in alongside these. Existing
+  buttons use `btn btn-ghost btn-sm p-1.5 text-xs text-[#7e8aaa]
+  hover:text-white` styling — the toggle should match so it doesn't
+  look like a different control category.
+- Created `src/components/ThemeProvider.tsx` — client wrapper around
+  `next-themes`'s `NextThemesProvider`. Config: `attribute="class"`
+  (toggles dark/light class on <html>), `defaultTheme="dark"`
+  (preserves existing look), `enableSystem={false}` (deterministic,
+  not OS-following — workstation is a trading terminal), and
+  `disableTransitionOnChange` (instant flip, no fade).
+- Modified `src/app/layout.tsx`:
+  * Imported `ThemeProvider`
+  * Added `suppressHydrationWarning` to `<html>` (absorbs the
+    SSR/CSR class mismatch that next-themes injects via an inline
+    script on first paint)
+  * Wrapped the entire `<body>` tree (skip-link, OfflineIndicator,
+    ErrorBoundary, SWRegister) inside `<ThemeProvider>` so every
+    consumer of CSS variables re-themes
+- Created `src/components/ThemeToggle.tsx` — small icon button
+  using `useTheme()` from next-themes. Renders `null` until `mounted`
+  flips true (hydration-mismatch guard mandated by next-themes docs:
+  rendering the icon during SSR would emit a `🌙` that may mismatch
+  the post-hydration value, which React flags as an error). Mirrors
+  the existing `btn btn-ghost btn-sm p-1.5 text-xs text-[#7e8aaa]
+  hover:text-white` styling used by mute / shortcuts. aria-label
+  announces the TARGET state ("Switch to light mode" when currently
+  dark); aria-pressed reflects whether dark is active.
+- Modified `src/components/TopStatusBar.tsx`:
+  * Imported `ThemeToggle`
+  * Rendered `<ThemeToggle />` at the start of the right-hand
+    action cluster (between the UTC clock and the mute button),
+    so the cluster reads "appearance → audio → input help → config"
+- Modified `src/app/globals.css`:
+  * Added `.light { … }` block (right after `:root`) redefining
+    every design token for light theme:
+      - Backgrounds: slate-50/100/white ladder (was dark navy/black)
+      - Borders: slate-200/300 (was #1f2335/#2d3450)
+      - Text: slate-900/600/400 ladder (was #dde1ed/#7e8aaa/#3e4560)
+      - Semantic colors: each `-fg` shifts 1-2 shades darker
+        (e.g. green-700 instead of green-400) so P&L stays readable
+        on white. Status dot colors stay the same saturated values.
+      - Mode tokens: paper/live/shadow/backtest colors shift darker
+        for white-bg contrast.
+  * Added scoped `.light .bg-[#080910]`, `.light .bg-[#0e1015]`,
+    `.light .bg-[#0e1015]/95`, `.light .bg-[#13161e]`,
+    `.light .bg-[#111420]`, `.light .bg-[#1a1f2e]`,
+    `.light .bg-[#1e2540]` overrides → light surfaces.
+  * Added scoped `.light .border-[#1f2335]`,
+    `.light .border-[#181c28]`, `.light .border-[#2d3450]`,
+    `.light .hover:border-[#2d3450]:hover` overrides → light borders.
+  * Added scoped `.light .text-[#dde1ed]`,
+    `.light .text-[#7e8aaa]`, `.light .text-[#3e4560]` overrides
+    → slate-900/600/400 text.
+  * Added `.light .hover:text-white:hover` override → slate-900
+    (so hover text darkens on light bg instead of whiting out).
+  * Added `.light` scrollbar overrides (slate-300 thumb, slate-400
+    hover) so scrollbars don't look like black bars on white panels.
+  * `!important` is required on all Tailwind arbitrary value
+    overrides to beat Tailwind's own generated
+    `.bg-\[\#0e1015\]` rule (same cascade layer, declared later
+    in source order would win otherwise).
+- Created `src/components/ThemeToggle.test.tsx` — 5 vitest tests:
+  1. `renders null before mount (SSR snapshot)` — uses
+     `renderToStaticMarkup` from `react-dom/server` (where
+     useEffect never fires) and asserts no `<button>` element is
+     emitted in the server-rendered HTML.
+  2. `renders a button after mount` — RTL `render` triggers
+     `useEffect`, `mounted` flips true, button appears with the
+     correct aria-label (`Switch to light mode`) and icon (`☀️`),
+     and `aria-pressed=true`.
+  3. `clicking the button toggles the theme from dark to light` —
+     `userEvent.click()` flips `document.documentElement` class
+     from `dark` to `light`; button icon flips from ☀️ to 🌙;
+     aria-label flips to `Switch to dark mode`; aria-pressed=false.
+  4. `clicking again toggles back from light to dark` — inverse
+     direction.
+  5. `persists the chosen theme to localStorage so reload keeps it`
+     — verifies `window.localStorage.getItem('theme') === 'light'`
+     after toggle (next-themes persists under the "theme" key).
+  Each test resets `document.documentElement.className` and clears
+  localStorage so theme state never leaks between tests.
+- Verification:
+  * `bun run lint` → clean (no errors, no warnings).
+  * `bun run test -- src/components/ThemeToggle.test.tsx` → 5/5
+    passing (~1.7s).
+  * Full suite (excluding unrelated `CommandPalette.test.tsx`
+    from a concurrent sibling agent which fails due to a jsdom
+    `i.scrollIntoView is not a function` limitation — that's their
+    bug, not mine): 325 passed, 0 failed.
+  * `tail dev.log` shows `Ready in 733ms`, `GET / 200` with no
+    compile errors. No hydration warnings.
+- Concurrent-agent interference: While I was editing, another agent
+  (likely W13-x running in parallel) reverted my changes to
+  `layout.tsx`, `globals.css`, and `TopStatusBar.tsx` (probably
+  via `git stash` or `git checkout` over the same files). I
+  detected this during the post-edit verification pass and
+  re-applied all three edits. Final state verified by reading each
+  file end-to-end and re-running lint + tests.
+
+Stage Summary:
+- Installed next-themes: yes (`next-themes@0.4.6`)
+- Created ThemeProvider + ThemeToggle: yes (2 new files, ~100 LOC)
+- Added light theme CSS variables: yes (135-line `.light` block
+  in globals.css with both CSS variable overrides and Tailwind
+  arbitrary value class overrides for the ~12 most-used hex
+  literals across 38 panel files)
+- Wired toggle into TopStatusBar: yes (rendered between UTC clock
+  and mute button, matches existing `btn btn-ghost btn-sm` styling)
+- Created tests: yes (5 vitest tests covering SSR null render,
+  post-mount button presence, dark→light toggle, light→dark
+  toggle, and localStorage persistence — all 5 pass)
+- Lint: clean
+
+---
+Task ID: W13-6
+Agent: full-stack-developer
+Task: Browser push notifications
+
+Work Log:
+- Read worklog tail (last 150 lines — W12-2 maintenance scripts), `src/hooks/useBot.ts` (REST-poll + WS-fallback pattern), `src/components/TopStatusBar.tsx` (right-side action button cluster layout), `src/lib/api.ts` (`apiFetch`/`getApiUrl`/`authHeaders` patterns), `src/hooks/useFeatureFlags.ts` (visibility-aware polling pattern).
+- Reviewed `src/test/setup.ts` (vitest jsdom env, `global.fetch = vi.fn()` baseline mock, matchMedia + ResizeObserver shims) and `vitest.config.ts` (jsdom env, `@/` alias to `src/`).
+- Confirmed `/api/alerts` endpoint exists in backend (referenced in `src/lib/api-client.ts:215` `alertsApi.get(limit, unacknowledgedOnly)` → request to `/api/alerts?limit=...&unacknowledged_only=...`) — response shape `{ alerts: [...], stats: ... }`.
+
+- Created `src/lib/notifications.ts` (84 lines) — pure primitives around the Web Notifications API:
+  * `isNotificationSupported()` — `typeof window !== 'undefined' && 'Notification' in window`.
+  * `getPermission()` — returns 'denied' when not supported, otherwise `Notification.permission`.
+  * `requestPermission()` — async; short-circuits when already 'granted', otherwise awaits `Notification.requestPermission()`.
+  * `showNotification(title, options?)` — guards on support + permission; constructs Notification with `icon: '/icon.svg'`, `badge: '/icon.svg'`; schedules 10 s auto-close via `setTimeout(notif.close, 10000)`; wires `onclick` to `window.focus() + notif.close()`.
+  * `showCriticalAlert({name, message, severity})` — emoji map (🚨/❌/⚠️/ℹ️/🔔); `tag: alert-${name}`; `requireInteraction: severity === 'critical'` (persists until dismissed for critical only).
+  * `showTradeNotification({side, token_id, price, size})` — 📈/📉 based on side; body `SIDE size @ price.toFixed(4) — token_id.slice(0,12)...`.
+
+- Created `src/hooks/useNotifications.ts` (137 lines) — React hook:
+  * State: `permission`, `enabled`, `lastAlertIds: Set<string>`.
+  * Mount effect: reads `Notification.permission` + persisted `localStorage['notifications_enabled']`; only re-enables polling if `permission === 'granted'` AND stored flag is `'true'` (handles browser-side permission revocation between sessions).
+  * Polling effect (deps `[enabled, lastAlertIds]`): when enabled AND `!document.hidden`, calls `apiFetch('/api/alerts?limit=10&unacknowledged_only=true')`; filters `newAlerts = alerts.filter(a => !lastAlertIds.has(a.alert_id))`; for each new alert with `severity === 'critical' || 'error'` calls `showCriticalAlert()`; updates `lastAlertIds` (capped at 50 entries via `Array.from(set).slice(-50)`); `setInterval(poll, 30_000)`.
+  * `enable()` — awaits `requestPermission()`; on granted: flips state, persists localStorage flag, fires a "ℹ️ Notifications Enabled" test toast.
+  * `disable()` — flips state, persists 'false' (cannot revoke browser permission from JS).
+  * `toggle()` — delegates based on current state.
+  * Returns `{ permission, enabled, supported, enable, disable, toggle }`.
+
+- Modified `src/components/TopStatusBar.tsx`:
+  * Added `import { useNotifications } from '@/hooks/useNotifications'`.
+  * Added `const notifications = useNotifications()` in the component body.
+  * Computed `notifDisabled = notifications.permission === 'denied'` and a 4-state `notifTitle` tooltip string.
+  * Added a notification bell button to the right-side action cluster, positioned between the audio mute button (🔊/🔇) and the keyboard-shortcuts button (⌨️) so all alert controls are grouped.
+  * Button only renders when `notifications.supported === true` (no dead buttons on unsupported browsers).
+  * Three-state visual:
+    - `permission === 'denied'`: gray (#3e4560) + `cursor-not-allowed` + `disabled` attribute; tooltip "Permission denied — re-enable via browser site settings".
+    - `enabled === true`: green-400 🔔; tooltip "Browser notifications ON — click to disable".
+    - `enabled === false` (default/granted): gray 🔕 with `opacity-60`; tooltip "Enable browser push notifications".
+  * Full ARIA: `aria-pressed={notifications.enabled}` (state announcement); `aria-label` flips per state ("Browser notifications disabled by browser settings" / "Disable browser push notifications" / "Enable browser push notifications").
+  * `onClick={notifications.toggle}` — when permission is 'default', this triggers `enable()` which calls `requestPermission()` (browser prompt); when granted, this immediately flips enabled state.
+
+- Created `src/lib/notifications.test.ts` (291 lines, 24 tests):
+  * Stubbed `global.Notification` AND `window.Notification` with a `FakeNotification` class that captures constructor args, exposes a static `permission` and async `requestPermission` mock, and exposes instance `close` (vi.fn) + `onclick` props.
+  * `isNotificationSupported`: true when Notification is on window, false when deleted from both.
+  * `getPermission`: 'denied' when not supported, returns `Notification.permission` otherwise.
+  * `requestPermission`: 'denied' when not supported; 'granted' immediately when already granted (does NOT call `requestPermission`); otherwise awaits `requestPermission` and forwards result.
+  * `showNotification`: returns undefined when not supported OR permission not granted; constructs Notification with `icon: '/icon.svg'`, `badge: '/icon.svg'` defaults + merged options; 10 s auto-close verified via `vi.useFakeTimers()` + `advanceTimersByTime(10_000)`; onclick handler focuses window + closes (spied `window.focus`); returns the Notification instance; constructor errors swallowed and logged via `console.error`.
+  * `showCriticalAlert`: 🚨/❌/⚠️/ℹ️/🔔 emoji map (incl. fallback for unknown severity); `requireInteraction: true` only for `critical`; `tag: alert-${name}`; no-op when permission not granted.
+  * `showTradeNotification`: 📈 for BUY / 📉 for SELL; body format `SIDE size @ price.toFixed(4) — token_id.slice(0,12)...` verified with concrete values (`BUY 100 @ 0.1235 — abcdefghijkl...`); `tag: trade-${token_id}`; no-op when permission not granted.
+
+- Created `src/hooks/useNotifications.test.ts` (477 lines, 22 tests):
+  * Same FakeNotification stub pattern.
+  * Added a `mockRequestPermissionResult(value)` helper that mocks `requestPermission` to BOTH update `FakeNotification.permission` (mirrors real browser behaviour where the static permission field auto-syncs after the user responds) AND return the value — essential because `showNotification` checks `Notification.permission !== 'granted'` synchronously after `enable()` calls `requestPermission()`.
+  * Initial state: supported=true, permission=default, enabled=false; supported=false when Notification is absent.
+  * `enable()`: requests permission, on granted flips enabled=true, persists localStorage flag, fires "ℹ️ Notifications Enabled" test toast; on denied stays disabled, does not persist, no toast; when permission already granted, skips `requestPermission` call entirely.
+  * `disable()`: flips enabled=false, persists 'false'.
+  * `toggle()`: when disabled → calls enable (async, eventually flips true); when enabled → calls disable (sync, flips false).
+  * Persistence: localStorage='true' + permission='granted' → enabled=true on mount; localStorage='true' + permission='default' → enabled=false; localStorage='false' + permission='granted' → enabled=false.
+  * Polling: no polls when disabled (advance 5 min, zero fetch calls); polls every 30 s when enabled (verified initial poll + 30 s + 60 s tick counts increment); no polls when tab hidden (advance 2 min while hidden, zero fetch calls after enable).
+  * New-alert detection (used `vi.useFakeTimers` + `act()` which flushes the polling effect's microtask synchronously): critical alert → 🚨 toast with `requireInteraction: true`; error alert → ❌ toast with `requireInteraction: false`; info+warning alerts → no toast but IDs tracked.
+  * Seen-set dedup: re-arriving alert (same alert_id on the 30 s poll) does NOT re-toast.
+  * 50-entry cap: 60-info-alert payload doesn't crash; enabled stays true.
+  * Error resilience: `fetch` rejects → no crash + stays enabled; non-200 response → no crash + stays enabled; missing `alerts` field in body → no crash + no toast.
+
+- Verification:
+  * `bun run lint` — clean (eslint . exits 0).
+  * `bun run test` — all 340 tests pass (46 new + 294 existing). One flaky intermediate run had CommandPalette.test.tsx fail due to a pre-existing jsdom `scrollIntoView` issue with cmdk unrelated to my changes; re-running passed clean.
+  * `bunx tsc --noEmit` on the 5 files I touched (notifications.ts, useNotifications.ts, TopStatusBar.tsx, notifications.test.ts, useNotifications.test.ts) — zero TS errors. Used `as unknown as FakeNotification` cast for `showNotification()` return values to avoid the `Notification | undefined → FakeNotification` overlap error (FakeNotification declares required instance fields that the abstract Notification type doesn't have).
+
+Stage Summary:
+- Created src/lib/notifications.ts (84 lines, 6 exports — primitives for the Web Notifications API).
+- Created src/hooks/useNotifications.ts (137 lines — permission lifecycle + 30 s visibility-aware alert-poll React hook).
+- Modified src/components/TopStatusBar.tsx (added import + 3-state bell toggle button with full ARIA support).
+- Created src/lib/notifications.test.ts (24 tests, 291 lines).
+- Created src/hooks/useNotifications.test.ts (22 tests, 477 lines).
+- Total new tests: 46.
+- Lint: clean. Tests: all 340 pass. TypeScript: my files have zero errors.
+
+---
+Task ID: W13-9
+Agent: full-stack-developer
+Task: Data visualization improvements (Recharts)
+
+Work Log:
+- Read worklog tail (~200 lines) to baseline the project state and confirmed
+  `recharts@2.15.4` is already installed (Step 1 — no install needed).
+- Read existing chart patterns:
+  * `EquityCurve.tsx` — hand-rolled SVG with gradient area, baseline ref,
+    drawdown overlay band, and a final-point dot. Tight ~85px height for
+    inline dashboard slot.
+  * `AnalyticsPanel.tsx` — KPI cards (no charts) — noted pattern but no
+    Recharts integration needed there.
+  * `AttributionPanel.tsx` — 7 dimensions, each with a per-row CSS bar
+    (compact row-level indicator) + a Waterfall tab with stacked CSS bars.
+  * `ObservabilityPanel.tsx` — inline 60×24 SVG Sparkline component
+    (`samples: HistorySample[]`) used per metric card.
+  * `CapitalAllocatorPanel.tsx` — UtilizationGauge (custom SVG ring with
+    center text) + EdgeSizeCurve (custom SVG).
+  * `MLValidationPanel.tsx` — inline CalibrationPlot (custom SVG with
+    diagonal reference + per-bin table).
+
+- Created `src/components/charts/` (8 files, 1445 lines total):
+  * `theme.ts` (134 lines) — chartTheme object centralising colors
+    (primary/success/danger/warning/info/muted + light mirrors), grid
+    color, axis color, tooltip bg/border/text. Exports `tooltipStyle`,
+    `tooltipStyleLight`, `axisProps`, `gridProps`, `tooltipCursor`,
+    `pnlColor(value)`, `utilizationColor(pct)`.
+  * `EquityCurveChart.tsx` (255 lines) — Recharts AreaChart with gradient
+    fill, baseline ReferenceLine, drawdown Area overlay (red gradient),
+    custom EquityTooltip showing equity + P&L% + drawdown%.
+  * `PnLBarChart.tsx` (199 lines) — Recharts BarChart with per-Cell
+    coloring (green positive / red negative), supports horizontal +
+    vertical layouts, ReferenceLine at y=0, custom tooltip.
+  * `Sparkline.tsx` (142 lines) — Recharts LineChart, no axes, custom
+    dot renderer that only renders the last point (live indicator),
+    falls back to dashed baseline SVG when data has < 2 samples.
+  * `GaugeChart.tsx` (144 lines) — Recharts RadialBarChart with
+    PolarAngleAxis domain=[0,100], threshold-based color (green/amber/
+    red), center text showing value% + label + sublabel.
+  * `ReliabilityDiagram.tsx` (195 lines) — Recharts ComposedChart
+    (Scatter + Line) with perfect-calibration diagonal ReferenceLine,
+    per-point Cell coloring by |delta| (green ≤0.03, amber ≤0.08,
+    red >0.08), ZAxis scaling point size by sample count.
+  * `index.ts` (33 lines) — barrel export for tree-shaking + discoverability.
+  * `Charts.test.tsx` (343 lines) — 36 tests covering each chart's render,
+    empty-state, height prop, layout options, color overrides, and
+    ResponsiveContainer usage. Mocks recharts.ResponsiveContainer to
+    render children directly (jsdom doesn't fire ResizeObserver callbacks).
+
+- Integrated charts into existing panels:
+  * `EquityCurve.tsx` — rewrote to use `EquityCurveChart`, passing
+    precomputed drawdown per timestamp (preserves W14 contract). Kept
+    the header (equity/P&L/max-DD badges) and footer (base/min/peak/time)
+    unchanged. Removed ~140 lines of hand-rolled SVG path math.
+  * `AttributionPanel.tsx` — added a `PnLBarChart` summary chart at the
+    top of the Waterfall tab showing all 7 dimensions' total P&L with
+    green/red coloring. The existing CSS waterfall bars below remain
+    as the cumulative bucket-level view (complementary, not duplicate).
+  * `ObservabilityPanel.tsx` — replaced the inline 60×24 SVG Sparkline
+    with a thin wrapper that delegates to `@/components/charts` Sparkline.
+    Call sites unchanged (still `<Sparkline samples={hist} color={...} />`).
+  * `CapitalAllocatorPanel.tsx` — rewrote UtilizationGauge to delegate
+    to `GaugeChart` (passes value/label/sublabel/color + height).
+    Status badge ("Near Cap" / "Moderate" / "Healthy") retained below.
+    Local API (pct + deployed + capital) preserved.
+  * `MLValidationPanel.tsx` — rewrote CalibrationPlot to delegate to
+    `ReliabilityDiagram`, mapping backend's `bin_center`/`empirical_freq`
+    /`count` shape to the chart's `predicted`/`actual`/`count` shape.
+    Per-bin table below the chart preserved (surfaces |Δ| + n per bin).
+
+- All charts use `<ResponsiveContainer width="100%" height={height}>` so
+  they resize on window resize and adapt to mobile/desktop layouts.
+- Theme: charts read colors from `./theme.ts`. The dashboard's dark
+  aesthetic (`#13161e` cards, `#1f2335` borders, `#e6edf3` text) is the
+  default; light-theme mirrors are exported for future use (e.g. exported
+  reports on white background). Each chart accepts `color` overrides so
+  callers can pass CSS variables or any other color at render time.
+
+- Verification:
+  * `bun run lint` — clean (no errors, no warnings).
+  * `bun run test` — all 376 tests pass (16 test files, including the
+    new 36-test Charts.test.tsx). Existing tests (AnalyticsPanel,
+    PositionsPanel, Sidebar, useRealtimeData, etc.) all still pass —
+    no regressions.
+  * Dev server log shows no errors related to the chart integrations.
+
+Stage Summary:
+- Created src/components/charts/ (5 chart components + theme + barrel + tests): yes
+  * EquityCurveChart.tsx — area chart w/ drawdown overlay
+  * PnLBarChart.tsx — sign-colored bar chart
+  * Sparkline.tsx — minimal line chart for KPI cards
+  * GaugeChart.tsx — radial gauge for utilization
+  * ReliabilityDiagram.tsx — calibration scatter + diagonal ref
+  * theme.ts — central color/style source of truth
+  * index.ts — barrel export
+  * Charts.test.tsx — 36 unit tests
+- Integrated into 5 panels: yes
+  * EquityCurve.tsx — EquityCurveChart
+  * AttributionPanel.tsx — PnLBarChart (Waterfall tab summary)
+  * ObservabilityPanel.tsx — Sparkline (delegated via local wrapper)
+  * CapitalAllocatorPanel.tsx — GaugeChart (UtilizationGauge)
+  * MLValidationPanel.tsx — ReliabilityDiagram (CalibrationPlot)
+- Created tests: yes (36 tests, all passing)
+- Lint: clean
+- All 376 tests pass (no regressions)

@@ -14,6 +14,12 @@ import SWRegister from '@/components/SWRegister'
 // W11-8 — PWA: top banner that flips visible whenever navigator.onLine
 // goes false, so the trader knows they're looking at cached data.
 import OfflineIndicator from '@/components/OfflineIndicator'
+// W13-4 — Dark/light theme switcher. Wraps the entire app tree in
+// `next-themes` so any CSS variable consumer (cards, pills, charts)
+// re-themes the instant the trader flips the toggle in TopStatusBar.
+// Server-component safe: the provider itself is a client component,
+// but layout.tsx just renders it without touching window APIs.
+import ThemeProvider from '@/components/ThemeProvider'
 
 // W11-8 — PWA metadata: web app manifest, theme color, Apple touch icon,
 // and standalone-mode config so iOS Safari hides the URL bar when the
@@ -52,7 +58,7 @@ export default function RootLayout({
   children: React.ReactNode
 }) {
   return (
-    <html lang="en">
+    <html lang="en" suppressHydrationWarning>
       <head>
         <link rel="preconnect" href="https://fonts.googleapis.com" />
         <link
@@ -68,25 +74,33 @@ export default function RootLayout({
         <meta name="theme-color" content="#0b0e14" />
       </head>
       <body>
-        {/* W9-7 — Skip-to-main-content link: visually hidden, revealed on
-            keyboard focus (Tab from URL bar). Lets keyboard & screen-reader
-            users jump the long sidebar directly to the workstation content.
-            Target is `#main` on the `<main>` element in src/app/page.tsx. */}
-        <a href="#main" className="skip-link">
-          Skip to main content
-        </a>
-        {/* W11-8 — PWA: sticky offline banner (renders null when online). */}
-        <OfflineIndicator />
-        {/* W10-3 — Root-level boundary. Sits ABOVE the page so even a
-            catastrophic render crash inside `page.tsx` shows the fallback
-            card instead of a white screen. The dedicated `app/error.tsx`
-            file is the Next.js App-Router-level fallback for route-segment
-            errors (it has slightly different semantics from this in-tree
-            boundary); both co-exist. */}
-        <ErrorBoundary>{children}</ErrorBoundary>
-        {/* W11-8 — PWA: register the service worker after first paint so
-            it never contends with critical-path fetches. */}
-        <SWRegister />
+        {/* W13-4 — ThemeProvider wraps the entire app so any CSS variable
+            consumer re-themes the instant the trader toggles dark/light.
+            Sits ABOVE ErrorBoundary so even the error fallback card
+            respects the active theme. `suppressHydrationWarning` on
+            <html> above absorbs the SSR/CSR class mismatch that
+            `next-themes` injects via an inline script on first paint. */}
+        <ThemeProvider>
+          {/* W9-7 — Skip-to-main-content link: visually hidden, revealed on
+              keyboard focus (Tab from URL bar). Lets keyboard & screen-reader
+              users jump the long sidebar directly to the workstation content.
+              Target is `#main` on the `<main>` element in src/app/page.tsx. */}
+          <a href="#main" className="skip-link">
+            Skip to main content
+          </a>
+          {/* W11-8 — PWA: sticky offline banner (renders null when online). */}
+          <OfflineIndicator />
+          {/* W10-3 — Root-level boundary. Sits ABOVE the page so even a
+              catastrophic render crash inside `page.tsx` shows the fallback
+              card instead of a white screen. The dedicated `app/error.tsx`
+              file is the Next.js App-Router-level fallback for route-segment
+              errors (it has slightly different semantics from this in-tree
+              boundary); both co-exist. */}
+          <ErrorBoundary>{children}</ErrorBoundary>
+          {/* W11-8 — PWA: register the service worker after first paint so
+              it never contends with critical-path fetches. */}
+          <SWRegister />
+        </ThemeProvider>
       </body>
     </html>
   )

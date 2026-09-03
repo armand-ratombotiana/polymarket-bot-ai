@@ -38,6 +38,7 @@ import {
   AlertTriangle,
   Inbox,
 } from 'lucide-react'
+import { Sparkline as RechartsSparkline } from '@/components/charts'
 
 // ───────────────────────────────────────────────────────────────────────────
 // Types — mirror the JSON shape returned by core/observability.py register_routes
@@ -327,8 +328,10 @@ function formatDuration(sec: number | null): string {
 }
 
 // ───────────────────────────────────────────────────────────────────────────
-// Sparkline — 60 × 24 SVG polyline. Computes min/max and scales points to
-// fit. Renders a dashed baseline when there are fewer than 2 samples.
+// Sparkline — thin wrapper around @/components/charts Sparkline (Recharts).
+// Maintains the legacy local API (samples: HistorySample[]) so call sites in
+// this file don't need to change. The Recharts Sparkline handles the actual
+// rendering with the dashboard theme.
 // ───────────────────────────────────────────────────────────────────────────
 
 interface SparklineProps {
@@ -344,68 +347,19 @@ function Sparkline({
   height = 24,
   color = '#60a5fa',
 }: SparklineProps) {
-  if (!samples || samples.length < 2) {
-    return (
-      <svg
-        width={width}
-        height={height}
-        aria-hidden="true"
-        className="opacity-50 flex-shrink-0"
-      >
-        <line
-          x1={0}
-          y1={height / 2}
-          x2={width}
-          y2={height / 2}
-          stroke="#3e4560"
-          strokeWidth={1}
-          strokeDasharray="2 2"
-        />
-      </svg>
-    )
-  }
-
   // API returns newest-first; we draw oldest→newest (left→right).
-  const ordered = [...samples].reverse()
+  const ordered = samples ? [...samples].reverse() : []
   const values = ordered.map((s) => s.value)
-  let min = Math.min(...values)
-  let max = Math.max(...values)
-  if (min === max) {
-    // Degenerate range — nudge so the line renders in the vertical middle
-    // rather than collapsing to a single point.
-    min -= 1
-    max += 1
-  }
-  const pad = 2
-  const range = max - min
-  const stepX = (width - pad * 2) / (ordered.length - 1)
-
-  const pts = ordered.map((s, i) => {
-    const x = pad + i * stepX
-    const y = pad + (height - pad * 2) * (1 - (s.value - min) / range)
-    return { x, y }
-  })
-
-  const polyPoints = pts.map((p) => `${p.x.toFixed(2)},${p.y.toFixed(2)}`).join(' ')
-  const last = pts[pts.length - 1]
-
   return (
-    <svg
+    <RechartsSparkline
+      data={values}
+      color={color}
       width={width}
       height={height}
-      aria-hidden="true"
-      className="overflow-visible flex-shrink-0"
-    >
-      <polyline
-        points={polyPoints}
-        fill="none"
-        stroke={color}
-        strokeWidth={1.4}
-        strokeLinejoin="round"
-        strokeLinecap="round"
-      />
-      <circle cx={last.x} cy={last.y} r={1.8} fill={color} />
-    </svg>
+      strokeWidth={1.4}
+      showLastDot
+      className="flex-shrink-0"
+    />
   )
 }
 
@@ -928,6 +882,9 @@ export default function ObservabilityPanel() {
                               {getUnitLabel(name)}
                             </span>
                           </div>
+                          {/* W13-9 — Recharts-backed sparkline (via the local
+                              Sparkline wrapper, which now delegates to
+                              @/components/charts Sparkline). */}
                           <Sparkline samples={hist} color={meta.stroke} />
                         </div>
                         <div className="flex items-center justify-between text-[9.5px] text-[#7e8aaa] mt-0.5">

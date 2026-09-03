@@ -5,6 +5,10 @@ import { useEffect, useState } from 'react'
 import { ConnectionStatus, BotSnapshot } from '@/hooks/useBot'
 import { fmtPnl, fmtUsd, fmtAge, freshnessClass, fmtUptime } from '@/lib/design-tokens'
 import { getApiUrl, apiFetch } from '@/lib/api'
+// W13-4 — Theme toggle (dark/light). Sits in the right-hand action
+// cluster next to mute / shortcuts / config so the trader can flip
+// the entire workstation's palette without leaving the status bar.
+import ThemeToggle from './ThemeToggle'
 
 interface TopStatusBarProps {
   snapshot: BotSnapshot
@@ -263,6 +267,12 @@ export default function TopStatusBar({
         <span className="hidden sm:inline-block mono text-[11px] text-[#7e8aaa] bg-[#0e1015] border border-[#1f2335] px-2 py-1 rounded-md">
           {nowUtc}
         </span>
+
+        {/* W13-4 — Theme toggle (dark/light). Sits at the start of the
+            icon cluster so it reads "appearance" → "audio" → "input help"
+            → "config". The button itself renders null on SSR (handled
+            inside ThemeToggle to dodge hydration mismatch). */}
+        <ThemeToggle />
 
         {onToggleMute && (
           <button

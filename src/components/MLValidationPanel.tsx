@@ -82,6 +82,7 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table'
+import { ReliabilityDiagram } from '@/components/charts'
 
 // ── Types (mirror backend payloads) ────────────────────────────────────────
 
@@ -943,102 +944,26 @@ export default function MLValidationPanel() {
 // ── Inline child components (kept in this file for cohesion) ───────────────
 
 function CalibrationPlot({ curve }: { curve: ReliabilityBin[] }) {
-  // Render a 10-bin reliability diagram: predicted prob (bin_center) on X,
-  // empirical frequency on Y, with a perfect-calibration diagonal reference.
-  const w = 320
-  const h = 160
-  const pad = 28
-  const plotW = w - pad * 2
-  const plotH = h - pad * 2
-  const xScale = (p: number) => pad + p * plotW
-  const yScale = (p: number) => pad + (1 - p) * plotH
-  const maxCount = Math.max(...curve.map((b) => b.count), 1)
+  // W13-9 — Now backed by the shared Recharts ReliabilityDiagram component
+  // from @/components/charts. Maps the backend's 10-bin reliability_curve
+  // (bin_center / empirical_freq / count) to the chart's
+  // (predicted / actual / count) shape. The per-bin table below the chart
+  // is preserved since it surfaces the |Δ| delta + sample count per bin.
+  const chartData = curve.map((b) => ({
+    predicted: b.bin_center,
+    actual: b.empirical_freq,
+    count: b.count,
+  }))
 
   return (
     <div className="flex flex-col gap-3">
-      <svg viewBox={`0 0 ${w} ${h}`} className="w-full h-auto">
-        {/* Grid */}
-        {[0, 0.25, 0.5, 0.75, 1].map((t) => (
-          <g key={t}>
-            <line
-              x1={pad}
-              y1={yScale(t)}
-              x2={w - pad}
-              y2={yScale(t)}
-              stroke="#1f2335"
-              strokeWidth={0.5}
-            />
-            <line
-              x1={xScale(t)}
-              y1={pad}
-              x2={xScale(t)}
-              y2={h - pad}
-              stroke="#1f2335"
-              strokeWidth={0.5}
-            />
-          </g>
-        ))}
-        {/* Diagonal perfect-calibration reference */}
-        <line
-          x1={pad}
-          y1={pad}
-          x2={w - pad}
-          y2={h - pad}
-          stroke="#3e4560"
-          strokeWidth={1}
-          strokeDasharray="3,2"
-        />
-        {/* Bars showing sample counts (lightweight histogram backdrop) */}
-        {curve.map((b, i) => {
-          const barH = (b.count / maxCount) * plotH * 0.3
-          return (
-            <rect
-              key={`bar-${i}`}
-              x={xScale(b.bin_center) - plotW / 20}
-              y={h - pad - barH}
-              width={plotW / 10 - 1}
-              height={barH}
-              fill="rgba(6, 182, 212, 0.15)"
-            />
-          )
-        })}
-        {/* Calibration polyline */}
-        <path
-          d={curve
-            .map((b, i) => `${i === 0 ? 'M' : 'L'} ${xScale(b.bin_center).toFixed(1)} ${yScale(b.empirical_freq).toFixed(1)}`)
-            .join(' ')}
-          fill="none"
-          stroke="#22d3ee"
-          strokeWidth={1.5}
-        />
-        {/* Calibration points */}
-        {curve.map((b, i) => (
-          <g key={`pt-${i}`}>
-            <circle
-              cx={xScale(b.bin_center)}
-              cy={yScale(b.empirical_freq)}
-              r={3}
-              fill={Math.abs(b.bin_center - b.empirical_freq) < 0.03 ? '#22c55e' : Math.abs(b.bin_center - b.empirical_freq) < 0.08 ? '#f59e0b' : '#ef4444'}
-              stroke="#13161e"
-              strokeWidth={0.5}
-            />
-          </g>
-        ))}
-        {/* Axis labels */}
-        <text x={w / 2} y={h - 4} textAnchor="middle" fill="#7e8aaa" fontSize="8">
-          predicted probability (bin center)
-        </text>
-        <text
-          x={6}
-          y={h / 2}
-          textAnchor="middle"
-          fill="#7e8aaa"
-          fontSize="8"
-          transform={`rotate(-90 6 ${h / 2})`}
-        >
-          empirical frequency
-        </text>
-      </svg>
+      <ReliabilityDiagram
+        data={chartData}
+        height={220}
+        showDiagonal
+        formatX={(v) => v.toFixed(2)}
+        formatY={(v) => v.toFixed(2)}
+      />
       {/* Per-bin table */}
       <div className="overflow-x-auto scrollbar-thin">
         <Table className="data-table">
@@ -1074,7 +999,7 @@ function CalibrationPlot({ curve }: { curve: ReliabilityBin[] }) {
         </Table>
       </div>
       <div className="text-[10px] text-[#5a637a]">
-        Bar backdrop = sample count per bin · point colour = |Δ| (green ≤0.03, amber ≤0.08, red &gt;0.08)
+        Scatter points colored by |Δ| (green ≤0.03, amber ≤0.08, red &gt;0.08). Dashed diagonal = perfect calibration.
       </div>
     </div>
   )

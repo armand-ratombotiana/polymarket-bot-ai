@@ -14,6 +14,7 @@ from collections.abc import Callable
 import websockets
 
 from config import settings
+from core.circuit_breaker import websocket_breaker
 from core.data_store import OrderBook, PriceLevel, store
 
 log = logging.getLogger(__name__)
@@ -74,12 +75,27 @@ class WebSocketClient:
     async def _run_forever(self) -> None:
         delay = RECONNECT_BASE_DELAY
         while self._running:
+            # W13-2 — circuit breaker: when the WebSocket endpoint has been
+            # failing sustainedly, the breaker opens and we skip the connect
+            # attempt (failing fast instead of burning through reconnects).
+            # ``can_execute`` returns True while CLOSED — the steady state —
+            # so this branch is a transparent no-op until a sustained run of
+            # failures trips the breaker.
+            if not websocket_breaker.can_execute():
+                log.debug(
+                    "WebSocket circuit OPEN — backing off %.0fs", delay,
+                )
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, RECONNECT_MAX_DELAY)
+                continue
             try:
                 await self._connect_and_listen()
+                websocket_breaker.record_success()
                 delay = RECONNECT_BASE_DELAY  # reset on clean disconnect
             except asyncio.CancelledError:
                 break
             except Exception as e:
+                websocket_breaker.record_failure(e)
                 log.debug("WebSocket error: %s — reconnecting in %.0fs", e, delay)
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, RECONNECT_MAX_DELAY)

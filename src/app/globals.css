@@ -126,6 +126,141 @@
   --z-critical:   60;
 }
 
+/* ═══════════════════════════════════════════════════════════════════════════
+   LIGHT THEME OVERRIDES (W13-4)
+   ═══════════════════════════════════════════════════════════════════════════
+
+   `next-themes` (attribute="class") toggles a `dark` / `light` class on
+   `<html>`. The `:root` block above is the dark default and stays
+   unchanged. This `.light` block re-defines every design token for the
+   light theme so any consumer of `var(--…)` re-themes automatically.
+
+   Palette decisions (WCAG AA contrast against the new --bg-surface):
+     - Backgrounds: cool slate / white — keeps the workstation's
+       "neutral institutional" feel, just inverted.
+     - Text: slate-900/600/400 ladder for primary/secondary/dim.
+     - Semantic colors: each `-fg` variant shifts one or two shades
+       darker so it stays readable on white (e.g. green-700 instead
+       of green-400). Status dot colors (--status-*) stay the same
+       saturated values — they're small enough that the lighter
+       shade is still legible on white.
+
+   Hardcoded Tailwind arbitrary values: the codebase has ~880
+   occurrences of `bg-[#0e1015]` / `text-[#7e8aaa]` / etc. across
+   panels. Rather than rewrite every panel, the second half of
+   this block scopes overrides to `.light` so those arbitrary
+   classes also flip. `!important` is required to beat Tailwind's
+   own generated `.bg-\[\#0e1015\]` rule (Tailwind generates these
+   in the same cascade layer as utilities, so without `!important`
+   the dark hex would win for any class declared later). */
+.light {
+  /* ── Background layers ──────────────────────────────────────────────────── */
+  --bg-base:      #f1f5f9;   /* deepest background — slate-100 */
+  --bg-surface:   #f8fafc;   /* page background — slate-50 */
+  --bg-card:      #ffffff;   /* card / panel background — white */
+  --bg-card-alt:  #f1f5f9;   /* alternate card — slate-100 */
+  --bg-hover:     #f1f5f9;   /* row hover — slate-100 */
+  --bg-selected:  #dbeafe;   /* row selected — blue-100 */
+  --bg-input:     #f8fafc;   /* input background — slate-50 */
+  --bg-overlay:   rgba(15, 23, 42, 0.55); /* modal backdrop */
+
+  /* ── Borders ────────────────────────────────────────────────────────────── */
+  --border:       #e2e8f0;   /* standard border — slate-200 */
+  --border-dim:   #f1f5f9;   /* subtle border — slate-100 */
+  --border-focus: #2563eb;   /* focus ring — blue-600 (darker for white bg) */
+  --border-hover: #cbd5e1;   /* hover border — slate-300 */
+
+  /* ── Typography ─────────────────────────────────────────────────────────── */
+  --text-primary:    #0f172a;   /* body text — slate-900 */
+  --text-secondary:  #475569;   /* secondary labels — slate-600 */
+  --text-dim:        #94a3b8;   /* muted / placeholder — slate-400 */
+  --text-link:       #2563eb;   /* links — blue-600 */
+  --text-mono:       #1e293b;   /* monospace data — slate-800 */
+
+  /* ── Semantic colors ────────────────────────────────────────────────────── */
+  /* Each `-fg` shifts 1-2 shades darker so text stays readable on white. */
+  --color-green:    #16a34a;  --color-green-fg: #15803d;
+  --color-green-bg: rgba(22, 163, 74, 0.10);
+  --color-green-bd: rgba(22, 163, 74, 0.30);
+
+  --color-red:    #dc2626;  --color-red-fg: #b91c1c;
+  --color-red-bg: rgba(220, 38, 38, 0.08);
+  --color-red-bd: rgba(220, 38, 38, 0.30);
+
+  --color-amber:    #d97706;  --color-amber-fg: #b45309;
+  --color-amber-bg: rgba(217, 119, 6, 0.10);
+  --color-amber-bd: rgba(217, 119, 6, 0.30);
+
+  --color-blue:    #2563eb;  --color-blue-fg: #1d4ed8;
+  --color-blue-bg: rgba(37, 99, 235, 0.08);
+  --color-blue-bd: rgba(37, 99, 235, 0.25);
+
+  --color-cyan:    #0891b2;  --color-cyan-fg: #0e7490;
+  --color-cyan-bg: rgba(8, 145, 178, 0.10);
+  --color-cyan-bd: rgba(8, 145, 178, 0.30);
+
+  --color-purple:    #9333ea;  --color-purple-fg: #7e22ce;
+  --color-purple-bg: rgba(147, 51, 234, 0.08);
+  --color-purple-bd: rgba(147, 51, 234, 0.30);
+
+  /* ── Mode tokens ────────────────────────────────────────────────────────── */
+  --mode-paper-color:    #d97706;
+  --mode-paper-bg:       rgba(217, 119, 6, 0.12);
+  --mode-paper-bd:       rgba(217, 119, 6, 0.40);
+
+  --mode-live-color:     #dc2626;
+  --mode-live-bg:        rgba(220, 38, 38, 0.12);
+  --mode-live-bd:        rgba(220, 38, 38, 0.45);
+
+  --mode-shadow-color:   #0891b2;
+  --mode-shadow-bg:      rgba(8, 145, 178, 0.12);
+  --mode-shadow-bd:      rgba(8, 145, 178, 0.35);
+
+  --mode-backtest-color: #9333ea;
+  --mode-backtest-bg:    rgba(147, 51, 234, 0.10);
+  --mode-backtest-bd:    rgba(147, 51, 234, 0.35);
+
+  /* Status tokens stay the same saturated hues — small dots stay legible
+     on white. (Healthy green / degraded amber / unavailable red / etc.) */
+}
+
+/* ── Light theme: arbitrary Tailwind value overrides ───────────────────────
+   The codebase relies heavily on `bg-[#0e1015]`, `text-[#7e8aaa]`,
+   `border-[#1f2335]` etc. (~880 occurrences across 38 files). Without
+   these scoped overrides every panel would render dark cards on a light
+   page. We target the dozen most-used hex literals and remap them under
+   `.light`. The escape syntax (`\[\#0e1015\]`) is required because
+   Tailwind's arbitrary value classes contain literal `[`, `#`, `]`
+   characters that have meaning in CSS selectors. */
+.light .bg-\[\#080910\]      { background-color: #f1f5f9 !important; }
+.light .bg-\[\#0e1015\]      { background-color: #ffffff !important; }
+.light .bg-\[\#0e1015\]\/95  { background-color: rgba(255, 255, 255, 0.95) !important; }
+.light .bg-\[\#13161e\]      { background-color: #ffffff !important; }
+.light .bg-\[\#111420\]      { background-color: #f1f5f9 !important; }
+.light .bg-\[\#1a1f2e\]      { background-color: #f1f5f9 !important; }
+.light .bg-\[\#1e2540\]      { background-color: #dbeafe !important; }
+
+.light .border-\[\#1f2335\]  { border-color: #e2e8f0 !important; }
+.light .border-\[\#181c28\]  { border-color: #f1f5f9 !important; }
+.light .border-\[\#2d3450\]  { border-color: #cbd5e1 !important; }
+.light .hover\:border-\[\#2d3450\]:hover { border-color: #cbd5e1 !important; }
+
+.light .text-\[\#dde1ed\]    { color: #0f172a !important; }
+.light .text-\[\#7e8aaa\]    { color: #475569 !important; }
+.light .text-\[\#3e4560\]    { color: #94a3b8 !important; }
+
+/* "hover:text-white" — in dark mode the hover target is white (brighter
+   than the default slate-300). In light mode the hover target should be
+   the darker slate-900 so the text darkens on hover instead of whiting
+   out. */
+.light .hover\:text-white:hover { color: #0f172a !important; }
+
+/* Scrollbar: dark grey thumb → slate-300 thumb in light mode so the
+   scrollbar doesn't look like a black bar on a white panel. */
+.light .scrollbar-thin::-webkit-scrollbar-thumb { background: #cbd5e1; }
+.light .scrollbar-thin::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+.light * { scrollbar-color: #cbd5e1 transparent; }
+
 /* ── Reduced motion: honor system preference ──────────────────────────────── */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
