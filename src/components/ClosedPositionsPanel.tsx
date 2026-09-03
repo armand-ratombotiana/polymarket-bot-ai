@@ -201,9 +201,10 @@ export default function ClosedPositionsPanel() {
         setError((p) => (p ? `${p} · stats: HTTP ${statsRes.value.status}` : `stats: HTTP ${statsRes.value.status}`))
       }
       setLastUpdated(Date.now())
-    } catch (e: any) {
-      if (e?.name !== 'AbortError') {
-        setError(e?.message ?? 'fetch failed')
+    } catch (e: unknown) {
+      const err = e as { name?: string; message?: string }
+      if (err?.name !== 'AbortError') {
+        setError(err?.message ?? 'fetch failed')
       }
     } finally {
       setLoading(false)

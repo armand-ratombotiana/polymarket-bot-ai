@@ -65,6 +65,64 @@ log = logging.getLogger(__name__)
 DB_PATH = Path(os.environ.get("CLOSED_POSITIONS_DB_PATH", "/app/data/closed_positions.db"))
 
 
+# ── W11-9: query timing decorator ───────────────────────────────────────────
+# Lightweight instrumentation for the most commonly-called read paths. Wraps
+# async query methods and emits a WARNING when a single call exceeds
+# ``_SLOW_QUERY_THRESHOLD`` (100 ms — the dashboard's SLO for the
+# ``/api/positions/closed`` and ``/api/positions/closed/stats`` endpoints).
+# Failed queries (the underlying methods swallow their own persistence
+# errors and return [] / ``_empty_stats()``) are still timed so a slow
+# failure path surfaces in the log alongside the exception traceback. The
+# decorator is import-safe, never re-raises, and preserves the wrapped
+# function's return value / exception semantics verbatim.
+import functools  # noqa: E402  (kept next to its consumer for readability)
+
+_SLOW_QUERY_THRESHOLD = 0.100  # seconds
+
+
+def timed_query(func):
+    """Log a warning when ``func`` takes longer than ``_SLOW_QUERY_THRESHOLD``.
+
+    Supports both ``def`` and ``async def`` callables — the wrapper branches
+    on ``asyncio.iscoroutinefunction`` so sync query functions and async
+    ones can share the same decorator.
+    """
+
+    if asyncio.iscoroutinefunction(func):
+
+        @functools.wraps(func)
+        async def _async_wrapper(*args, **kwargs):
+            start = time.time()
+            try:
+                return await func(*args, **kwargs)
+            finally:
+                duration = time.time() - start
+                if duration > _SLOW_QUERY_THRESHOLD:
+                    log.warning(
+                        "[closed_positions] slow query %s: %.3fs",
+                        func.__name__,
+                        duration,
+                    )
+
+        return _async_wrapper
+
+    @functools.wraps(func)
+    def _sync_wrapper(*args, **kwargs):
+        start = time.time()
+        try:
+            return func(*args, **kwargs)
+        finally:
+            duration = time.time() - start
+            if duration > _SLOW_QUERY_THRESHOLD:
+                log.warning(
+                    "[closed_positions] slow query %s: %.3fs",
+                    func.__name__,
+                    duration,
+                )
+
+    return _sync_wrapper
+
+
 # ── Attribution dimension columns ───────────────────────────────────────────
 # These are first-class columns (not buried in metadata_json) so SQLite can
 # GROUP BY them directly via CASE expressions in ``core/attribution.py``.
@@ -134,6 +192,45 @@ class ClosedPositionsStore:
                 cursor.execute(
                     "CREATE INDEX IF NOT EXISTS idx_cp_time "
                     "ON closed_positions(timestamp DESC)"
+                )
+                # ── W11-9: additional indexes for common query patterns ──
+                # (decision_id) — cross-ref lookup against the decision
+                # ledger (e.g. "find me the closed position for this
+                # decision_id"). The existing ``(token_id, timestamp DESC)``
+                # and ``(strategy, timestamp DESC)`` indexes can't service a
+                # ``WHERE decision_id = ?`` query.
+                cursor.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_cp_decision "
+                    "ON closed_positions(decision_id)"
+                )
+                # (direction) — long-YES (BUY) vs long-NO (SELL) split
+                # surfaced by ``attribute_by_trade_direction``. Group-by
+                # queries on a non-indexed column force a full scan.
+                cursor.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_cp_direction "
+                    "ON closed_positions(direction)"
+                )
+                # (pnl) — ``get_closed_stats`` runs
+                # ``SELECT pnl FROM closed_positions ORDER BY pnl`` for the
+                # median calculation. Without this index SQLite must sort
+                # the entire table on every call. Also services
+                # "best trade / worst trade" sort paths.
+                cursor.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_cp_pnl "
+                    "ON closed_positions(pnl)"
+                )
+                # (model_version, timestamp DESC) — model-version lineage
+                # queries (e.g. "show me recent trades from model v2.3.1")
+                # surfaced by the dashboard's model-comparison view.
+                cursor.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_cp_model_ts "
+                    "ON closed_positions(model_version, timestamp DESC)"
+                )
+                # (exit_price) — exit-price-quantile queries used by the
+                # post-hoc analytics module (``core/deep_analysis.py``).
+                cursor.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_cp_exit_price "
+                    "ON closed_positions(exit_price)"
                 )
                 conn.commit()
         except Exception as e:
@@ -240,6 +337,7 @@ class ClosedPositionsStore:
 
     # ── Reads ──────────────────────────────────────────────────────────────
 
+    @timed_query
     async def get_closed_positions(
         self,
         limit: int = 50,
@@ -289,6 +387,7 @@ class ClosedPositionsStore:
 
         return await asyncio.to_thread(_fetch)
 
+    @timed_query
     async def get_closed_stats(self) -> dict[str, Any]:
         """
         Aggregate P&L stats across all recorded closed positions.
@@ -507,4 +606,5 @@ __all__ = [
     "ClosedPositionsStore",
     "closed_positions",
     "register_routes",
+    "timed_query",
 ]

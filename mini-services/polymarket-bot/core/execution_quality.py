@@ -76,6 +76,63 @@ DB_PATH = Path(
 _BPS_SCALE = 10_000.0
 
 
+# ── W11-9: query timing decorator ───────────────────────────────────────────
+# Lightweight instrumentation for the most commonly-called read paths. Wraps
+# a sync or async function and emits a WARNING when a single call exceeds
+# ``_SLOW_QUERY_THRESHOLD`` (100 ms — the dashboard SLO for the
+# ``/api/execution-quality`` endpoint's aggregate stats query). The decorator
+# is import-safe, never re-raises, and preserves the wrapped function's
+# return value / exception semantics verbatim.
+import functools  # noqa: E402  (kept next to its consumer for readability)
+
+_SLOW_QUERY_THRESHOLD = 0.100  # seconds
+
+
+def timed_query(func):
+    """Log a warning when ``func`` takes longer than ``_SLOW_QUERY_THRESHOLD``.
+
+    Supports both ``def`` and ``async def`` callables — the wrapper branches
+    on ``asyncio.iscoroutinefunction`` so sync query functions (this module's
+    ``get_execution_stats`` is sync) and async ones (the route handlers) can
+    share the same decorator.
+    """
+    import asyncio as _asyncio
+
+    if _asyncio.iscoroutinefunction(func):
+
+        @functools.wraps(func)
+        async def _async_wrapper(*args, **kwargs):
+            start = time.time()
+            try:
+                return await func(*args, **kwargs)
+            finally:
+                duration = time.time() - start
+                if duration > _SLOW_QUERY_THRESHOLD:
+                    log.warning(
+                        "[execution_quality] slow query %s: %.3fs",
+                        func.__name__,
+                        duration,
+                    )
+
+        return _async_wrapper
+
+    @functools.wraps(func)
+    def _sync_wrapper(*args, **kwargs):
+        start = time.time()
+        try:
+            return func(*args, **kwargs)
+        finally:
+            duration = time.time() - start
+            if duration > _SLOW_QUERY_THRESHOLD:
+                log.warning(
+                    "[execution_quality] slow query %s: %.3fs",
+                    func.__name__,
+                    duration,
+                )
+
+    return _sync_wrapper
+
+
 # ── Schema ──────────────────────────────────────────────────────────────────
 
 def _init_db() -> None:
@@ -126,6 +183,36 @@ def _init_db() -> None:
             cursor.execute(
                 "CREATE INDEX IF NOT EXISTS idx_eq_decision "
                 "ON execution_quality(decision_id)"
+            )
+            # ── W11-9: additional indexes for common query patterns ──
+            # (slippage_bps) — worst-execution queries (e.g. "top-10 worst
+            # fills this week"). The existing ``(strategy, timestamp DESC)``
+            # and ``(timestamp DESC)`` indexes can't service an
+            # ``ORDER BY slippage_bps DESC`` query without a full sort.
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_eq_slippage "
+                "ON execution_quality(slippage_bps DESC)"
+            )
+            # (side, timestamp DESC) — per-side aggregate queries (BUY vs
+            # SELL execution quality split). ``by_side`` is a top-level
+            # field on ``get_execution_stats``'s return payload.
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_eq_side_ts "
+                "ON execution_quality(side, timestamp DESC)"
+            )
+            # (paper, timestamp DESC) — paper-vs-live filter (operators
+            # often slice execution quality by ``paper = 1`` to exclude
+            # backtest / replay fills from production stats).
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_eq_paper_ts "
+                "ON execution_quality(paper, timestamp DESC)"
+            )
+            # (order_id) — fast lookup by exchange order id (e.g. when
+            # reconciling a CLOB fill webhook against the recorded
+            # execution-quality row).
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_eq_order "
+                "ON execution_quality(order_id)"
             )
             conn.commit()
     except Exception as e:
@@ -288,6 +375,7 @@ def record_execution(order: Any, fill_price: float, signal_price: float | None =
 
 # ── Reads ───────────────────────────────────────────────────────────────────
 
+@timed_query
 def get_execution_stats(
     time_window_seconds: float | None = None,
     strategy: str | None = None,
@@ -347,8 +435,38 @@ def get_execution_stats(
         with sqlite3.connect(DB_PATH) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
-            cursor.execute(f"SELECT * FROM execution_quality{where}", params)
-            rows = [dict(r) for r in cursor.fetchall()]
+            # ── W11-9: push COUNT + by_side roll-up down to SQL ───────────
+            # ``count`` and ``by_side`` are pure aggregates — there's no
+            # reason to materialise every row in Python just to count them.
+            # The percentile / median calculations still need every value
+            # (SQLite has no MEDIAN() / PERCENTILE_CONT() built-in), so we
+            # fetch the slippage / latency / edge columns ONLY for those
+            # in-Python passes — selecting 3 columns instead of ``*`` cuts
+            # the row materialisation cost ~5x (the dropped columns are
+            # long TEXT identifiers + prices we don't aggregate).
+            cursor.execute(
+                f"SELECT COUNT(*) AS n, "
+                f"SUM(CASE WHEN side = 'BUY'  THEN 1 ELSE 0 END) AS buy_n, "
+                f"SUM(CASE WHEN side = 'SELL' THEN 1 ELSE 0 END) AS sell_n "
+                f"FROM execution_quality{where}",
+                params,
+            )
+            agg = dict(cursor.fetchone() or {})
+            n_rows = int(agg.get("n") or 0)
+            if n_rows == 0:
+                return empty
+            by_side = {
+                "BUY": int(agg.get("buy_n") or 0),
+                "SELL": int(agg.get("sell_n") or 0),
+            }
+
+            # Pull only the columns we actually aggregate in Python.
+            cursor.execute(
+                f"SELECT slippage_bps, latency_ms, realized_edge "
+                f"FROM execution_quality{where}",
+                params,
+            )
+            rows = cursor.fetchall()
     except Exception as e:
         log.error("[execution_quality] get_execution_stats query failed: %s", e)
         return empty
@@ -356,15 +474,9 @@ def get_execution_stats(
     if not rows:
         return empty
 
-    slippages_bps = [float(r.get("slippage_bps") or 0.0) for r in rows]
-    latencies_ms = [float(r.get("latency_ms") or 0.0) for r in rows]
-    edges = [float(r.get("realized_edge") or 0.0) for r in rows]
-
-    by_side = {"BUY": 0, "SELL": 0}
-    for r in rows:
-        s = (r.get("side") or "").upper()
-        if s in by_side:
-            by_side[s] += 1
+    slippages_bps = [float(r["slippage_bps"] or 0.0) for r in rows]
+    latencies_ms = [float(r["latency_ms"] or 0.0) for r in rows]
+    edges = [float(r["realized_edge"] or 0.0) for r in rows]
 
     def _percentile(values: list[float], p: float) -> float:
         if not values:
@@ -375,7 +487,7 @@ def get_execution_stats(
         return s[k]
 
     return {
-        "count": len(rows),
+        "count": n_rows,
         "strategy": strategy,
         "time_window_seconds": time_window_seconds,
         "avg_slippage_bps": statistics.fmean(slippages_bps) if slippages_bps else 0.0,
@@ -465,6 +577,7 @@ def register_routes(app: Any) -> None:
 
 __all__ = [
     "DB_PATH",
+    "timed_query",
     "record_execution",
     "get_execution_stats",
     "register_routes",

@@ -47,6 +47,64 @@ log = logging.getLogger(__name__)
 
 DB_PATH = Path(os.environ.get("DECISION_LEDGER_DB_PATH", "/app/data/decision_ledger.db"))
 
+
+# ── W11-9: query timing decorator ───────────────────────────────────────────
+# Lightweight instrumentation for the most commonly-called read paths. Wraps
+# async / sync query methods, measures wall time, and emits a WARNING when a
+# single call exceeds ``_SLOW_QUERY_THRESHOLD`` (100 ms — the SLO threshold
+# surfaced by the dashboard's "recent decisions" feed). Failed queries (the
+# underlying methods swallow their own persistence errors and return []) are
+# still timed so a slow failure path surfaces in the log alongside the
+# exception traceback. The decorator is import-safe and never re-raises —
+# it preserves the wrapped function's return value / exception semantics
+# verbatim.
+_SLOW_QUERY_THRESHOLD = 0.100  # seconds
+
+
+def timed_query(func):
+    """Log a warning when ``func`` takes longer than 100 ms.
+
+    Works for both ``def`` and ``async def`` callables — the wrapper
+    inspects the return value and ``await``s it only when it's an awaitable
+    so synchronous query methods (e.g. ``AlertEngine.get_recent``) can be
+    decorated without forcing an ``async`` rewrite.
+    """
+    import functools
+
+    if asyncio.iscoroutinefunction(func):
+
+        @functools.wraps(func)
+        async def _async_wrapper(*args, **kwargs):
+            start = time.time()
+            try:
+                return await func(*args, **kwargs)
+            finally:
+                duration = time.time() - start
+                if duration > _SLOW_QUERY_THRESHOLD:
+                    log.warning(
+                        "[decision_ledger] slow query %s: %.3fs",
+                        func.__name__,
+                        duration,
+                    )
+
+        return _async_wrapper
+
+    @functools.wraps(func)
+    def _sync_wrapper(*args, **kwargs):
+        start = time.time()
+        try:
+            return func(*args, **kwargs)
+        finally:
+            duration = time.time() - start
+            if duration > _SLOW_QUERY_THRESHOLD:
+                log.warning(
+                    "[decision_ledger] slow query %s: %.3fs",
+                    func.__name__,
+                    duration,
+                )
+
+    return _sync_wrapper
+
 # ── Canonical stage names ───────────────────────────────────────────────────
 # Single source of truth across the pipeline — every emitter references these
 # so the spelling is stable in queries / dashboards.
@@ -113,6 +171,22 @@ class DecisionLedger:
                     "CREATE INDEX IF NOT EXISTS idx_dec_stage "
                     "ON decision_events(stage)"
                 )
+                # ── W11-9: additional indexes for common query patterns ──
+                # (stage, timestamp DESC) — used by dashboards filtering
+                # "recent PREDICTION / FILL events across all tokens". The
+                # bare ``(stage)`` index above can't satisfy the ORDER BY
+                # without a separate sort pass; the compound variant does.
+                cursor.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_dec_stage_ts "
+                    "ON decision_events(stage, timestamp DESC)"
+                )
+                # (timestamp DESC) — recent-decisions feed (no WHERE filter).
+                # Without this index SQLite must sort the full table on every
+                # ``ORDER BY timestamp DESC`` query.
+                cursor.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_dec_ts "
+                    "ON decision_events(timestamp DESC)"
+                )
 
                 cursor.execute("""
                     CREATE TABLE IF NOT EXISTS decision_rejections (
@@ -134,6 +208,27 @@ class DecisionLedger:
                 cursor.execute(
                     "CREATE INDEX IF NOT EXISTS idx_rej_decision "
                     "ON decision_rejections(decision_id)"
+                )
+                # ── W11-9: additional rejection-table indexes ──
+                # (timestamp DESC) — ``get_rejections(limit=N)`` is a
+                # no-WHERE recent-first query; without this index SQLite
+                # must sort the whole rejection table on every call.
+                cursor.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_rej_ts "
+                    "ON decision_rejections(timestamp DESC)"
+                )
+                # (reason, timestamp DESC) — future "recent rejections
+                # by reason code" queries (operator dashboard filters
+                # by ``low_confidence`` / ``wide_spread`` / etc.).
+                cursor.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_rej_reason_ts "
+                    "ON decision_rejections(reason, timestamp DESC)"
+                )
+                # (strategy, timestamp DESC) — strategy-filtered rejection
+                # views (e.g. "show me recent ml_sig_v1 rejections").
+                cursor.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_rej_strategy_ts "
+                    "ON decision_rejections(strategy, timestamp DESC)"
                 )
                 conn.commit()
         except Exception as e:
@@ -280,6 +375,7 @@ class DecisionLedger:
 
     # ── Reads ──────────────────────────────────────────────────────────────
 
+    @timed_query
     async def get_chain(self, decision_id: str) -> list[dict[str, Any]]:
         """Return the ordered stage chain for a single ``decision_id``."""
         if not decision_id:
@@ -312,6 +408,7 @@ class DecisionLedger:
 
         return await asyncio.to_thread(_fetch)
 
+    @timed_query
     async def get_chain_by_token(
         self, token_id: str, limit: int = 50
     ) -> list[dict[str, Any]]:
@@ -349,6 +446,7 @@ class DecisionLedger:
 
         return await asyncio.to_thread(_fetch)
 
+    @timed_query
     async def get_rejections(self, limit: int = 50) -> list[dict[str, Any]]:
         """Return recent rejection records (most recent first)."""
         def _fetch() -> list[dict[str, Any]]:
@@ -373,6 +471,7 @@ class DecisionLedger:
 
         return await asyncio.to_thread(_fetch)
 
+    @timed_query
     async def get_prediction_history(
         self, token_id: str, limit: int = 10
     ) -> list[dict[str, Any]]:
@@ -549,6 +648,7 @@ __all__ = [
     "DecisionLedger",
     "decision_ledger",
     "register_routes",
+    "timed_query",
     "STAGE_PREDICTION",
     "STAGE_SIGNAL",
     "STAGE_RISK_APPROVED",

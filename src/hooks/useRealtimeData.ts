@@ -1,0 +1,148 @@
+// hooks/useRealtimeData.ts
+// Hybrid data hook — REST prefetch + WebSocket live updates + polling fallback.
+//
+// W11-4 — Drop-in replacement for the ad-hoc "fetch on mount + setInterval"
+// pattern that ~30 panels currently duplicate. The contract:
+//   1. On mount, fire a REST GET against `endpoint` to populate the
+//      initial state synchronously (no flash of empty content).
+//   2. In parallel, the embedded useWebSocket() opens a connection to the
+//      bot's /ws endpoint. When a message arrives with `msg.channel ===
+//      wsChannel`, swap in `msg.data` as the new state.
+//   3. If the WS is NOT connected (still handshaking, mid-reconnect, or
+//      permanently failed after maxReconnectAttempts), fall back to
+//      polling `endpoint` every `pollInterval` ms. The moment the WS
+//      connects, the polling interval is torn down (the effect deps on
+//      `isConnected`, so a WS reconnect re-runs the effect and clears
+//      the interval).
+//   4. When the tab is hidden, skip the polling tick — no point burning
+//      backend quota on tabs nobody is looking at. The WS itself is
+//      already paused by useWebSocket's visibilitychange handler.
+//
+// The hook does NOT cancel in-flight REST requests on unmount — `cancelled`
+// guards the setState calls, so a late response after unmount is silently
+// dropped (same pattern as useBot's fetchRestSnapshot).
+//
+// Why this is better than the existing 2s poll:
+// - When WS is healthy: zero polling traffic. /api/snapshot is only hit
+//   once on mount. (30 panels × 0.5 req/s = 15 req/s saved.)
+// - When WS degrades: transparent fallback to polling — the UI keeps
+//   updating without any user-visible glitch.
+// - When the tab is hidden: zero traffic of any kind.
+'use client'
+
+import { useState, useEffect, useRef } from 'react'
+import { useWebSocket } from './useWebSocket'
+import { apiFetch } from '@/lib/api'
+
+export interface UseRealtimeDataOptions {
+  /** If provided, subscribe to this WS channel (msg.channel === wsChannel). */
+  wsChannel?: string
+  /** Fallback polling interval in ms (default 10s). */
+  pollInterval?: number
+  /** Optional initial data so the first render isn't `null`. */
+  initialData?: unknown
+}
+
+export interface UseRealtimeDataResult<T> {
+  data: T | null
+  isLoading: boolean
+  error: string | null
+  /** true when the WS is live and pushing updates; false when polling. */
+  isRealtime: boolean
+}
+
+export function useRealtimeData<T>(
+  endpoint: string,
+  options: UseRealtimeDataOptions = {},
+): UseRealtimeDataResult<T> {
+  const { wsChannel, pollInterval = 10000, initialData } = options
+  const [data, setData] = useState<T | null>(
+    (initialData as T | undefined) ?? null,
+  )
+  const [isLoading, setIsLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const wsConnectedRef = useRef(false)
+
+  // Initial REST fetch — runs once on mount (and again if `endpoint`
+  // changes, which is rare). The `cancelled` flag guards setState after
+  // unmount so we never trigger a React "setState on unmounted component"
+  // warning.
+  useEffect(() => {
+    let cancelled = false
+    const fetchData = async () => {
+      try {
+        const res = await apiFetch(endpoint)
+        if (!res.ok) throw new Error(`HTTP ${res.status}`)
+        const json = await res.json()
+        if (!cancelled) {
+          setData(json as T)
+          setError(null)
+        }
+      } catch (e) {
+        if (!cancelled) setError(String(e))
+      } finally {
+        if (!cancelled) setIsLoading(false)
+      }
+    }
+    fetchData()
+    return () => {
+      cancelled = true
+    }
+  }, [endpoint])
+
+  // WebSocket for real-time updates. The useWebSocket hook owns the
+  // connection lifecycle (connect / reconnect / pause-on-hidden); we
+  // just supply the onMessage handler that filters by channel.
+  const { isConnected } = useWebSocket({
+    onMessage: (raw) => {
+      // The backend pushes JSON objects with `{ channel, data }`. The
+      // shape is loose (data is per-channel) so we narrow via runtime
+      // property checks instead of a Zod schema — channels we don't
+      // subscribe to are silently dropped.
+      const msg = raw as { channel?: string; data?: unknown }
+      if (wsChannel && msg && msg.channel === wsChannel) {
+        setData(msg.data as T)
+        setError(null)
+      }
+    },
+    onConnect: () => {
+      wsConnectedRef.current = true
+    },
+    onDisconnect: () => {
+      wsConnectedRef.current = false
+    },
+  })
+
+  // Fallback polling — only runs when the WS is NOT connected. The
+  // effect re-runs whenever `isConnected` flips, so:
+  //   - WS connects  → effect cleanup clears the existing interval.
+  //   - WS drops     → effect re-runs, starts a new interval.
+  // The `document.hidden` check inside the interval callback (not in the
+  // deps array) means we skip individual ticks when the tab is hidden
+  // without tearing down the interval — cheaper than re-creating the
+  // interval on every visibilitychange.
+  useEffect(() => {
+    if (isConnected) return // WS is working, no need to poll
+    if (typeof document !== 'undefined' && document.hidden) return // Tab hidden, skip
+
+    const interval = setInterval(async () => {
+      if (typeof document !== 'undefined' && document.hidden) return
+      try {
+        const res = await apiFetch(endpoint)
+        if (res.ok) {
+          const json = await res.json()
+          setData(json as T)
+          setError(null)
+        }
+      } catch {
+        // Silent fail on background poll — the next tick will retry,
+        // and a persistent failure will eventually flip `error` via the
+        // initial-fetch effect when the endpoint changes.
+      }
+    }, pollInterval)
+
+    return () => clearInterval(interval)
+  }, [endpoint, isConnected, pollInterval])
+
+  return { data, isLoading, error, isRealtime: isConnected }
+}

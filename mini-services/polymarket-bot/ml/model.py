@@ -28,6 +28,7 @@ from sklearn.linear_model import SGDClassifier
 from sklearn.metrics import brier_score_loss, log_loss, roc_auc_score
 from sklearn.preprocessing import StandardScaler
 
+from ml.calibration import calibrator
 from ml.drift_detector import drift_detector
 from ml.ensemble_meta_learner import ensemble_meta_learner
 from ml.features import FEATURE_NAMES, N_FEATURES
@@ -172,6 +173,13 @@ class MarketMLModel:
         self.training_source: str = "synthetic_only"
         self.n_real_samples: int = 0
         self.n_synthetic_samples: int = 0
+
+        # W11-5: post-hoc calibration metrics — populated by ``fit_initial()``
+        # after the post-hoc ``ProbabilityCalibrator`` is fit on the held-out
+        # calibration fold. Initialised to ``{"is_fit": False}`` so the
+        # ``/api/ml/metrics`` payload always has a calibration sub-document
+        # even before the first training cycle.
+        self.calibration_metrics: dict = {"is_fit": False}
 
         # Per-model rolling Brier score tracking — deque for O(1) append/pop
         self._BRIER_WINDOW = 200
@@ -329,6 +337,39 @@ class MarketMLModel:
         # (per-bar returns annualised by inferred bar cadence) instead of a hardcoded 0.0.
         self.sharpe_ratio = self._compute_sharpe_from_equity()
 
+        # ── Post-hoc probability calibration (W11-5) ────────────────────────────
+        # The base learners (rf_cal, gb_cal) are individually isotonic-calibrated
+        # via sklearn's CalibratedClassifierCV — but their *blend* (adaptive
+        # Brier-weighted average, or the meta-learner output at predict time)
+        # is NOT necessarily calibrated. We fit a second-stage calibrator
+        # (isotonic regression by default) on the held-out calibration fold
+        # using the blended probability output as the input feature.
+        #
+        # ``calibrator`` is a module-level singleton; calling ``fit()`` here
+        # is idempotent (each call overwrites the previous calibrator) so this
+        # is safe to invoke on every retrain cycle.
+        try:
+            cal_metrics = calibrator.fit(y_prob, y_cal)
+            # Stash the calibration metrics on the model so the metrics
+            # endpoint can surface them without re-importing the singleton.
+            self.calibration_metrics = cal_metrics
+            log.info(
+                "[ml_model] Post-hoc calibration fit: method=%s n=%d "
+                "Brier %.4f → %.4f (Δ=%+.4f), ECE %.4f → %.4f (Δ=%+.4f)",
+                cal_metrics["method"], cal_metrics["n_samples"],
+                cal_metrics["pre_brier"], cal_metrics["post_brier"],
+                cal_metrics["brier_improvement"],
+                cal_metrics["pre_ece"], cal_metrics["post_ece"],
+                cal_metrics["ece_improvement"],
+            )
+        except Exception as e:
+            # Calibration is a *post-processing* layer — failure to fit it
+            # MUST NOT break training. ``calibrator.transform()`` is a
+            # passthrough when ``is_fit == False``, so the ensemble will
+            # fall back to the raw blended probability.
+            self.calibration_metrics = {"is_fit": False, "error": str(e)}
+            log.warning("[ml_model] Calibration fit failed: %s — predict() will passthrough", e)
+
         # Register in Model Registry
         version_str = f"v1.{int(time.time()) % 1000:03d}.0"
         model_registry.register_version(
@@ -470,6 +511,39 @@ class MarketMLModel:
         _, conf = self.predict(features, token_id=token_id)
         return conf
 
+    def predict_proba_raw(self, features: np.ndarray) -> np.ndarray:
+        """Return the *uncalibrated* blended ensemble probabilities for a batch.
+
+        This is the raw probability the post-hoc calibrator (W11-5) was fit
+        against. Exposed publicly so callers (training orchestrator, offline
+        validation, tests) can compute calibration curves / fit new
+        calibrators without re-running the full ``predict()`` path
+        (which would recursively re-apply the calibrator).
+
+        Args:
+            features: 2-D array (n_samples, N_FEATURES) of raw feature
+                      vectors. NOT pre-scaled — this method applies the
+                      fitted ``StandardScaler`` internally.
+
+        Returns:
+            1-D float array of length ``n_samples`` with the adaptive-blend
+            ensemble probability for the positive (YES) class — clipped to
+            ``[0.01, 0.99]`` to match ``predict()``'s output range.
+
+        Raises:
+            RuntimeError: if the model is not fitted (``self.rf is None``).
+        """
+        if self.rf is None or self.gb is None:
+            raise RuntimeError(
+                "predict_proba_raw() called on an unfitted model "
+                "(self.rf is None) — call fit_initial() first"
+            )
+        features = np.asarray(features)
+        if features.ndim == 1:
+            features = features.reshape(1, -1)
+        x_scaled = self.scaler.transform(features)
+        return np.clip(self._blend_probas(x_scaled), 0.01, 0.99)
+
     def _adaptive_weights(self) -> tuple[float, float, float, float]:
         """
         Compute blending weights from per-model rolling Brier scores (deque, O(1)).
@@ -531,6 +605,15 @@ class MarketMLModel:
                 if total < 1e-9:
                     total = 1.0
                 p_yes = (w_rf * rf_prob + w_gb * gb_prob + w_sgd * sgd_prob + w_lgbm * lgbm_prob) / total
+
+            # ── W11-5: post-hoc probability calibration ───────────────────────
+            # Apply Platt scaling / isotonic regression (whichever the singleton
+            # ``calibrator`` was fit with) as a final post-processing step on
+            # the blended probability. ``calibrator.transform`` is a
+            # passthrough when the calibrator has NOT been fit yet (cold-start,
+            # disabled, or pre-first-retrain), so this call is safe to make
+            # unconditionally — it cannot break the predict path.
+            p_yes = float(calibrator.transform(np.array([p_yes]))[0])
 
             p_yes = float(np.clip(p_yes, 0.01, 0.99))
             confidence = abs(p_yes - 0.5) * 2.0

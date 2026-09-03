@@ -25,6 +25,14 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from slowapi.errors import RateLimitExceeded
 
+from api.models import (
+    ErrorResponse,
+    HealthResponse,
+    MLMetricsResponse,
+    OrdersResponse,
+    PositionsResponse,
+    TradesResponse,
+)
 from api.rate_limit import (
     ARBITRAGE_LIMIT,
     HEAVY_LIMIT,
@@ -32,6 +40,21 @@ from api.rate_limit import (
     TRADE_LIMIT,
     WRITE_LIMIT,
     limiter,
+)
+
+# W11-2 — TTL cache for hot-path routes.
+# Importing the singleton cache instances here (rather than constructing
+# local copies inside each handler) so cache state is shared across every
+# route in this module AND across ``core.observability`` /
+# ``core.attribution`` (which import the same singletons from
+# ``core.cache`` for their own ``register_routes``-registered endpoints).
+from core.cache import (
+    analytics_cache,
+    attribution_cache,
+    general_cache,
+    markets_cache,
+    ml_metrics_cache,
+    observability_cache,
 )
 
 from config import settings
@@ -43,6 +66,7 @@ from core.fundamental_ingest import fundamental_engine
 from core.gamma_client import gamma_client
 from core.portfolio import compute_exposure, compute_reconciliation, leaderboard
 from core.position_manager import position_manager
+from core.security import validate_token_strength
 from core.settlement import settlement_engine
 from core.watchdog import watchdog
 from core.ws_client import ws_client
@@ -176,6 +200,31 @@ async def _state_persistence_loop() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _seeded_tokens
+
+    # ── W11-6 (OWASP A07) — Token strength check at startup ────────────────
+    # Fail-LOUD on placeholder / weak tokens: emit a WARNING log line (so
+    # the operator sees it in the server log AND the structured audit trail
+    # if a log shipper is wired up), but do NOT crash the server. The auth
+    # middleware already fails-closed (503 AUTH_NOT_CONFIGURED) when the
+    # token is empty; this just adds an extra layer of operator visibility
+    # for the "non-empty but weak" case (e.g. `API_TOKEN=test`).
+    _token_ok, _token_reason = validate_token_strength(settings.api_token)
+    if not _token_ok:
+        log.warning(
+            "[security] API_TOKEN strength check FAILED: %s — "
+            "the server will still start (auth middleware is fail-closed "
+            "on empty tokens), but every authenticated request will use a "
+            "weak secret. Rotate immediately. See docs/SECURITY.md.",
+            _token_reason,
+        )
+        try:
+            await audit_logger.log_event(
+                category="security",
+                event_type="weak_token_warning",
+                details=f"reason={_token_reason} mode=startup",
+            )
+        except Exception:  # pragma: no cover — audit must not block startup
+            log.debug("[security] weak-token audit write failed")
 
     # ── Live-mode guards (P0-GOV-01): live requires explicit authorization ──
     if settings.trading_mode == "live":
@@ -472,23 +521,95 @@ async def _build_snapshot() -> dict:
 # ── App & Router ──────────────────────────────────────────────────────────────
 
 app = FastAPI(
-    title="Polymarket Pro Bot API",
-    version="3.0.0",
-    description="24/7 Polymarket Pro Algorithmic Workstation with 50+ Strategies, Vector DB, and AI Copilot",
+    title="Polymarket Pro — Trading Bot API",
+    description="""
+## Institutional-grade Polymarket trading bot API
+
+### Key Features
+- **Paper trading**: Safe simulation mode with realistic slippage
+- **ML ensemble**: 4-model ensemble (RF/GB/SGD/LightGBM) + meta-learner
+- **Decision ledger**: Full PREDICTION→SIGNAL→RISK→ORDER→FILL traceability
+- **Risk management**: Kill switch, circuit breakers, 10-check safety gate
+- **Observability**: 31 auto-collected metrics across 6 categories
+
+### Authentication
+All endpoints require a Bearer token in the Authorization header:
+```
+Authorization: Bearer <your-api-token>
+```
+The only unauthenticated route is `GET /api/health` (the liveness probe).
+
+### Rate Limiting
+- Read endpoints: 120/minute
+- Write endpoints: 30/minute
+- Heavy compute (ML retrain, backtest): 5/minute
+- Live trading enable: 3/minute
+
+Rate-limited responses return HTTP 429 with a `Retry-After` header.
+
+### Gateway Routing
+All requests go through the Caddy gateway (port 81). The gateway routes to
+the backend (port 8080) via the `?XTransformPort=8080` query parameter.
+
+### Documentation
+- Swagger UI: `/docs`
+- ReDoc: `/redoc`
+- OpenAPI JSON: `/openapi.json`
+""",
+    version="1.0.0",
+    contact={
+        "name": "Polymarket Pro",
+        "url": "https://github.com/armand-ratombotiana/polymarket-bot-ai",
+    },
+    license_info={
+        "name": "MIT",
+        "url": "https://opensource.org/licenses/MIT",
+    },
+    openapi_tags=[
+        {"name": "trading", "description": "Order placement, position management, trade history"},
+        {"name": "markets", "description": "Market data, order books, price history"},
+        {"name": "ml", "description": "ML model metrics, drift detection, retraining"},
+        {"name": "analysis", "description": "Deep market analysis, news sentiment"},
+        {"name": "risk", "description": "Risk management, kill switch, exposure limits"},
+        {"name": "strategies", "description": "Strategy registry, enable/disable"},
+        {"name": "arbitrage", "description": "Cross-market arbitrage scanning and execution"},
+        {"name": "system", "description": "System health, status, configuration"},
+        {"name": "ai", "description": "AI copilot, predictions, market search"},
+        {"name": "database", "description": "Database exploration, reconciliation"},
+        {"name": "audit", "description": "Audit trail, event logging"},
+        {"name": "decisions", "description": "Decision ledger, PREDICTION→SIGNAL→RISK→ORDER→FILL chain"},
+        {"name": "config", "description": "Configuration management"},
+        {"name": "backtesting", "description": "Historical strategy backtesting"},
+        {"name": "alerts", "description": "Threshold-based alerting"},
+        {"name": "observability", "description": "Auto-collected operational metrics"},
+        {"name": "execution", "description": "Execution-quality inspection (slippage, latency)"},
+        {"name": "capital", "description": "Capital allocation sizing"},
+        {"name": "shadow", "description": "Shadow trading inspection (counterfactual trades)"},
+        {"name": "live", "description": "Live-trading readiness gate and enable control"},
+        {"name": "retention", "description": "Data retention policy enforcement"},
+    ],
+    docs_url="/docs",
+    redoc_url="/redoc",
+    openapi_url="/openapi.json",
     lifespan=lifespan,
 )
 
 # CORS: locked to configured explicit origins only (empty = same-origin only).
-# Wildcard fallback removed per S12 security hardening — when CORS_ORIGINS is
-# set, only those exact origins are allowed; credentials are always enabled
-# (safe, because no wildcard branch can match an arbitrary origin).
+# W11-6 (OWASP A05 — Security Misconfiguration): wildcard `*` removed from
+# both ``allow_origins`` AND the auth middleware's origin-reflection branch.
+# When ``CORS_ORIGINS`` is set, only those exact origins are allowed;
+# credentials are always enabled (safe, because no wildcard branch can match
+# an arbitrary origin). ``allow_methods`` is restricted to the explicit
+# allowlist the API actually exposes (no TRACE / CONNECT / PATCH) so an
+# attacker can't probe for unused verbs.
 _cors_origins = settings.cors_origin_list
+_CORS_ALLOWED_METHODS = ["GET", "POST", "PUT", "DELETE", "OPTIONS"]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=_CORS_ALLOWED_METHODS,
+    allow_headers=["Authorization", "Content-Type", "X-Requested-With"],
 )
 
 # ── Rate limiting (W10-4 — slowapi) ────────────────────────────────────────────
@@ -557,7 +678,13 @@ async def enforce_api_auth(request: Request, call_next):
         return await call_next(request)
 
     origin = request.headers.get("origin")
-    cors_allowed = bool(origin and (origin in settings.cors_origin_list or "*" in settings.cors_origin_list or not settings.cors_origin_list))
+    # W11-6 (OWASP A05): wildcard ``*`` is no longer accepted as a CORS origin
+    # — only the explicit origins listed in ``CORS_ORIGINS`` (or an empty list,
+    # which means same-origin only) are reflected back. This eliminates the
+    # ``"*" in settings.cors_origin_list`` branch that previously allowed any
+    # website to issue credentialed cross-origin requests when the operator
+    # left the env var at its wildcard default.
+    cors_allowed = bool(origin and origin in settings.cors_origin_list)
     cors_headers = {}
     if origin and cors_allowed:
         cors_headers["access-control-allow-origin"] = origin
@@ -574,12 +701,20 @@ async def enforce_api_auth(request: Request, call_next):
         return response
 
     if not settings.api_token:
+        await _audit_auth_failure(request, mode="not_configured")
         return JSONResponse(
             status_code=503,
             content={"detail": "API authentication not configured — set API_TOKEN in .env", "code": "AUTH_NOT_CONFIGURED"},
             headers=cors_headers,
         )
     if not _valid_token(request.headers.get("authorization")):
+        # W11-6 (OWASP A09): record the auth failure in the durable audit
+        # trail so operators can correlate a burst of 401s with a likely
+        # brute-force attempt. ``mode`` distinguishes a missing header
+        # (likely a misconfigured client) from an invalid one (likely a
+        # token-enumeration attempt); neither path persists the token.
+        mode = "missing" if not request.headers.get("authorization") else "invalid"
+        await _audit_auth_failure(request, mode=mode)
         return JSONResponse(
             status_code=401,
             content={"detail": "Unauthorized — missing or invalid API token"},
@@ -655,6 +790,65 @@ async def rate_limit_headers(request: Request, call_next):
     return response
 
 
+# ── Security headers middleware (W11-6 — OWASP A05) ──────────────────────────
+# Adds a baseline set of defensive response headers to EVERY response so the
+# browser's own security machinery can apply defense-in-depth:
+#   * ``X-Content-Type-Options: nosniff``        — blocks MIME-type sniffing.
+#   * ``X-Frame-Options: DENY``                  — blocks clickjacking via framing.
+#   * ``X-XSS-Protection: 1; mode=block``        — legacy reflected-XSS filter
+#                                                   (still useful for older browsers).
+#   * ``Referrer-Policy: strict-origin-when-cross-origin`` — strips the path /
+#                                                   query from the Referer
+#                                                   header on cross-origin nav.
+#   * ``Content-Security-Policy: default-src 'self'`` — only same-origin
+#                                                   resources may load (the
+#                                                   dashboard is fully same-origin;
+#                                                   no external scripts / styles).
+# These headers do NOT affect the JSON API contract — they only instruct the
+# browser. They're applied after ``call_next`` so they land on every response
+# (200, 4xx, 5xx, OPTIONS preflight, WebSocket upgrade rejection, …). The
+# ``Strict-Transport-Security`` header is intentionally NOT added here: it
+# must be terminated by the TLS-aware reverse proxy (Caddy) so it only ships
+# over an actual HTTPS connection (otherwise an active MITM could inject it
+# into a plain-HTTP response and pin the client).
+@app.middleware("http")
+async def security_headers_middleware(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-XSS-Protection"] = "1; mode=block"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Content-Security-Policy"] = "default-src 'self'"
+    return response
+
+
+# ── Auth-failure audit logging (W11-6 — OWASP A09) ──────────────────────────
+# Wraps ``enforce_api_auth``'s 401 / 503 paths so a failed authentication
+# attempt is recorded in the durable audit trail (SQLite ``audit_events``).
+# This gives operators an artifact they can correlate against rate-limit hits
+# and the W10-7 alerting engine — without having to grep the live server log.
+# The audit event is best-effort: a SQLite write failure must NOT change the
+# 401 / 503 response (the auth decision has already been made; the audit row
+# is purely observability). No request body / Authorization header value is
+# ever persisted — only the remote IP, the path, and the failure mode.
+async def _audit_auth_failure(request: Request, *, mode: str) -> None:
+    """Best-effort audit-log entry for a rejected auth attempt.
+
+    ``mode`` is one of ``"missing"``, ``"invalid"``, ``"not_configured"``.
+    Records the remote IP and path; NEVER the token / Authorization header.
+    """
+    try:
+        client_ip = request.client.host if request.client else "unknown"
+        await audit_logger.log_event(
+            category="security",
+            event_type="auth_failure",
+            details=f"mode={mode} ip={client_ip} path={request.url.path} method={request.method}",
+        )
+    except Exception:  # pragma: no cover — audit must never break auth
+        log.debug("[security] audit_auth_failure write failed (mode=%s)", mode)
+
+
+
 # ── Global exception handler ─────────────────────────────────────────────────
 # Catches any exception that escapes a route handler (FastAPI's own
 # ``HTTPException`` is handled separately by FastAPI's built-in handler and
@@ -713,13 +907,37 @@ class StrategyConfigUpdate(BaseModel):
 
 # ── System Endpoints ──────────────────────────────────────────────────────────
 
-@app.get("/api/health", tags=["system"])
+@app.get(
+    "/api/health",
+    tags=["system"],
+    response_model=HealthResponse,
+    response_model_exclude_unset=True,
+    summary="Liveness probe",
+    description=(
+        "Lightweight liveness probe. Returns the canonical health status "
+        "(`ok`), the server time, and whether paper trading is active. "
+        "This is the ONLY unauthenticated route — all other endpoints "
+        "require a valid `Authorization: Bearer <token>` header."
+    ),
+)
 @limiter.limit(READ_LIMIT)
 async def health(request: Request):
     return {"status": "ok", "timestamp": time.time(), "paper": settings.paper_trade}
 
 
-@app.get("/api/status", tags=["system"])
+@app.get(
+    "/api/status",
+    tags=["system"],
+    summary="System status report",
+    description=(
+        "Returns the institutional risk-engine status report (kill switch, "
+        "observation mode, daily P&L) augmented with the canonical trading "
+        "mode, active strategies, paper balance, seeded market count, "
+        "tracked book count, book poller stats, vector index size, and "
+        "durable kill-switch flag. Heavier than `/api/health` — use this "
+        "for the operator dashboard, not for liveness probes."
+    ),
+)
 @limiter.limit(READ_LIMIT)
 async def status(request: Request):
     from core.safety import kill_switch_file_exists
@@ -737,20 +955,61 @@ async def status(request: Request):
     }
 
 
-@app.get("/api/snapshot", tags=["system"])
+@app.get(
+    "/api/snapshot",
+    tags=["system"],
+    summary="Real-time portfolio snapshot",
+    description=(
+        "Single round-trip snapshot of the entire trading workstation: "
+        "mode, kill switch flags, daily P&L, paper balance, active "
+        "strategies, order books, open orders, positions, recent trades, "
+        "events log, and ML model health. This is the payload the "
+        "WebSocket `/ws` broadcasts every second."
+    ),
+)
 @limiter.limit(READ_LIMIT)
 async def get_snapshot(request: Request):
     return await _build_snapshot()
 
 
-@app.get("/api/history/equity", tags=["system"])
+@app.get(
+    "/api/history/equity",
+    tags=["system"],
+    summary="Equity curve history",
+    description=(
+        "Returns the chronological equity-curve points the dashboard "
+        "renders as a line chart. Each point carries the timestamp, "
+        "equity value, and per-step P&L delta."
+    ),
+)
 async def get_equity_history():
     async with store._lock:
         return {"points": store.equity_history, "count": len(store.equity_history)}
 
 
-@app.get("/api/analytics", tags=["system"])
+@app.get(
+    "/api/analytics",
+    tags=["system"],
+    summary="Quantitative performance analytics",
+    description=(
+        "Full trading-performance roll-up: equity, realized/unrealized "
+        "P&L, win rate with Wilson 95% CI, profit factor, expectancy, "
+        "Sharpe ratio, max drawdown, total volume, open exposure, "
+        "risk utilization, data freshness, and active strategies. "
+"Cached for 30s (W11-2)."
+    ),
+)
 async def get_analytics():
+    # W11-2 — cache the full analytics roll-up for 30s (analytics_cache's
+    # default TTL). The handler walks every closed trade + every open
+    # position against the live order-book mid, then computes Wilson CI /
+    # profit factor / expectancy / Sharpe / max drawdown / data freshness
+    # — this is the single most expensive read on the dashboard. Cache
+    # key is a constant: there's no per-request parameter to vary on.
+    cache_key = "analytics"
+    cached = analytics_cache.get(cache_key)
+    if cached is not None:
+        return cached
     trades = store.trades
     total_trades = len(trades)
     # Only trades that actually closed a position (pnl != 0) determine win rate.
@@ -810,7 +1069,7 @@ async def get_analytics():
     books = store.order_books.values()
     freshness = max((time.time() - b.updated_at for b in books), default=0.0)
 
-    return {
+    result = {
         "equity": round(equity, 2),
         "realized_pnl": round(realized_pnl, 2),
         "unrealized_pnl": round(unrealized_pnl, 2),
@@ -840,6 +1099,13 @@ async def get_analytics():
         "peak_equity": round(store.peak_equity, 2),
         "active_strategies": list(strategy_registry.get_active_instances().keys()),
     }
+    # W11-2 — store the computed analytics dict in the cache before returning
+    # so subsequent requests within the TTL window hit the cache and skip
+    # the recompute. ``analytics_cache.set`` uses the cache's default TTL
+    # (30s) — ``POST /api/trade`` and ``POST /api/positions/{id}/close``
+    # invalidate this key so the next read after a mutation sees fresh data.
+    analytics_cache.set(cache_key, result)
+    return result
 
 
 # ── Risk-Adjusted Portfolio: Exposure, Reconciliation & Leaderboard ─────────
@@ -859,18 +1125,59 @@ async def get_reconciliation():
 @app.get("/api/leaderboard", tags=["risk"])
 async def get_leaderboard():
     """Strategy leaderboard ranked by reproducible risk-adjusted net performance."""
-    return leaderboard()
+    # W11-2 — cache the leaderboard roll-up for 30s. ``leaderboard()``
+    # walks every closed trade to compute per-strategy Sharpe / win-rate /
+    # profit-factor — the cost grows with trade count, and the dashboard
+    # polls this on every render. ``POST /api/trade`` invalidates.
+    cache_key = "leaderboard"
+    cached = analytics_cache.get(cache_key)
+    if cached is not None:
+        return cached
+    result = leaderboard()
+    analytics_cache.set(cache_key, result)
+    return result
 
 
 # ── 50+ Strategy Hub Endpoints ────────────────────────────────────────────────
 
-@app.get("/api/strategies/catalog", tags=["strategies"])
+@app.get(
+    "/api/strategies/catalog",
+    tags=["strategies"],
+    summary="Strategy catalog",
+    description=(
+        "Returns the full catalog of 50+ registered strategies with "
+        "metadata (category, description, default parameters, risk "
+        "profile) and their current running state."
+    ),
+)
 async def get_strategy_catalog():
     """Return all 50 strategies with metadata, category, and running state."""
-    return {"catalog": strategy_registry.get_catalog(), "total": len(strategy_registry._catalog)}
+    # W11-2 — cache the strategy catalog for 5 min (markets_cache's
+    # default TTL). Strategy metadata is static — the only thing that
+    # changes is the running state, which ``POST /api/strategies/toggle``
+    # invalidates explicitly.
+    cache_key = "strategies_catalog"
+    cached = markets_cache.get(cache_key)
+    if cached is not None:
+        return cached
+    result = {
+        "catalog": strategy_registry.get_catalog(),
+        "total": len(strategy_registry._catalog),
+    }
+    markets_cache.set(cache_key, result)
+    return result
 
 
-@app.post("/api/strategies/toggle", tags=["strategies"])
+@app.post(
+    "/api/strategies/toggle",
+    tags=["strategies"],
+    summary="Start or stop a strategy at runtime",
+    description=(
+        "Dynamically start or stop any registered strategy without "
+        "restarting the server. Returns 400 if the strategy name is not "
+        "in the catalog."
+    ),
+)
 async def toggle_strategy(req: StrategyToggleRequest):
     """Dynamically start or stop any of the 50 strategies at runtime."""
     strat_id = req.strategy_name.lower()
@@ -879,16 +1186,31 @@ async def toggle_strategy(req: StrategyToggleRequest):
         if not ok:
             raise HTTPException(status_code=400, detail=f"Strategy {strat_id} not found in catalog")
         await store.log_event(f"▶ Strategy [{strat_id}] started via API")
+        # W11-2 — invalidate markets_cache (which holds the strategy
+        # catalog, including per-strategy ``is_running`` flags) so the
+        # next ``GET /api/strategies/catalog`` reflects the new state.
+        markets_cache.invalidate("strategies_catalog")
         return {"status": "started", "strategy": strat_id}
     else:
         ok = await strategy_registry.stop_strategy(strat_id)
         await store.log_event(f"⏸ Strategy [{strat_id}] stopped via API")
+        # W11-2 — same invalidation as the start branch above.
+        markets_cache.invalidate("strategies_catalog")
         return {"status": "stopped" if ok else "not_running", "strategy": strat_id}
 
 
 # ── AI Copilot & Semantic Vector Search ───────────────────────────────────────
 
-@app.post("/api/ai/copilot", tags=["ai"])
+@app.post(
+    "/api/ai/copilot",
+    tags=["ai"],
+    summary="Ask the GenAI copilot",
+    description=(
+        "Ask the GenAI copilot for market analysis, trade ideas, or "
+        "risk insights. Returns a streaming-style answer payload "
+        "(synthesized server-side from the model's analysis)."
+    ),
+)
 async def copilot_chat(req: CopilotQueryRequest):
     """Ask the GenAI Copilot for market analysis, trade ideas, or risk insights."""
     return await copilot_engine.answer_query(req.query)
@@ -1191,7 +1513,17 @@ async def semantic_search(query: str = Query(..., min_length=1, max_length=500),
 
 # ── Strategy Configuration ────────────────────────────────────────────────────
 
-@app.get("/api/config", tags=["config"])
+@app.get(
+    "/api/config",
+    tags=["config"],
+    summary="Get live strategy configuration",
+    description=(
+        "Returns the current live-tunable strategy parameters: market-"
+        "maker spread (bps), quote size (USDC), max inventory (USDC), "
+        "arbitrage min profit (bps), arb order size, signal min "
+        "confidence, daily loss limit, max total exposure, max open orders."
+    ),
+)
 async def get_config():
     return {
         "mm_spread_bps": settings.mm_spread_bps,
@@ -1206,7 +1538,17 @@ async def get_config():
     }
 
 
-@app.put("/api/config", tags=["config"])
+@app.put(
+    "/api/config",
+    tags=["config"],
+    summary="Update live strategy configuration",
+    description=(
+        "Atomically updates any of the tunable strategy parameters. "
+        "Only the supplied fields are mutated; omitted fields retain "
+        "their current value. Writes are not persisted across process "
+        "restarts (use env vars for that)."
+    ),
+)
 async def update_config(cfg: StrategyConfigUpdate):
     if cfg.mm_spread_bps is not None:
         settings.mm_spread_bps = cfg.mm_spread_bps
@@ -1229,7 +1571,16 @@ async def update_config(cfg: StrategyConfigUpdate):
 
 # ── Markets & Order Book Depth ────────────────────────────────────────────────
 
-@app.get("/api/markets", tags=["markets"])
+@app.get(
+    "/api/markets",
+    tags=["markets"],
+    summary="List Polymarket markets",
+    description=(
+        "Returns active Polymarket markets from the Gamma API. Supports "
+        "optional full-text search and a result limit. Sanitizes upstream "
+        "failures into a stable 502 (never leaks the upstream exception)."
+    ),
+)
 @limiter.limit(READ_LIMIT)
 async def get_markets(request: Request, limit: int = Query(50, ge=1, le=500), search: str | None = Query(None, max_length=200)):
     try:
@@ -1261,12 +1612,34 @@ async def get_market_coverage_report():
 @app.get("/api/markets/catalog", tags=["markets"])
 async def get_market_catalog(limit: int = Query(100, ge=1, le=1000), category: str | None = Query(None, max_length=100)):
     """Return indexed market catalog with full hierarchy metadata."""
+    # W11-2 — cache the catalog for 5 min (markets_cache's default TTL).
+    # Key includes the limit + category params so different filter
+    # combinations don't collide. ``market_discovery.get_full_catalog``
+    # walks the validated-markets SQLite table and runs a hierarchy
+    # roll-up; with 1000+ markets and a few hundred tracked tokens this
+    # is the slowest read endpoint after /api/analytics.
+    cache_key = f"markets_catalog:{limit}:{category or '*'}"
+    cached = markets_cache.get(cache_key)
+    if cached is not None:
+        return cached
     from core.market_discovery import market_discovery
     catalog = market_discovery.get_full_catalog(limit=limit, category=category)
-    return {"catalog": catalog, "count": len(catalog)}
+    result = {"catalog": catalog, "count": len(catalog)}
+    markets_cache.set(cache_key, result)
+    return result
 
 
-@app.get("/api/depth/{token_id}", tags=["markets"])
+@app.get(
+    "/api/depth/{token_id}",
+    tags=["markets"],
+    summary="Order-book depth (top 10 levels)",
+    description=(
+        "Returns the cumulative-depth ladder (top 10 bids + top 10 asks) "
+        "for a single token. If no book is tracked for the token, the "
+        "poller is hinted to prioritize the token and an empty ladder is "
+        "returned (so callers can retry shortly after)."
+    ),
+)
 async def get_market_depth(token_id: str):
     if not token_id:
         raise HTTPException(status_code=422, detail="token_id path parameter is required")
@@ -1299,7 +1672,16 @@ async def get_market_depth(token_id: str):
     }
 
 
-@app.get("/api/orderbooks", tags=["markets"])
+@app.get(
+    "/api/orderbooks",
+    tags=["markets"],
+    summary="All tracked order books (top 5 levels)",
+    description=(
+        "Returns a compact snapshot of every tracked order book: top 5 "
+        "bids + top 5 asks, best bid/ask, mid, spread, slug, and last "
+        "update timestamp. Used by the dashboard's market grid."
+    ),
+)
 @limiter.limit(READ_LIMIT)
 async def get_orderbooks(request: Request):
     books = []
@@ -1321,7 +1703,17 @@ async def get_orderbooks(request: Request):
 
 # ── Trading & Orders ──────────────────────────────────────────────────────────
 
-@app.post("/api/trade", tags=["trading"])
+@app.post(
+    "/api/trade",
+    tags=["trading"],
+    summary="Place a manual trade",
+    description=(
+        "Submit a single BUY or SELL order for a token. Passes the "
+        "institutional risk gate (10-check safety) before routing to "
+        "paper_sim (paper mode) or clob_client (live mode). Returns the "
+        "order object on success or 400 on risk rejection."
+    ),
+)
 @limiter.limit(TRADE_LIMIT)
 async def place_manual_trade(request: Request, req: ManualTradeRequest):
     side = Side.BUY if req.side.upper() == "BUY" else Side.SELL
@@ -1362,10 +1754,29 @@ async def place_manual_trade(request: Request, req: ManualTradeRequest):
 
     slug = store.market_slugs.get(req.token_id, req.token_id[:12])
     await store.log_event(f"👤 Manual Order: {side.value} {slug} @ {req.price:.4f} (${req.size_usdc:.2f})")
+    # W11-2 — invalidate analytics_cache (analytics + leaderboard) and
+    # attribution_cache so the next dashboard read after a manual trade
+    # doesn't return the pre-trade snapshot. The trade may not close a
+    # position immediately (it could rest on the book), but the equity /
+    # exposure / open-position-count fields change as soon as the order
+    # is acked — better to invalidate aggressively than show stale data.
+    analytics_cache.invalidate("analytics")
+    analytics_cache.invalidate("leaderboard")
+    attribution_cache.clear()
     return {"status": "placed", "order": order}
 
 
-@app.get("/api/orders", tags=["trading"])
+@app.get(
+    "/api/orders",
+    tags=["trading"],
+    response_model=OrdersResponse,
+    summary="List open orders",
+    description=(
+        "Returns every currently-open order with full metadata (price, "
+        "size, size matched, strategy, paper flag, creation timestamp). "
+        "Empty list + count=0 when no orders are open."
+    ),
+)
 async def get_orders():
     orders = await store.get_open_orders()
     return {
@@ -1388,7 +1799,16 @@ async def get_orders():
     }
 
 
-@app.delete("/api/orders", tags=["trading"])
+@app.delete(
+    "/api/orders",
+    tags=["trading"],
+    summary="Cancel all open orders",
+    description=(
+        "Cancels every open order in one shot. Returns the count of "
+        "cancelled orders. Routes through paper_sim in paper mode, "
+        "clob_client in live mode."
+    ),
+)
 @limiter.limit(TRADE_LIMIT)
 async def cancel_all_orders(request: Request):
     if settings.paper_trade:
@@ -1402,7 +1822,15 @@ async def cancel_all_orders(request: Request):
     return {"cancelled": n}
 
 
-@app.delete("/api/orders/{order_id}", tags=["trading"])
+@app.delete(
+    "/api/orders/{order_id}",
+    tags=["trading"],
+    summary="Cancel a single order by id",
+    description=(
+        "Cancels the order with the given id. Returns 404 if the order "
+        "is not found or already cancelled."
+    ),
+)
 @limiter.limit(TRADE_LIMIT)
 async def cancel_order(request: Request, order_id: str):
     if settings.paper_trade:
@@ -1416,7 +1844,18 @@ async def cancel_order(request: Request, order_id: str):
     return {"cancelled": order_id}
 
 
-@app.get("/api/positions", tags=["trading"])
+@app.get(
+    "/api/positions",
+    tags=["trading"],
+    response_model=PositionsResponse,
+    summary="List open positions",
+    description=(
+        "Returns every open position (token_id, slug, YES shares, "
+        "average entry price, total invested, realised P&L) along with "
+        "the day's realised P&L total. Empty list + count=0 when no "
+        "positions are open."
+    ),
+)
 @limiter.limit(READ_LIMIT)
 async def get_positions(request: Request):
     positions = []
@@ -1641,7 +2080,7 @@ async def close_position(request: Request, token_id: str, req: PositionCloseRequ
         f"(${notional_usdc:.2f}) [est P&L ${estimated_pnl:+.2f}]"
     )
 
-    return {
+    result = {
         "status": "submitted",
         "token_id": token_id,
         "slug": slug,
@@ -1667,9 +2106,27 @@ async def close_position(request: Request, token_id: str, req: PositionCloseRequ
             "within ~1s in paper mode; live mode awaits exchange ack."
         ),
     }
+    # W11-2 — invalidate analytics_cache (analytics + leaderboard) so the
+    # next dashboard read after a position close sees the updated realised
+    # PnL / open-position-count. Attribution isn't invalidated here — it
+    # only changes when a CLOSED position lands (paper_sim's fill loop),
+    # which is captured by the trade POST invalidation path above.
+    analytics_cache.invalidate("analytics")
+    analytics_cache.invalidate("leaderboard")
+    return result
 
 
-@app.get("/api/trades", tags=["trading"])
+@app.get(
+    "/api/trades",
+    tags=["trading"],
+    response_model=TradesResponse,
+    summary="Recent trade history",
+    description=(
+        "Returns the most recent trades (newest first), capped by `limit` "
+        "(default 50, max 1000). Each trade carries the fill price, size, "
+        "realised P&L, strategy, and paper flag."
+    ),
+)
 async def get_trades(limit: int = Query(50, ge=1, le=1000)):
     trades = store.trades[-limit:]
     return {
@@ -1691,7 +2148,16 @@ async def get_trades(limit: int = Query(50, ge=1, le=1000)):
     }
 
 
-@app.get("/api/events", tags=["system"])
+@app.get(
+    "/api/events",
+    tags=["system"],
+    summary="Recent system events log",
+    description=(
+        "Returns the most recent in-memory event-log entries (newest "
+        "first). Each entry is a human-readable string emitted by a "
+        "subsystem (paper_sim, settlement, risk gate, etc.)."
+    ),
+)
 async def get_events(n: int = Query(50, ge=1, le=500)):
     events = await store.get_recent_events(n)
     return {"events": list(reversed(events)), "count": len(events)}
@@ -1699,7 +2165,17 @@ async def get_events(n: int = Query(50, ge=1, le=500)):
 
 # ── Risk Management ───────────────────────────────────────────────────────────
 
-@app.post("/api/kill-switch/activate", tags=["risk"])
+@app.post(
+    "/api/kill-switch/activate",
+    tags=["risk"],
+    summary="Activate the kill switch",
+    description=(
+        "Activates the global kill switch — every new order is "
+        "immediately rejected. The activation is durable (survives "
+        "process restarts) and audit-logged. Use this for emergency "
+        "shutdown when something is going wrong."
+    ),
+)
 @limiter.limit(HEAVY_LIMIT)
 async def activate_kill_switch(request: Request):
     await risk_manager.activate_kill_switch("Manual via UI")
@@ -1707,7 +2183,17 @@ async def activate_kill_switch(request: Request):
     return {"status": "activated", "kill_switch": True}
 
 
-@app.post("/api/kill-switch/deactivate", tags=["risk"])
+@app.post(
+    "/api/kill-switch/deactivate",
+    tags=["risk"],
+    summary="Deactivate the kill switch",
+    description=(
+        "Deactivates the kill switch and resumes trading. Requires the "
+        "durable kill-switch marker file to be removed; the "
+        "observation-only flag is NOT cleared (use "
+        "`POST /api/risk/observation-mode` for that)."
+    ),
+)
 @limiter.limit(HEAVY_LIMIT)
 async def deactivate_kill_switch(request: Request):
     await risk_manager.deactivate_kill_switch()
@@ -1762,11 +2248,35 @@ async def get_ml_status():
     }
 
 
-@app.get("/api/ml/metrics", tags=["ml"])
+@app.get(
+    "/api/ml/metrics",
+    tags=["ml"],
+    response_model=MLMetricsResponse,
+    response_model_exclude_unset=True,
+    summary="ML ensemble quantitative metrics",
+    description=(
+        "Full quantitative diagnostics for the ML ensemble: Brier score, "
+        "ROC AUC, log loss, ECE, Sharpe ratio, online update count, "
+        "training source, real/synthetic sample counts, adaptive "
+        "ensemble weights, stacking meta-learner summary, drift detector "
+        "report, feature importances, reliability curve, post-hoc "
+        "calibration metrics, active model version, and registry "
+        "summary. Cached for 60s (W11-2); invalidated by POST /api/ml/retrain."
+    ),
+)
 async def get_ml_metrics():
     """Full quantitative diagnostics: Brier, EWMA Brier, ROC-AUC, ECE, drift, meta-learner, reliability curve."""
+    # W11-2 — cache ML metrics for 60s (ml_metrics_cache's default TTL).
+    # Brier / AUC / ECE / drift PSI are computed by walking the ensemble's
+    # out-of-fold predictions; they don't move second-to-second between
+    # retrain / online-learn events. ``POST /api/ml/retrain`` invalidates.
+    cache_key = "ml_metrics"
+    cached = ml_metrics_cache.get(cache_key)
+    if cached is not None:
+        return cached
+    from ml.calibration import calibrator
     from ml.ensemble_meta_learner import ensemble_meta_learner
-    return {
+    result = {
         "model_type": "4-Member Calibrated Ensemble + Level-2 Stacking Meta-Learner",
         "brier_score": ml_model.brier_score,
         "roc_auc": ml_model.roc_auc,
@@ -1783,10 +2293,23 @@ async def get_ml_metrics():
         "drift": drift_detector.get_status_report(),
         "feature_importances": ml_model.feature_importances,
         "reliability_curve": ml_model.reliability_curve,
+        # W11-5: post-hoc probability calibration (Platt scaling / isotonic
+        # regression). ``calibrator`` is a module-level singleton; the dict
+        # below reflects its live state plus the pre/post Brier & ECE
+        # metrics captured at the last ``fit()`` call (during ``fit_initial()``).
+        "calibration": {
+            "method": calibrator.method,
+            "is_fit": calibrator.is_fit,
+            "n_samples": calibrator.n_samples,
+            "last_fit_metrics": calibrator.last_fit_metrics,
+            "model_calibration_metrics": getattr(ml_model, "calibration_metrics", {"is_fit": False}),
+        },
         "model_ready": ml_model.rf is not None,
         "model_version": model_registry.active_version,
         "registry_summary": model_registry.get_summary(),
     }
+    ml_metrics_cache.set(cache_key, result)
+    return result
 
 
 @app.post("/api/ml/retrain", tags=["ml"])
@@ -1795,11 +2318,18 @@ async def retrain_ml_model(request: Request):
     """Trigger manual re-training and re-calibration of the ML ensemble."""
     await asyncio.to_thread(ml_model.fit_initial)
     await asyncio.to_thread(ml_model.save)
+    from ml.calibration import calibrator
     from ml.ensemble_meta_learner import ensemble_meta_learner
     await store.log_event(
         f"🧠 ML model retrained (Brier={ml_model.brier_score:.4f}, AUC={ml_model.roc_auc:.4f}, "
-        f"ECE={ml_model.ece:.4f}, meta_warm={ensemble_meta_learner.is_warm})"
+        f"ECE={ml_model.ece:.4f}, meta_warm={ensemble_meta_learner.is_warm}, "
+        f"cal_fit={calibrator.is_fit})"
     )
+    # W11-2 — invalidate the ML metrics cache so the next GET reflects the
+    # freshly trained Brier / AUC / ECE / drift snapshot rather than the
+    # pre-retrain cached dict. Done BEFORE constructing the response so the
+    # invalidation lands even if the response construction itself raises.
+    ml_metrics_cache.invalidate("ml_metrics")
     return {
         "status": "retrained",
         "brier_score": ml_model.brier_score,
@@ -1808,6 +2338,11 @@ async def retrain_ml_model(request: Request):
         "ece": ml_model.ece,
         "model_version": model_registry.active_version,
         "meta_learner": ensemble_meta_learner.get_summary(),
+        # W11-5: surface the post-hoc calibration metrics so the caller can
+        # verify the retrain cycle actually improved calibration (Brier/ECE
+        # delta should be ≥ 0 — a negative delta means calibration made it
+        # worse and ``method="none"`` should be considered).
+        "calibration": calibrator.last_fit_metrics,
     }
 
 
@@ -2625,4 +3160,54 @@ log.info(
 from core.alerting import register_routes as _register_alerting_routes
 
 _register_alerting_routes(app)
+
+
+# ── W11-2 — Cache stats + management endpoints ─────────────────────────────────
+# Additive: appends ``GET /api/cache/stats`` (per-cache hit/miss/size/hit_rate
+# snapshot across all six TTLCache instances) and ``POST /api/cache/clear``
+# (drops every entry in every cache). Used by the dashboard to surface cache
+# effectiveness and by operators to force a cold-read during debugging.
+# Auth enforced by ``enforce_api_auth`` (neither path is in ``PUBLIC_PATHS``).
+@app.get("/api/cache/stats", tags=["system"])
+async def cache_stats():
+    """Return per-cache stats (size, hits, misses, hit_rate, default_ttl) for
+    every TTLCache singleton in ``core.cache``.
+
+    Returned shape::
+
+        {
+          "caches": [
+            {"name": "markets", "size": 4, "max_size": 100, "hits": 12,
+             "misses": 3, "hit_rate": 0.8, "default_ttl": 300.0},
+            ...
+          ]
+        }
+    """
+    return {
+        "caches": [
+            markets_cache.stats(),
+            ml_metrics_cache.stats(),
+            analytics_cache.stats(),
+            attribution_cache.stats(),
+            observability_cache.stats(),
+            general_cache.stats(),
+        ]
+    }
+
+
+@app.post("/api/cache/clear", tags=["system"])
+async def clear_caches():
+    """Drop every entry (and reset every hit/miss counter) in every cache.
+
+    Used by operators to force the next dashboard read to recompute from
+    source (debugging stale-data issues) and by tests to guarantee a clean
+    baseline before a cache-behavior assertion.
+    """
+    markets_cache.clear()
+    ml_metrics_cache.clear()
+    analytics_cache.clear()
+    attribution_cache.clear()
+    observability_cache.clear()
+    general_cache.clear()
+    return {"ok": True, "message": "All caches cleared"}
 

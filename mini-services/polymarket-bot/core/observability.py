@@ -54,7 +54,73 @@ from typing import Any
 
 log = logging.getLogger(__name__)
 
+# W11-2 — TTL cache for the structured health report. Imported lazily at
+# module load to avoid a hard dependency on ``core.cache`` from the
+# observability module (the cache module has no FastAPI deps so the
+# import is light; the lazy guard is defensive against import-order
+# cycles in case a future refactor moves ``observability_cache`` into
+# another module).
+from core.cache import observability_cache  # noqa: E402
+
 DB_PATH = Path(os.environ.get("OBSERVABILITY_DB_PATH", "/app/data/observability.db"))
+
+
+# ── W11-9: query timing decorator ───────────────────────────────────────────
+# Lightweight instrumentation for the most commonly-called read paths. Wraps
+# async query methods and emits a WARNING when a single call exceeds
+# ``_SLOW_QUERY_THRESHOLD`` (100 ms — the dashboard's SLO for the
+# ``/api/observability`` health-report endpoint). Failed queries (the
+# underlying methods swallow their own persistence errors and return [] /
+# an empty report) are still timed so a slow failure path surfaces in the
+# log alongside the exception traceback. The decorator is import-safe,
+# never re-raises, and preserves the wrapped function's return value /
+# exception semantics verbatim.
+import functools  # noqa: E402  (kept next to its consumer for readability)
+
+_SLOW_QUERY_THRESHOLD = 0.100  # seconds
+
+
+def timed_query(func):
+    """Log a warning when ``func`` takes longer than ``_SLOW_QUERY_THRESHOLD``.
+
+    Supports both ``def`` and ``async def`` callables — the wrapper branches
+    on ``asyncio.iscoroutinefunction`` so sync query functions and async
+    ones can share the same decorator.
+    """
+
+    if asyncio.iscoroutinefunction(func):
+
+        @functools.wraps(func)
+        async def _async_wrapper(*args, **kwargs):
+            start = time.time()
+            try:
+                return await func(*args, **kwargs)
+            finally:
+                duration = time.time() - start
+                if duration > _SLOW_QUERY_THRESHOLD:
+                    log.warning(
+                        "[observability] slow query %s: %.3fs",
+                        func.__name__,
+                        duration,
+                    )
+
+        return _async_wrapper
+
+    @functools.wraps(func)
+    def _sync_wrapper(*args, **kwargs):
+        start = time.time()
+        try:
+            return func(*args, **kwargs)
+        finally:
+            duration = time.time() - start
+            if duration > _SLOW_QUERY_THRESHOLD:
+                log.warning(
+                    "[observability] slow query %s: %.3fs",
+                    func.__name__,
+                    duration,
+                )
+
+    return _sync_wrapper
 
 # ── Canonical metric categories ────────────────────────────────────────────
 # Single source of truth across the pipeline — every emitter references these
@@ -139,6 +205,26 @@ class Observability:
                     "CREATE INDEX IF NOT EXISTS idx_metrics_cat "
                     "ON metrics(category)"
                 )
+                # ── W11-9: additional indexes for common query patterns ──
+                # (timestamp DESC) — ``get_health_report`` and the
+                # dashboard's "recent metrics" feed query the table
+                # ordered-by-timestamp with no WHERE filter (or a
+                # category-only filter). Without a single-column
+                # ``(timestamp DESC)`` index SQLite must sort the whole
+                # table on every recent-first call.
+                cursor.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_metrics_ts "
+                    "ON metrics(timestamp DESC)"
+                )
+                # (category, timestamp DESC) — per-category recent-metrics
+                # queries (e.g. "last 100 ML samples"). The existing
+                # ``(category, name, timestamp DESC)`` compound index
+                # can't service a query that filters on ``category`` only
+                # without also constraining ``name``.
+                cursor.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_metrics_cat_ts "
+                    "ON metrics(category, timestamp DESC)"
+                )
                 conn.commit()
         except Exception as e:
             log.error("[observability] Init failed (%s): %s", self._db_path, e)
@@ -221,6 +307,7 @@ class Observability:
 
     # ── Reads ──────────────────────────────────────────────────────────────
 
+    @timed_query
     async def get_metric_history(
         self, name: str, limit: int = 100
     ) -> list[dict[str, Any]]:
@@ -263,6 +350,7 @@ class Observability:
 
         return await asyncio.to_thread(_fetch)
 
+    @timed_query
     async def get_health_report(self) -> dict[str, Any]:
         """
         Aggregate latest-per-(category, name) into a structured health report.
@@ -369,7 +457,19 @@ def register_routes(app: Any) -> None:
     @app.get("/api/observability", tags=["observability"])
     async def _observability_overview():
         """Return the structured system health report (latest value per metric)."""
-        return await observability.get_health_report()
+        # W11-2 — cache the structured health report for 15s
+        # (observability_cache's default TTL). The background
+        # ``core.observability_collector`` task records fresh metrics every
+        # ~30s; a 15s TTL collapses the burst of dashboard polls between
+        # collector ticks without exposing stale data beyond one tick window.
+        # Cache key is constant: the endpoint has no request-scoped params.
+        cache_key = "observability_overview"
+        cached = observability_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        result = await observability.get_health_report()
+        observability_cache.set(cache_key, result)
+        return result
 
     @app.get("/api/observability/history/{name}", tags=["observability"])
     async def _observability_history(
@@ -395,6 +495,7 @@ __all__ = [
     "DB_PATH",
     "Observability",
     "observability",
+    "timed_query",
     "record_metric",
     "get_health_report",
     "get_metric_history",

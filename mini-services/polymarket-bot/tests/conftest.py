@@ -144,6 +144,46 @@ except ImportError:  # pragma: no cover — defensive: if api.rate_limit
     pass
 
 
+# ── Clear caches before every test (W11-2) ──────────────────────────────────
+# The TTLCache singletons in ``core.cache`` (analytics_cache /
+# attribution_cache / ml_metrics_cache / markets_cache /
+# observability_cache / general_cache) persist across tests because they're
+# module-level singletons. Without a clear, a test that hit
+# ``GET /api/analytics`` (caching the result for 30s) would leak that cached
+# dict into the next test — even after the autouse ``store`` reset zeroes
+# ``store.trades`` / ``store.positions``. The next test's
+# ``GET /api/analytics`` would return the PRIOR test's cached snapshot,
+# breaking value-level assertions (and silently masking regressions
+# because the 200 status + headline-key checks would still pass).
+#
+# The clear runs BEFORE the test (not after) so the post-test teardown is
+# unnecessary — the pre-test clear of the NEXT test cleans up whatever the
+# prior test cached, mirroring the ``_reset_store_factory_defaults`` pattern.
+try:
+    from core.cache import (  # noqa: E402
+        analytics_cache,
+        attribution_cache,
+        general_cache,
+        markets_cache,
+        ml_metrics_cache,
+        observability_cache,
+    )
+
+    def _clear_all_caches() -> None:
+        """Drop every entry + reset hit/miss counters in every TTLCache singleton."""
+        analytics_cache.clear()
+        attribution_cache.clear()
+        ml_metrics_cache.clear()
+        markets_cache.clear()
+        observability_cache.clear()
+        general_cache.clear()
+except ImportError:  # pragma: no cover — defensive: if core.cache is ever
+    # renamed / removed, the test suite should still run (caching just
+    # isn't active in this env).
+    def _clear_all_caches() -> None:  # type: ignore[no-redef]
+        pass
+
+
 # ── Autouse: reset store singletons before every test ──────────────────────
 @pytest.fixture(autouse=True)
 def _reset_store_factory_defaults():

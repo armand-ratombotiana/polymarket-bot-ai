@@ -53,6 +53,65 @@ logger = logging.getLogger(__name__)
 
 ALERT_DB_PATH = Path(os.environ.get("ALERT_DB_PATH", "/app/data/alerts.db"))
 
+
+# ── W11-9: query timing decorator ───────────────────────────────────────────
+# Lightweight instrumentation for the most commonly-called read paths. Wraps
+# sync query methods and emits a WARNING when a single call exceeds
+# ``_SLOW_QUERY_THRESHOLD`` (100 ms — the dashboard SLO for the
+# ``/api/alerts`` and ``/api/alerts/stats`` endpoints). Failed queries
+# (the underlying methods swallow their own persistence errors and return
+# [] / zeroed stats) are still timed so a slow failure path surfaces in
+# the log alongside the exception traceback. The decorator is import-safe,
+# never re-raises, and preserves the wrapped function's return value /
+# exception semantics verbatim.
+import functools  # noqa: E402  (kept next to its consumer for readability)
+
+_SLOW_QUERY_THRESHOLD = 0.100  # seconds
+
+
+def timed_query(func):
+    """Log a warning when ``func`` takes longer than ``_SLOW_QUERY_THRESHOLD``.
+
+    Supports both ``def`` and ``async def`` callables — the wrapper branches
+    on ``asyncio.iscoroutinefunction`` so sync query functions and async
+    ones (e.g. the FastAPI route handlers) can share the same decorator.
+    """
+    import asyncio as _asyncio
+
+    if _asyncio.iscoroutinefunction(func):
+
+        @functools.wraps(func)
+        async def _async_wrapper(*args, **kwargs):
+            start = time.time()
+            try:
+                return await func(*args, **kwargs)
+            finally:
+                duration = time.time() - start
+                if duration > _SLOW_QUERY_THRESHOLD:
+                    logger.warning(
+                        "[alerting] slow query %s: %.3fs",
+                        func.__name__,
+                        duration,
+                    )
+
+        return _async_wrapper
+
+    @functools.wraps(func)
+    def _sync_wrapper(*args, **kwargs):
+        start = time.time()
+        try:
+            return func(*args, **kwargs)
+        finally:
+            duration = time.time() - start
+            if duration > _SLOW_QUERY_THRESHOLD:
+                logger.warning(
+                    "[alerting] slow query %s: %.3fs",
+                    func.__name__,
+                    duration,
+                )
+
+    return _sync_wrapper
+
 # ── Alert severity levels ─────────────────────────────────────────────────
 SEVERITY_INFO = "info"
 SEVERITY_WARNING = "warning"
@@ -123,6 +182,40 @@ class AlertEngine:
                 conn.execute("""
                     CREATE INDEX IF NOT EXISTS idx_alerts_timestamp
                     ON alerts(timestamp DESC)
+                """)
+                # ── W11-9: additional indexes for common query patterns ──
+                # (severity, acknowledged, timestamp DESC) — the dashboard's
+                # "active critical alerts" view filters
+                # ``WHERE severity = 'critical' AND acknowledged = 0
+                # ORDER BY timestamp DESC``. The existing
+                # ``(timestamp DESC)`` index can't service a query with a
+                # compound WHERE clause without a full scan + sort.
+                conn.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_alerts_sev_ack_ts
+                    ON alerts(severity, acknowledged, timestamp DESC)
+                """)
+                # (category, timestamp DESC) — per-category alert feed
+                # (e.g. "show me recent ml alerts"). Surfaced by the
+                # dashboard's per-category drill-down.
+                conn.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_alerts_cat_ts
+                    ON alerts(category, timestamp DESC)
+                """)
+                # (acknowledged, timestamp DESC) — ``get_recent`` with
+                # ``unacknowledged_only=True`` filters on
+                # ``acknowledged = 0`` only. The compound
+                # ``(severity, acknowledged, timestamp DESC)`` index above
+                # can't service this query when ``severity`` is unconstrained.
+                conn.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_alerts_ack_ts
+                    ON alerts(acknowledged, timestamp DESC)
+                """)
+                # (name) — ``get_stats``'s per-rule-count view (e.g. "how
+                # many times has model_drift_detected fired this week?")
+                # filters on ``name = ?`` only.
+                conn.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_alerts_name
+                    ON alerts(name)
                 """)
         except Exception as e:  # noqa: BLE001 — defensive: storage must not break callers
             logger.error("[alerting] _init_db failed (path=%s): %s", self._db_path, e)
@@ -285,6 +378,7 @@ class AlertEngine:
         except Exception as e:  # noqa: BLE001 — defensive
             logger.error("[alerting] _store failed: %s", e)
 
+    @timed_query
     def get_recent(
         self, limit: int = 50, unacknowledged_only: bool = False
     ) -> list[dict[str, Any]]:
@@ -341,18 +435,34 @@ class AlertEngine:
             logger.error("[alerting] acknowledge_all failed: %s", e)
             return 0
 
+    @timed_query
     def get_stats(self) -> dict[str, int]:
-        """Return aggregate counts: total / unacked / critical-unacked."""
+        """Return aggregate counts: total / unacked / critical-unacked.
+
+        W11-9: Combined the original three separate COUNT queries into a
+        single SUM(CASE WHEN ...) aggregate — one table scan instead of
+        three. The result shape is unchanged so the API endpoint contract
+        is preserved verbatim. The new ``idx_alerts_ack_ts`` and
+        ``idx_alerts_sev_ack_ts`` indexes also let the query planner
+        short-circuit to a covering-index scan if it deems that faster
+        than a full table walk.
+        """
         try:
             with sqlite3.connect(self._db_path) as conn:
-                total = conn.execute("SELECT COUNT(*) FROM alerts").fetchone()[0]
-                unacked = conn.execute(
-                    "SELECT COUNT(*) FROM alerts WHERE acknowledged = 0"
-                ).fetchone()[0]
-                critical = conn.execute(
-                    "SELECT COUNT(*) FROM alerts WHERE severity = ? AND acknowledged = 0",
+                row = conn.execute(
+                    """
+                    SELECT
+                        COUNT(*)                                                    AS total,
+                        SUM(CASE WHEN acknowledged = 0 THEN 1 ELSE 0 END)           AS unacked,
+                        SUM(CASE WHEN severity = ? AND acknowledged = 0
+                                 THEN 1 ELSE 0 END)                                AS critical
+                    FROM alerts
+                    """,
                     (SEVERITY_CRITICAL,),
-                ).fetchone()[0]
+                ).fetchone()
+                total = int(row[0] if row else 0) or 0
+                unacked = int(row[1] if row and row[1] is not None else 0) or 0
+                critical = int(row[2] if row and row[2] is not None else 0) or 0
         except Exception as e:  # noqa: BLE001 — defensive
             logger.error("[alerting] get_stats failed: %s", e)
             return {
@@ -464,4 +574,5 @@ __all__ = [
     "AlertEngine",
     "alert_engine",
     "register_routes",
+    "timed_query",
 ]

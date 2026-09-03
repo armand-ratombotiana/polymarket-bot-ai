@@ -85,8 +85,9 @@ export default function DeepAnalysisView({ onOpenChart, onSelectMarket }: DeepAn
       } else {
         setError(`Failed to fetch deep analysis (HTTP ${res.status})`)
       }
-    } catch (err: any) {
-      setError(err?.message || 'Network error connecting to analysis engine')
+    } catch (err: unknown) {
+      const e = err as { message?: string }
+      setError(e?.message || 'Network error connecting to analysis engine')
     }
     setLoading(false)
   }, [selectedToken])

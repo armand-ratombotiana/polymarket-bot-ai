@@ -21540,3 +21540,563 @@ Stage Summary:
   test. Fixed by hoisting `from fastapi import Request` to module
   scope. (api/server.py already had `Request` at module scope, so
   its rate-limited routes worked first time.)
+
+---
+Task ID: W11-1
+Agent: full-stack-developer
+Task: Playwright E2E tests
+
+Work Log:
+- Read `/home/z/my-project/worklog.md` tail (last ~250 lines) to baseline
+  project state — confirmed the W10-6 / W10-4 backend integration work
+  (540 backend tests passing, slowapi rate limiting live on 17 routes,
+  `tests/conftest.py` disables the limiter at module-load time).
+- Read `package.json` — confirmed `@playwright/test` was NOT yet in
+  devDependencies; `scripts` had `test`/`test:watch` (vitest) but no
+  e2e hooks. Tailwind 4 + Next 16 + React 19 + shadcn already present.
+- Read `src/components/Sidebar.tsx` (279 lines) in full to map every
+  nav item, group label, keyboard shortcut, and the collapse/expand +
+  mobile-open DOM contracts:
+    * 8 NAV_GROUPS (Main, Markets, Portfolio, Capital, Strategies,
+      Intelligence, Analytics, System) → group labels rendered in a
+      div under `role="listitem"` only when `!collapsed`.
+    * Active item: `aria-current="page"` set on the `<button>` (line
+      230). This is the canonical "panel switched" signal for tests.
+    * 8 items have `kbd` shortcuts ('1'..'8') mapped to nav sections
+      via `KB_MAP` in `page.tsx:146`. Items without `kbd` (Orders,
+      Trades, Capital Allocator, etc.) are still clickable.
+    * Collapse button: `aria-label` toggles between 'Collapse sidebar'
+      and 'Expand sidebar' (line 197). On collapse, `title` attr on
+      each `<button>` is set to `${label}${kbd ? ` (${kbd})` : ''}` —
+      used to target collapsed-sidebar items by title.
+    * Mobile: backdrop `bg-black/60` rendered when `mobileOpen`
+      (line 151). `mobileOpen` adds `mobile-open` class to `<nav>`.
+- Read `src/app/page.tsx` first ~400 lines to confirm:
+    * `'use client'` directive — page is client-rendered, hydration
+      required before any panel renders.
+    * `mounted` guard (lines 307–316) returns an "Initializing
+      Polymarket Pro Workstation…" placeholder until
+      `useEffect(() => setMounted(true), [])` fires — so Playwright
+      must wait for `.page-area` to appear (proxy for "hydrated").
+    * `<div className="page-area">` wraps all panel content (line 377).
+    * `<main id="main" role="main">` is the main landmark.
+    * `activeSection` defaults to `'command'` (Command Center).
+    * Keyboard handler (lines 247–276) ignores inputs/textareas and
+      modifier keys — basis for the modifier-shortcut test.
+- Read `src/app/layout.tsx` — confirmed `metadata.title` is
+  `'Polymarket Pro — Algorithmic Trading Workstation'` (the regex
+  `/Polymarket/` in dashboard.spec.ts matches it).
+- Read `src/components/TopStatusBar.tsx` (lines 125–174) — confirmed
+  the mobile hamburger button: `aria-label="Open navigation"`, class
+  `md:hidden` (only visible below the `md` breakpoint). Used
+  `test.use({ viewport: { width: 375, height: 812 } })` in the
+  mobile-sidebar test block to make the hamburger visible.
+- Read `src/lib/api.ts` — confirmed the gateway routing contract:
+  every cross-service fetch goes to a relative path with
+  `?XTransformPort=8080` (the bot API port). `api-health.spec.ts`
+  reuses this exact pattern.
+- Read `src/hooks/useBot.ts` (lines 1–170) — confirmed the hook
+  calls `fetch('/api/snapshot?XTransformPort=8080')` on mount and
+  falls back to a composite Promise.all of 6 sub-endpoints on
+  failure. All fetches are wrapped in `.catch(() => null)` — a
+  failed fetch DOES NOT propagate as an uncaught pageerror. This
+  is the contract that `api-health.spec.ts::dashboard renders
+  without crashing regardless of backend state` validates.
+- Step 1: Installed `@playwright/test@1.62.1` via `bun add -d
+  @playwright/test`. Installed chromium browser binaries via
+  `bunx playwright install chromium` (chromium-1200,
+  chromium-1234, chromium_headless_shell-1200/1234, ffmpeg-1011
+  cached to `~/.cache/ms-playwright/`).
+- Step 2: Created `playwright.config.ts` per spec. Added an
+  explanatory header comment justifying:
+    * `fullyParallel: false` + `workers: 1` (shared `useBot` singleton
+      + shared backend state on :8080).
+    * `reuseExistingServer: !process.env.CI` (sandbox auto-runs
+      `bun run dev` on :3000; CI boots its own).
+    * `trace: 'on-first-retry'` (keep artifact size manageable).
+    * 60s `webServer.timeout` (Next.js dev compile takes ~8s on
+      first request).
+- Step 3: Created `/home/z/my-project/e2e/` directory.
+- Step 4: Created 3 test files (see Files added below).
+- Step 5: Added 3 scripts to `package.json::scripts`:
+  `"e2e": "playwright test"`, `"e2e:ui": "playwright test --ui"`,
+  `"e2e:headed": "playwright test --headed"`.
+- Step 6: Appended a "Playwright E2E test artifacts" section to
+  `.gitignore` with `/test-results/`, `/playwright-report/`,
+  `/playwright/.cache/`, plus `/blob-report/` (Playwright 1.49+
+  optional blob reporter output dir, defensive add).
+- Verification:
+    * `bun run lint` → clean (eslint exit 0, zero warnings).
+    * `bunx playwright test --list` → 38 tests across 3 files, all
+      enumerated without error.
+    * Did NOT run the actual tests (per spec — needs a running
+      backend, may OOM the sandbox).
+
+Files added:
+
+#### `playwright.config.ts` (46 lines)
+- Standard Next.js + Playwright config. Single `chromium` project.
+- `webServer.command: 'bun run dev'`, `webServer.url:
+  'http://localhost:3000'`, `reuseExistingServer: !process.env.CI`.
+- `workers: 1`, `fullyParallel: false` — sequential execution to
+  avoid shared-state contamination between tests.
+
+#### `e2e/dashboard.spec.ts` (97 lines, 6 tests)
+Golden-path tests covering the "first 5 seconds" UX:
+1. `page loads with title` — asserts `document.title` matches
+   `/Polymarket/` (set via `metadata.title` in `layout.tsx`).
+2. `sidebar renders all nav groups` — Main / Markets / Portfolio /
+   System labels visible on the desktop viewport.
+3. `can navigate between panels` — clicks Positions, asserts the
+   button's `aria-current` flips to `'page'` and `.page-area`
+   persists.
+4. `command center loads by default` — Command Center button has
+   `aria-current='page'` on initial load (default state in
+   `page.tsx:164`).
+5. `app shell layout is intact (sidebar + main visible)` — both
+   the `<nav aria-label="Primary navigation">` and `<main>` are
+   rendered (guards against layout-collapse regressions).
+6. `sidebar footer shows bot engine status` — the
+   `'Bot Engine Active'` text in the sidebar footer (role=status)
+   is visible.
+- Shared `beforeEach`: waits up to 45s for `.page-area` to appear
+  (the proxy signal that React hydrated and the default panel
+  mounted — the `mounted` guard in `page.tsx:307` returns a
+  placeholder until the first `useEffect` tick).
+
+#### `e2e/navigation.spec.ts` (258 lines, 24 tests)
+Four describe blocks:
+1. `Sidebar click navigation` (10 tests):
+   - Parametrised over the 8 shortcut items (Command Center, Live
+     Books, Screener, Positions, Strategy Registry, Arbitrage, Deep
+     Analysis, Performance) — clicks each, asserts its button gains
+     `aria-current="page"`.
+   - Plus 2 non-shortcut items (Orders, Safety Gate) to cover the
+     items without kbd bindings.
+2. `Keyboard shortcuts` (10 tests):
+   - Parametrised over digits 1-8 — presses each on the body,
+     asserts the corresponding nav button becomes active.
+   - `shortcut is ignored when typing in an input` — opens the
+     config modal (press 'c'), fills '1' into a text input,
+     asserts Positions stays active (the keypress was consumed
+     by the input, not routed to the window-level handler at
+     `page.tsx:249`).
+   - `modifier-prefixed shortcuts do not navigate (Ctrl+1)` —
+     presses Ctrl+1, asserts the active section does NOT change
+     (the handler at `page.tsx:250` bails on `e.metaKey || e.ctrlKey
+     || e.altKey`).
+3. `Sidebar collapse / expand` (3 tests):
+   - `collapse button hides group labels` — clicks the collapse
+     button, asserts the button's aria-label flips to 'Expand
+     sidebar' and the 'Main' group label disappears from the DOM
+     (it's conditionally rendered via `!collapsed && <div>Main...`
+     at `Sidebar.tsx:212`).
+   - `expand button restores group labels` — collapse then expand,
+     labels return.
+   - `collapsed sidebar still allows click navigation` — collapses,
+     then clicks the Positions button (located via the `title` attr
+     that's set only when collapsed — `'Positions (4)'`) and
+     asserts it becomes active.
+4. `Mobile sidebar (hamburger menu)` (3 tests):
+   - Uses `test.use({ viewport: { width: 375, height: 812 } })` to
+     make the `md:hidden` hamburger button visible.
+   - `hamburger button opens the mobile sidebar` — clicks the
+     'Open navigation' button, asserts the Positions nav button
+     becomes visible (proxy for the slide-in animation completing).
+   - `clicking a sidebar item closes the mobile sidebar` — clicks
+     an item, asserts the backdrop (`.bg-black/60`) disappears
+     (the `mobileOpen` state was cleared by `onMobileClose` in
+     `Sidebar.tsx:145`).
+   - `Escape key closes the mobile sidebar` — Escape clears
+     `mobileNavOpen` per the keyboard handler at `page.tsx:271`.
+
+#### `e2e/api-health.spec.ts` (209 lines, 6 tests)
+Two describe blocks:
+1. `Backend health endpoint (via gateway)` (3 tests) — uses
+   Playwright's `request` fixture (no browser context, raw HTTP):
+   - `GET /api/health responds (200 if up, 5xx if backend down)` —
+     asserts status is in [200, 600) and the body is non-empty.
+     Tolerates either state per the spec's "backend may not be
+     running during E2E" guidance.
+   - `GET /api/health returns JSON status field when backend is up`
+     — asserts `body.status` exists ONLY if the response was 200;
+     otherwise `test.skip()` with a documented reason.
+   - `GET /api/status responds with trading-mode envelope` — same
+     pattern, asserts `body.mode` (paper/live/shadow/backtest)
+     exists when backend is up.
+2. `Frontend can fetch from backend (via gateway)` (3 tests) —
+   uses the `page` fixture (full browser context):
+   - `dashboard renders without crashing regardless of backend
+     state` — attaches a `pageerror` listener, loads the page,
+     asserts `.page-area` rendered (proves React hydrated and the
+     `useBot` hook didn't throw synchronously), waits 2s for the
+     first `fetchRestSnapshot` call to settle, asserts ZERO
+     uncaught page errors. A failed fetch is NOT an error (it's
+     caught by `useBot`); only genuine JS exceptions count.
+   - `snapshot endpoint is reachable from the browser context` —
+     uses `page.evaluate(async () => fetch(...))` to make a
+     browser-context fetch to `/api/snapshot?XTransformPort=8080`
+     with the default Authorization header from `src/lib/api.ts`.
+     Asserts the fetch promise settled (either 2xx/4xx/5xx OR a
+     caught network error — both acceptable).
+   - `connection-status pill renders in the top bar` — asserts the
+     TopStatusBar header (`role=banner`, `aria-label='System status
+     bar'`) is visible and has non-empty text content (regardless
+     of whether it says 'connecting' / 'connected' /
+     'disconnected' / 'error').
+
+Test design choices:
+- All tests use EXISTING selectors (role/aria-label/text/className).
+  No `data-testid` attributes were added to any source file — the
+  spec said "use existing text/roles", and the sidebar's
+  `aria-current="page"` + `aria-label` + group-label text were
+  sufficient for reliable targeting.
+- All panel-switch assertions check `aria-current="page"` on the
+  sidebar button rather than panel-internal text, because (a) some
+  panels load via `next/dynamic` (8s cold compile) and (b) panel
+  inner text depends on backend data which may be empty (paper
+  mode with no positions/orders). Aria-current is a stable signal
+  that the navigation state changed, independent of data state.
+- `beforeEach` waits up to 45s for `.page-area` — generous because
+  the dev server's first request triggers a Next.js compile (~8s)
+  AND the client tree then needs to hydrate AND the `mounted` guard
+  in `page.tsx:307` needs a useEffect tick.
+- Mobile tests use a 375×812 viewport (iPhone X-ish) — small enough
+  for the `md:hidden` (768px) hamburger button to be visible.
+- `api-health.spec.ts` tests are CONDITIONAL on backend liveness:
+  they `test.skip()` rather than fail when the backend isn't
+  reachable. This lets the E2E suite pass both in CI-with-backend
+  and sandbox-without-backend environments.
+
+Stage Summary:
+- Installed @playwright/test: yes (v1.62.1, chromium browser cached
+  to ~/.cache/ms-playwright/).
+- Created playwright.config.ts: yes (46 lines, single chromium
+  project, webServer reuseExistingServer in dev, 60s timeout).
+- Created e2e/ tests:
+    * e2e/dashboard.spec.ts (6 tests, golden path)
+    * e2e/navigation.spec.ts (24 tests, click + keyboard + collapse
+      + mobile)
+    * e2e/api-health.spec.ts (6 tests, backend health + frontend
+      fetch path)
+- E2E tests written: 36 (3 files, all enumerated by
+  `bunx playwright test --list`).
+  Wait — count from the listing: 6 + 24 + 6 = 36. Actually the
+  --list output shows: api-health 6 + dashboard 6 + navigation 26
+  (10 click + 10 keyboard + 3 collapse + 3 mobile) = 38 tests.
+  Final count: 38 tests.
+- Lint: clean (eslint exit 0).
+- `playwright test --list`: 38 tests, 3 files, 0 errors.
+- Files modified: 2 (`package.json` — added 3 e2e scripts;
+  `.gitignore` — added playwright artifact entries).
+- Files created: 4 (`playwright.config.ts`, `e2e/dashboard.spec.ts`,
+  `e2e/navigation.spec.ts`, `e2e/api-health.spec.ts`).
+- Source code modified: 0 files (no changes to any component, hook,
+  or page — all selectors target existing DOM structure).
+
+---
+Task ID: W11-8
+Agent: full-stack-developer
+Task: PWA support (service worker, manifest, offline)
+
+Work Log:
+- Read `/home/z/my-project/worklog.md` (tail ~200 lines) to establish Wave 10 baseline (540 backend tests, rate limiting, error boundaries, UI polish). Wave 11 is in flight — sibling subagents' untracked work visible in `git status` (`src/hooks/useRealtimeData.ts`, `src/hooks/useWebSocket.ts`, `e2e/`, `playwright.config.ts`, `mini-services/polymarket-bot/core/security.py`, `mini-services/polymarket-bot/ml/calibration.py`, `mini-services/polymarket-bot/core/cache.py`, `docs/WEBSOCKET.md`).
+- Read `src/app/layout.tsx` (42 lines pre-edit) — no PWA metadata was present.
+- Read `next.config.ts` — `output: "standalone"`, no PWA config needed (Next's static-asset pipeline serves `public/`).
+- Read `package.json` — confirmed no PWA library installed; went with the hand-rolled SW approach (no new deps).
+- Read `public/` — only `logo.svg` + `robots.txt` existed; no manifest, no icons, no SW.
+- Read `vitest.config.ts` + `src/test/setup.ts` — jsdom env, default test pattern, no `navigator.onLine` or `serviceWorker` shimming needed (the helper guards handle both).
+- Read `src/components/AnalyticsPanel.test.tsx` as the canonical test-file reference pattern.
+- Created `public/manifest.json` (28 lines): 3 icon entries (SVG + 192px PNG + 512px PNG), `display: "standalone"`, dark `#0b0e14` theme. Validated via `python3 -c "json.load(...)"`.
+- Created `public/icon.svg` (7 lines): 512×512 SVG, dark rounded-rect bg + blue concentric circles + crosshair (matches dashboard's `--accent-blue: #3b82f6`).
+- Created `public/sw.js` (96 lines): hand-rolled service worker — `install` precaches `["/", "/manifest.json", "/icon.svg"]` + `skipWaiting()`; `activate` evicts old caches + `clients.claim()`; `fetch` handler: non-GET / `/api/*` fall through to network, same-origin GET cache-first with 200-only caching (no opaque responses), document-navigation fallback to cached `/` on offline. `CACHE_NAME = "polymarket-pro-v1"` (bump suffix to bust cache on deploy).
+- Created `src/lib/registerSW.ts` (60 lines): client-safe registration helper. Three defensive exits — SSR (`typeof window === 'undefined'`), missing API (`!('serviceWorker' in navigator)`), and a `try/catch` around the `register()` call (sandboxed iframes throw SecurityError synchronously even though `'serviceWorker' in navigator === true`). Deferred to `window.addEventListener('load', ...)` when `document.readyState !== 'complete'` so it never contends with first-paint fetches.
+- Created `src/components/SWRegister.tsx` (22 lines): tiny `useEffect([])` wrapper rendered in layout — calls `registerServiceWorker()` once on mount. Renders `null`.
+- Created `src/components/OfflineIndicator.tsx` (87 lines): `'use client'` sticky banner. Initial state `false` (avoids SSR/client hydration mismatch), `useEffect` mounts `online`/`offline` listeners + syncs `navigator.onLine` on mount. Renders `null` when online. When offline: sticky top banner with `role="status"` + `aria-live="polite"` + `aria-atomic="true"` + `data-testid="offline-indicator"`, dark amber styling (`#7c2d12` bg / `#fed7aa` text / `#9a3412` border — distinguishable from dashboard's normal status colours).
+- Modified `src/app/layout.tsx`: added 2 imports (`SWRegister`, `OfflineIndicator`); extended `metadata` with `manifest`, `appleWebApp: { capable, statusBarStyle: "black-translucent", title: "PolymarketPro" }`, `icons: { icon, apple }`. **Intentional deviation from task spec snippet**: did NOT put `themeColor` on `Metadata` (Next 14+ moved it to `Viewport`); set it on `viewport` export with an inline comment. Added 3 explicit `<link>`/`<meta>` tags in `<head>` (manifest, apple-touch-icon, theme-color) for browsers that only read raw tags. Rendered `<OfflineIndicator />` above `<ErrorBoundary>` (visible even on crash fallback) and `<SWRegister />` after.
+- Created `src/lib/registerSW.test.ts` (147 lines, 6 tests, all pass): no-throw on happy path; SSR no-op; missing-API no-op; Proxy with both `get` + `has` traps to verify the presence check (the `'serviceWorker' in navigator` guard triggers the `has` trap, not `get`); synchronous-throw caught + logged; deferral to `load` event when document isn't yet complete.
+- Created `src/components/OfflineIndicator.test.tsx` (110 lines, 6 tests, all pass): renders null when online; renders banner when offline on mount; banner appears on `offline` event; banner hides on `online` event; user-visible message present; no leaked-setState warning when listeners cleaned up on unmount. `setNavigatorOnLine(value)` helper via `Object.defineProperty(globalThis.navigator, 'onLine', { get })` (jsdom hardcodes `onLine: true` as non-writable).
+- Iteration on test correctness: first run had 2 failures — (1) Proxy with only `get` trap didn't intercept `'serviceWorker' in navigator` (uses `has` trap); fixed by adding `has` trap. (2) Helper's `.catch()` chain doesn't catch synchronous throws from `.register()`; fixed by wrapping the register call in `try/catch` (the helper now matches the task spec's stated requirement "must catch it and log, not crash the React mount").
+- Verified `bun run lint` clean (0 errors, 0 warnings on W11-8 files). The first lint run flagged an unrelated pre-existing error in `src/hooks/useWebSocket.ts` (sibling W11-7 work, untracked file) which disappeared on the second run — not caused by W11-8.
+- Verified `bun run test` for the 2 new test files in isolation: 12/12 pass.
+- Verified `manifest.json` parses as valid JSON via Python.
+- Verified dev server (`dev.log`) shows no new errors after the layout.tsx edit.
+
+Stage Summary:
+- Created `public/manifest.json` (3 icons, `display: "standalone"`, dark `#0b0e14` theme, valid JSON).
+- Created `public/icon.svg` (512×512 SVG, blue-on-dark, matches dashboard accent colour).
+- Created `public/sw.js` (96 lines, hand-rolled service worker — install/activate/fetch; network-first for `/api/`, cache-first for static, cache-version eviction on deploy, document-navigation offline fallback).
+- Created `src/lib/registerSW.ts` (60 lines, SSR-safe + sandbox-safe + load-deferred SW registration).
+- Created `src/components/SWRegister.tsx` (22 lines, useEffect wrapper rendered in layout).
+- Created `src/components/OfflineIndicator.tsx` (87 lines, online/offline event-driven sticky banner with `role=status` + `aria-live=polite`).
+- Updated `src/app/layout.tsx` with PWA metadata (manifest, appleWebApp, icons, themeColor on viewport) + 3 link/meta tags in `<head>` + `<OfflineIndicator />` + `<SWRegister />`.
+- Tests: 12 new (6 registerSW + 6 OfflineIndicator), all pass. 2 new test files (`src/lib/registerSW.test.ts`, `src/components/OfflineIndicator.test.tsx`).
+- Lint: clean (0 errors, 0 warnings on W11-8 files). Pre-existing error in sibling-W11-7 `src/hooks/useWebSocket.ts` was visible during the first run but disappeared on the second — not caused by W11-8.
+- `manifest.json` validates as JSON.
+- Pre-existing test failures documented but NOT caused by W11-8: 3 in `src/hooks/useRealtimeData.test.ts` (sibling W11-7 websocket work; untracked file; verified pre-existing via `git stash`+rerun — only tracked files were stashed, the untracked test file remained and still failed identically). 3 in `e2e/*.spec.ts` (sibling Wave 11 e2e work; vitest's default `**/*.{test,spec}.{ts,tsx}` pattern picks up Playwright spec files which then fail because vitest doesn't understand Playwright's `test.beforeEach(async ({page}) => ...)`. To fix in a future task: add `exclude: ['e2e/**']` to `vitest.config.ts`).
+- Work record written to `/home/z/my-project/agent-ctx/W11-8-full-stack-developer.md`.
+
+---
+Task ID: W11-4
+Agent: full-stack-developer
+Task: WebSocket real-time push
+
+Work Log:
+- Read worklog.md tail (~250 lines) to baseline the test count and
+  confirm no prior wave had touched `src/hooks/useWebSocket.ts` or
+  `src/hooks/useRealtimeData.ts` (they didn't exist).
+- Read `src/hooks/useBot.ts` (445 lines) to understand the existing
+  polling pattern: it polls `/api/snapshot` every 2s with a 6-endpoint
+  composite fallback, has its own inline WS handling (lines 209-248),
+  and gates the REST poll on `isWsConnectedRef.current` + tab visibility
+  (lines 408-433). This wave's `useRealtimeData` hook formalises that
+  pattern into a reusable primitive.
+- Read `src/lib/api.ts` (47 lines) — confirmed `getAuthedWsUrl()` at
+  line 39 builds a `ws(s)://{host}/ws?XTransformPort=8080&token=...`
+  URL that the new hooks can consume directly. The `apiFetch()` helper
+  at line 43 wraps fetch with auth + gateway port injection — same
+  helper `useRealtimeData` uses for its REST prefetch + polling
+  fallback.
+- Read `src/app/page.tsx` first 60 lines — confirmed the dashboard
+  consumes `useBot()` directly (line 5) and renders ~37 panels. Future
+  waves will migrate individual panels to `useRealtimeData`; this wave
+  only creates the hooks + tests + docs (per the task's "Don't modify
+  existing components yet" constraint).
+- Read `vitest.config.ts` (jsdom environment, globals=true,
+  setupFiles=['./src/test/setup.ts']) and `src/test/setup.ts` (12
+  lines: installs `global.fetch = vi.fn()`, mocks matchMedia +
+  ResizeObserver, silences the "not wrapped in act" React warning).
+  Confirmed the test infra is compatible with hook tests using
+  `renderHook` from `@testing-library/react@16`.
+- Created `src/hooks/useWebSocket.ts` (139 lines). Key design points:
+  * Refs for callbacks (`onMessageRef`, `onConnectRef`,
+    `onDisconnectRef`) refreshed on every render so the WS handlers
+    always invoke the latest closure WITHOUT forcing a reconnect.
+  * `connect` is memoised on `[reconnectInterval,
+    maxReconnectAttempts]` only — stable identity across renders that
+    just swap callbacks. This is critical: both the mount effect and
+    the visibilitychange effect depend on `connect`, so an unstable
+    `connect` would re-run them (re-creating the socket + listener)
+    on every parent render.
+  * `shouldReconnect` is a ref, not state — flipped synchronously in
+    the cleanup BEFORE `close()` so the `onclose` handler skips the
+    reconnect `setTimeout`.
+  * Visibilitychange handler: closes the socket on hide (frees the
+    server connection), reconnects immediately on show (bypassing
+    the reconnect-interval delay).
+- Created `src/hooks/useRealtimeData.ts` (115 lines). Composes
+  `useWebSocket` with a REST prefetch and a polling fallback:
+  1. On mount, fires `apiFetch(endpoint)` to populate state
+     synchronously.
+  2. WS messages whose `channel === wsChannel` override `data` with
+     `msg.data`.
+  3. When `isConnected === false`, polls `endpoint` every
+     `pollInterval` ms (default 10s). The interval tears down the
+     moment the WS reconnects (effect deps on `isConnected`).
+  4. Each poll tick checks `document.hidden` and skips if true.
+- Created `src/hooks/useWebSocket.test.ts` (16 tests) using a
+  `MockWebSocket` class installed on `global.WebSocket` per test.
+  Covers: mount-time connect, open/message/close handlers, JSON
+  parse failure, reconnect (interval + cap + counter reset),
+  explicit disconnect, unmount cleanup, send() gating on OPEN,
+  tab-hidden pause, tab-visible resume.
+- Created `src/hooks/useRealtimeData.test.ts` (11 tests). Covers:
+  initial REST fetch (success / HTTP error / network throw),
+  WS-channel override, channel mismatch ignore, polling fallback
+  when WS down, polling teardown on WS connect, tab-hidden tick
+  suppression + resume on visible, initialData seed, isRealtime
+  flag transitions.
+  * Initial draft used `vi.useFakeTimers()` + `waitFor` for the
+    polling tests — this FAILED because `waitFor` uses `setInterval`
+    internally, which fake timers pause (waitFor never ticks its
+    polling check, so it hangs until the 5s test timeout). Fixed by
+    switching to REAL timers with a short `pollInterval: 100` ms
+    and using `await new Promise(r => setTimeout(r, 350))` to wait
+    for ≥3 poll ticks to have fired if the interval were active.
+    Documented the rationale in a comment.
+- Created `docs/WEBSOCKET.md` (335 lines). Covers: architecture
+  overview (single multiplexed WS to `/ws?XTransformPort=8080`,
+  channel-filtered on the client), the two-hook contract
+  (`useWebSocket` low-level + `useRealtimeData` hybrid), message
+  format (`{ channel, data, timestamp? }`), the 5 canonical channels
+  (positions / orders / trades / metrics / alerts) mapped 1:1 to
+  existing REST endpoints, reconnection strategy (3s fixed interval,
+  10 max attempts, counter reset on open, tab-hidden pause), fallback
+  polling (10s default, suppressed when WS live or tab hidden),
+  usage examples (panel migration, multi-panel sharing, send
+  commands), testing strategy (MockWebSocket on global.WebSocket),
+  and future work (channel subscription protocol, per-message
+  backpressure, SSE fallback, migrate useBot).
+
+Verification:
+- `bun run lint` — clean (eslint exit 0, no warnings).
+- `bun run test` — 207 passed, 0 failed, 0 errors across 9 test files
+  (was 204 passed + 3 failed in the first run before the fake-timers
+  fix; the +3 are the now-passing useRealtimeData polling tests).
+- Dev server (`bun run dev`) — still healthy, `/` renders 200 in 28ms.
+
+Stage Summary:
+- Created useWebSocket.ts hook: yes (139 lines).
+- Created useRealtimeData.ts hook (hybrid REST+WS): yes (115 lines).
+- Created test files with 27 tests (16 + 11): yes, all passing.
+- Created docs/WEBSOCKET.md: yes (335 lines).
+- All tests passing: yes (207 passed, 0 failed).
+
+---
+Task ID: W11-3
+Agent: general-purpose
+Task: OpenAPI/Swagger enhancement
+
+Work Log:
+- Read `/home/z/my-project/worklog.md` tail (last ~200 lines) to baseline
+  the test count (540 per W10-4) and understand the existing route
+  surface (77 HTTP routes from the X9 audit, 13 register_routes modules).
+- Read `api/server.py` first 700 lines (FastAPI app creation at line ~474
+  pre-edit, lifespan manager, CORS / auth / rate-limit middleware chain)
+  + the route-decorator block at lines 716–2270. Confirmed the app
+  creation used minimal metadata:
+  ```python
+  app = FastAPI(
+      title="Polymarket Pro Bot API",
+      version="3.0.0",
+      description="24/7 Polymarket Pro Algorithmic Workstation with 50+ Strategies, Vector DB, and AI Copilot",
+      lifespan=lifespan,
+  )
+  ```
+- Read `core/decision_ledger.py::register_routes` to understand the
+  pattern used by feature modules to append routes to the shared app
+  (used to verify the response_model approach wouldn't need to extend
+  to sibling modules — the W11-3 spec scopes the change to server.py).
+- Inspected the 5 contract-critical routes' ACTUAL return shapes
+  before designing response models (so applying response_model never
+  filters out a field the route already returns — the spec's
+  "don't break existing responses" constraint):
+    * `GET /api/health` → `{"status", "timestamp", "paper"}`
+    * `GET /api/positions` → `{"positions": [...], "count": N, "daily_pnl": N}`
+    * `GET /api/orders` → `{"orders": [...], "count": N}`
+    * `GET /api/trades` → `{"trades": [...], "count": N}`
+    * `GET /api/ml/metrics` → 19-field dict including a W11-5-added
+      `calibration` sub-object (added to MLMetricsResponse as Optional).
+- Created NEW module `api/models.py` (298 lines, 11 Pydantic v2
+  response models + 1 base envelope):
+    * `ErrorResponse` — standard `{detail, path}` envelope used by the
+      global exception handler (W9-8) and the rate-limit 429 handler.
+    * `HealthResponse` — matches `/api/health`'s actual return
+      (`status`, `timestamp`, `paper`) PLUS spec-intended future fields
+      (`mode`, `uptime`, `balance`) declared `Optional=None`. Route
+      passes `response_model_exclude_unset=True` so the unset future
+      fields are dropped from the wire payload (verified by
+      `test_health_response_excludes_unset_optional_fields`).
+    * `PositionItem` + `PositionsResponse` (wrapper) —
+      `/api/positions` returns a dict (NOT a bare list) so callers can
+      read `count` + `daily_pnl` in one round-trip. Wrapper captures
+      the full envelope shape.
+    * `OrderItem` + `OrdersResponse` (wrapper) — same wrapper pattern
+      for `/api/orders`.
+    * `TradeItem` + `TradesResponse` (wrapper) — same wrapper pattern
+      for `/api/trades`.
+    * `MLMetricsResponse` — 19 fields matching `/api/ml/metrics`'s
+      actual return (Brier / ROC AUC / log loss / ECE / Sharpe /
+      adaptive_weights / meta_learner / drift / feature_importances /
+      reliability_curve / calibration (W11-5) / model_version /
+      registry_summary etc.).
+    * `AlertResponse` — matches the `Alert` dataclass in
+      `core/alerting.py` (`asdict()`-serialized by `/api/alerts/*`).
+    * `CacheStatsResponse` — informational model for the W11-2 cache
+      stats endpoints (`/api/cache/stats`).
+- Enhanced the FastAPI app metadata in `api/server.py`:
+    * Imported the 6 response models at module scope (so the
+      `from __future__ import annotations` PEP 563 stringified
+      annotations in route decorators resolve via `func.__globals__`).
+    * Replaced the bare `FastAPI(title=..., version=..., description=...)`
+      with the full W11-3 spec block: enhanced title
+      ("Polymarket Pro — Trading Bot API"), version `1.0.0` (was
+      `3.0.0` — bumped down to align with the semver-of-record for
+      the OpenAPI contract surface), Markdown description with 5
+      sections (Key Features / Authentication / Rate Limiting /
+      Gateway Routing / Documentation), contact block (GitHub URL),
+      license_info block (MIT), 21 `openapi_tags` entries (the 14
+      spec'd tags + 7 extras for the route modules the spec didn't
+      enumerate: `decisions`, `observability`, `execution`,
+      `capital`, `shadow`, `live`, `retention` — these are tags
+      already used by sibling `register_routes` modules, so
+      declaring them here lets Swagger UI group them under a
+      heading with a description rather than the default "no
+      description" placeholder), explicit `docs_url` / `redoc_url` /
+      `openapi_url` (matching their default values, but explicit
+      so a future refactor can't silently move them).
+- Applied `response_model=...` to 5 contract-critical routes (the
+  spec's required minimum):
+    * `GET /api/health` → `response_model=HealthResponse`,
+      `response_model_exclude_unset=True`
+    * `GET /api/positions` → `response_model=PositionsResponse`
+    * `GET /api/orders` → `response_model=OrdersResponse`
+    * `GET /api/trades` → `response_model=TradesResponse`
+    * `GET /api/ml/metrics` → `response_model=MLMetricsResponse`,
+      `response_model_exclude_unset=True`
+- Added `summary=` + `description=` to 23 routes (spec asks for ≥20):
+    * System: `/api/health`, `/api/status`, `/api/snapshot`,
+      `/api/history/equity`, `/api/analytics`, `/api/events`
+    * Markets: `/api/markets`, `/api/depth/{token_id}`,
+      `/api/orderbooks`
+    * Trading: `/api/trade`, `/api/orders` (GET + DELETE + DELETE
+      by id), `/api/positions`, `/api/trades`
+    * Risk: `/api/kill-switch/activate`, `/api/kill-switch/deactivate`
+    * Config: `/api/config` (GET + PUT)
+    * Strategies: `/api/strategies/catalog`, `/api/strategies/toggle`
+    * AI: `/api/ai/copilot`
+    * ML: `/api/ml/metrics`
+  Verified via OpenAPI schema introspection: 79 of 79 routes now
+  carry a `summary` (FastAPI auto-generates from the function name
+  for routes I didn't explicitly annotate, so coverage is universal
+  even though only 23 were explicit).
+- Created `tests/test_openapi.py` (33 tests across 6 classes):
+    * `TestOpenAPIEndpoint` (4 tests) — `/openapi.json` returns 200,
+      is valid JSON, has required top-level keys, reachable without
+      auth (PUBLIC_PATHS).
+    * `TestAppMetadata` (8 tests) — title, version, description
+      mentions key features + auth + rate limiting, contact block,
+      license block.
+    * `TestDocsRoutes` (3 tests) — `/docs`, `/redoc`, `/openapi.json`
+      all return 200.
+    * `TestOpenAPITags` (4 tests) — tags block present, all 14
+      spec-required tags declared, every tag has description, ≥14
+      tags declared (we have 21).
+    * `TestResponseModels` (4 tests) — all 5 contract-critical
+      routes have a `$ref` response schema, components.schemas
+      includes the model, HealthResponse has required fields,
+      PositionsResponse.positions is an array.
+    * `TestRouteSummaries` (4 tests) — ≥20 routes with summary,
+      `/api/health`, `/api/positions`, `/api/ml/metrics` each
+      carry a summary.
+    * `TestRoutesStillWork` (6 tests) — end-to-end smoke: each of
+      the 5 contract-critical routes still returns 200 with the
+      expected payload shape; `/api/health`'s `response_model_exclude_unset=True`
+      correctly drops the unset Optional fields (`mode` / `uptime`
+      / `balance`) from the wire payload.
+- All 33 new tests pass (`pytest tests/test_openapi.py -v` →
+  33 passed in 20.30s).
+- Full suite: 709 passed, 0 failed, 0 errors (was 540 pre-W11-3;
+  the +169 delta includes the 33 OpenAPI tests + tests added by W11-2
+  cache layer + tests that previously had a stale-cache collection
+  error — all collect & pass cleanly now). Lint: clean (`bun run
+  lint` exit 0; Python syntax verified via `ast.parse` on the 3
+  modified/created files).
+
+Stage Summary:
+- Enhanced FastAPI app metadata (title, description, version, contact,
+  license, 21 openapi_tags, docs_url/redoc_url/openapi_url): yes
+- Created api/models.py with 11 response models (1 envelope + 10 route
+  models including 3 list-wrappers + 3 inner item models): yes
+- Applied response_model to 5 routes (/api/health, /api/positions,
+  /api/orders, /api/trades, /api/ml/metrics): yes
+- Added summary/description to 23 routes (spec asks for ≥20; 79 of 79
+  routes carry a summary in the final schema — FastAPI auto-generates
+  the rest from function names): yes
+- Created tests/test_openapi.py with 33 tests across 6 classes: yes
+- All tests passing: yes (33/33 new OpenAPI tests pass; 709/709 full
+  suite passes; 0 regressions; lint clean)
+- Files modified: 1 (api/server.py — app metadata + 23 route
+  decorators + 6 response_model imports)
+- Files created: 2 (api/models.py — 11 response models,
+  tests/test_openapi.py — 33 contract tests)

@@ -65,3 +65,9 @@ tool-results/
 # Python bytecode caches (defensive — keep stray .pyc out of commits)
 __pycache__/
 *.pyc
+
+# Playwright E2E test artifacts (regenerated on each test run)
+/test-results/
+/playwright-report/
+/playwright/.cache/
+/blob-report/

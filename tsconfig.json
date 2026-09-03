@@ -37,6 +37,16 @@
     ".next/dev/types/**/*.ts"
   ],
   "exclude": [
-    "node_modules"
+    "node_modules",
+    "examples/**",
+    "skills/**",
+    "download/**",
+    "upload/**",
+    "mini-services/**",
+    "tests/**",
+    "tool-results/**",
+    "db/**",
+    "e2e/**",
+    "playwright.config.ts"
   ]
 }

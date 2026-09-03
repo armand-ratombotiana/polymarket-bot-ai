@@ -65,7 +65,7 @@ export default function AIMLCommandCenter() {
   const [drift, setDrift] = useState<DriftData | null>(null)
   const [retraining, setRetraining] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
-  const [searchResults, setSearchResults] = useState<Array<{ market: any; score: number }>>([])
+  const [searchResults, setSearchResults] = useState<Array<{ market: { title?: string; slug?: string }; score: number }>>([])
   const [searching, setSearching] = useState(false)
   const [featureCategory, setFeatureCategory] = useState<'ALL' | 'MICRO' | 'REGIME' | 'FUNDAMENTAL'>('ALL')
 

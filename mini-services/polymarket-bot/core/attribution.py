@@ -66,6 +66,12 @@ from typing import Any, Callable
 
 from core.closed_positions import closed_positions
 
+# W11-2 — TTL cache for the seven-dimension attribution roll-up. Imported
+# at module load so the ``register_routes``-registered endpoint can hit
+# the same singleton that ``api/server.py`` uses for invalidation on
+# ``POST /api/trade``.
+from core.cache import attribution_cache
+
 log = logging.getLogger(__name__)
 
 
@@ -264,16 +270,21 @@ async def _all_rows() -> list[dict[str, Any]]:
     return await closed_positions.get_closed_positions(limit=10_000, strategy=None)
 
 
-async def attribute_by_strategy() -> list[dict[str, Any]]:
-    """
-    Group closed positions by ``strategy`` column.
+# ── W11-9: bucket-classifier aggregators that take pre-fetched rows ──────
+# These ``_attribute_*_from_rows`` helpers exist so ``get_full_attribution``
+# can fetch the closed-position rows ONCE (via a single
+# ``get_closed_positions(limit=10_000)`` call) and reuse them across all
+# seven dimension aggregations — eliminating the 7x SELECT * full-table
+# scan pattern the original ``asyncio.gather`` over the public
+# ``attribute_by_*`` coroutines created (each of which independently
+# called ``_all_rows()``).
+#
+# The public ``attribute_by_*`` coroutines (used by the API surface when a
+# caller requests a single dimension in isolation) still call ``_all_rows``
+# directly so their contract is unchanged.
 
-    Returns one bucket per distinct strategy (sorted by total_pnl desc so the
-    most profitable strategy is first). Buckets with zero rows are NOT
-    included (unlike the fixed-vocabulary dimensions, the strategy space is
-    open-ended so we can't pre-list empty buckets).
-    """
-    rows = await _all_rows()
+def _attribute_strategy_from_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Group ``rows`` by ``strategy`` column (most profitable first)."""
     by_strat: dict[str, list[dict[str, Any]]] = {}
     for r in rows:
         label = r.get("strategy") or "unknown"
@@ -287,9 +298,7 @@ async def attribute_by_strategy() -> list[dict[str, Any]]:
     return out
 
 
-async def attribute_by_confidence_bucket() -> list[dict[str, Any]]:
-    """Group closed positions by ML confidence bucket at signal time."""
-    rows = await _all_rows()
+def _attribute_confidence_from_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return _slice(
         rows,
         lambda r: classify_confidence(r.get("confidence")),
@@ -297,9 +306,7 @@ async def attribute_by_confidence_bucket() -> list[dict[str, Any]]:
     )
 
 
-async def attribute_by_edge_bucket() -> list[dict[str, Any]]:
-    """Group closed positions by predicted_edge bucket at signal time."""
-    rows = await _all_rows()
+def _attribute_edge_from_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return _slice(
         rows,
         lambda r: classify_edge(r.get("predicted_edge")),
@@ -307,9 +314,7 @@ async def attribute_by_edge_bucket() -> list[dict[str, Any]]:
     )
 
 
-async def attribute_by_probability_band() -> list[dict[str, Any]]:
-    """Group closed positions by raw model p_yes band at signal time."""
-    rows = await _all_rows()
+def _attribute_probability_from_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return _slice(
         rows,
         lambda r: classify_probability(r.get("p_yes")),
@@ -317,9 +322,7 @@ async def attribute_by_probability_band() -> list[dict[str, Any]]:
     )
 
 
-async def attribute_by_liquidity_level() -> list[dict[str, Any]]:
-    """Group closed positions by market liquidity level at signal time."""
-    rows = await _all_rows()
+def _attribute_liquidity_from_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return _slice(
         rows,
         lambda r: classify_liquidity(r.get("liquidity")),
@@ -327,9 +330,7 @@ async def attribute_by_liquidity_level() -> list[dict[str, Any]]:
     )
 
 
-async def attribute_by_holding_period() -> list[dict[str, Any]]:
-    """Group closed positions by holding-period bucket."""
-    rows = await _all_rows()
+def _attribute_holding_from_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return _slice(
         rows,
         lambda r: classify_holding_period(r.get("holding_seconds")),
@@ -337,9 +338,7 @@ async def attribute_by_holding_period() -> list[dict[str, Any]]:
     )
 
 
-async def attribute_by_trade_direction() -> list[dict[str, Any]]:
-    """Group closed positions by opening-trade direction (BUY / SELL)."""
-    rows = await _all_rows()
+def _attribute_direction_from_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return _slice(
         rows,
         lambda r: classify_trade_direction(r.get("direction")),
@@ -347,9 +346,76 @@ async def attribute_by_trade_direction() -> list[dict[str, Any]]:
     )
 
 
+async def attribute_by_strategy() -> list[dict[str, Any]]:
+    """
+    Group closed positions by ``strategy`` column.
+
+    Returns one bucket per distinct strategy (sorted by total_pnl desc so the
+    most profitable strategy is first). Buckets with zero rows are NOT
+    included (unlike the fixed-vocabulary dimensions, the strategy space is
+    open-ended so we can't pre-list empty buckets).
+    """
+    rows = await _all_rows()
+    return _attribute_strategy_from_rows(rows)
+
+
+async def attribute_by_confidence_bucket() -> list[dict[str, Any]]:
+    """Group closed positions by ML confidence bucket at signal time."""
+    rows = await _all_rows()
+    return _attribute_confidence_from_rows(rows)
+
+
+async def attribute_by_edge_bucket() -> list[dict[str, Any]]:
+    """Group closed positions by predicted_edge bucket at signal time."""
+    rows = await _all_rows()
+    return _attribute_edge_from_rows(rows)
+
+
+async def attribute_by_probability_band() -> list[dict[str, Any]]:
+    """Group closed positions by raw model p_yes band at signal time."""
+    rows = await _all_rows()
+    return _attribute_probability_from_rows(rows)
+
+
+async def attribute_by_liquidity_level() -> list[dict[str, Any]]:
+    """Group closed positions by market liquidity level at signal time."""
+    rows = await _all_rows()
+    return _attribute_liquidity_from_rows(rows)
+
+
+async def attribute_by_holding_period() -> list[dict[str, Any]]:
+    """Group closed positions by holding-period bucket."""
+    rows = await _all_rows()
+    return _attribute_holding_from_rows(rows)
+
+
+async def attribute_by_trade_direction() -> list[dict[str, Any]]:
+    """Group closed positions by opening-trade direction (BUY / SELL)."""
+    rows = await _all_rows()
+    return _attribute_direction_from_rows(rows)
+
+
 async def get_full_attribution() -> dict[str, Any]:
     """
     Return all seven attribution dimensions in a single payload.
+
+    W11-9: Optimised the original N+1 SELECT pattern — previously
+    ``get_full_attribution`` called ``asyncio.gather`` over the seven
+    ``attribute_by_*`` coroutines, each of which independently called
+    ``_all_rows()`` (which in turn calls
+    ``closed_positions.get_closed_positions(limit=10_000)``). That
+    dispatched 7 parallel ``SELECT * FROM closed_positions ORDER BY
+    timestamp DESC LIMIT 10000`` queries against SQLite — identical work
+    fetched 7 times in a row, just in different coroutines. SQLite
+    serialises writes (and effectively serialises reads too when
+    ``PRAGMA journal_mode=WAL`` is off), so the "parallel" gather
+    degrades to ~7x sequential scans with no caching between them.
+
+    The new implementation fetches the rows ONCE via a single
+    ``_all_rows()`` call, then reuses the in-memory list across all
+    seven ``_attribute_*_from_rows`` synchronised aggregators. The output
+    shape is identical to the previous implementation so the API
+    endpoint contract is preserved verbatim.
 
     Shape::
 
@@ -372,28 +438,21 @@ async def get_full_attribution() -> dict[str, Any]:
             },
         }
     """
-    summary, by_strat, by_conf, by_edge, by_prob, by_liq, by_hold, by_dir = (
-        await asyncio.gather(
-            closed_positions.get_closed_stats(),
-            attribute_by_strategy(),
-            attribute_by_confidence_bucket(),
-            attribute_by_edge_bucket(),
-            attribute_by_probability_band(),
-            attribute_by_liquidity_level(),
-            attribute_by_holding_period(),
-            attribute_by_trade_direction(),
-        )
+    # Single fetch — 1 SELECT instead of 7.
+    rows, summary = await asyncio.gather(
+        _all_rows(),
+        closed_positions.get_closed_stats(),
     )
 
     return {
         "summary": summary,
-        "by_strategy": by_strat,
-        "by_confidence_bucket": by_conf,
-        "by_edge_bucket": by_edge,
-        "by_probability_band": by_prob,
-        "by_liquidity_level": by_liq,
-        "by_holding_period": by_hold,
-        "by_trade_direction": by_dir,
+        "by_strategy":           _attribute_strategy_from_rows(rows),
+        "by_confidence_bucket":  _attribute_confidence_from_rows(rows),
+        "by_edge_bucket":        _attribute_edge_from_rows(rows),
+        "by_probability_band":   _attribute_probability_from_rows(rows),
+        "by_liquidity_level":    _attribute_liquidity_from_rows(rows),
+        "by_holding_period":     _attribute_holding_from_rows(rows),
+        "by_trade_direction":    _attribute_direction_from_rows(rows),
         "bucket_definitions": {
             "confidence_bucket": CONFIDENCE_BUCKETS,
             "edge_bucket": EDGE_BUCKETS,
@@ -422,7 +481,19 @@ def register_routes(app: Any) -> None:
     async def _attribution():
         """Return P&L attribution across strategy / confidence / edge /
         probability / liquidity / holding-period / direction dimensions."""
-        return await get_full_attribution()
+        # W11-2 — cache the seven-dimension attribution roll-up for 60s
+        # (attribution_cache's default TTL). The roll-up walks every
+        # closed position seven times — once per dimension — and is the
+        # single most expensive read endpoint after /api/analytics.
+        # ``POST /api/trade`` invalidates (a new closed position could
+        # land via the paper-sim fill loop).
+        cache_key = "attribution"
+        cached = attribution_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        result = await get_full_attribution()
+        attribution_cache.set(cache_key, result)
+        return result
 
 
 __all__ = [
