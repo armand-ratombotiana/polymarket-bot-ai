@@ -1,0 +1,64 @@
+{
+  "generated_at": "2026-09-03T11:56:43.816981+00:00",
+  "backend": "SQLite3 WAL (Cold Standby)",
+  "is_clean": true,
+  "tables": {
+    "market_snapshots": {
+      "engine_accepted_writes": 0,
+      "storage_rows": 49,
+      "drift": -49
+    },
+    "orderbook_ticks": {
+      "engine_accepted_writes": 0,
+      "storage_rows": 34,
+      "drift": -34
+    },
+    "fundamental_news": {
+      "engine_accepted_writes": 0,
+      "storage_rows": 10,
+      "drift": -10
+    },
+    "ml_feature_store": {
+      "engine_accepted_writes": 0,
+      "storage_rows": 0,
+      "drift": 0
+    },
+    "strategy_decisions": {
+      "engine_accepted_writes": 0,
+      "storage_rows": 0,
+      "drift": 0
+    },
+    "risk_decisions": {
+      "engine_accepted_writes": 0,
+      "storage_rows": 0,
+      "drift": 0
+    },
+    "orders": {
+      "engine_accepted_writes": 0,
+      "storage_rows": 0,
+      "drift": 0
+    },
+    "fills": {
+      "engine_accepted_writes": 0,
+      "storage_rows": 0,
+      "drift": 0
+    },
+    "raw_observations": {
+      "engine_accepted_writes": 0,
+      "storage_rows": 0,
+      "drift": 0
+    }
+  },
+  "breaches": [],
+  "write_failures": {
+    "market_snapshots": 0,
+    "orderbook_ticks": 0,
+    "fundamental_news": 0,
+    "ml_feature_store": 0,
+    "strategy_decisions": 0,
+    "risk_decisions": 0,
+    "orders": 0,
+    "fills": 0,
+    "raw_observations": 0
+  }
+}
