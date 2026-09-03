@@ -1,10 +1,11 @@
 // components/MarketsPanel.tsx — Pro Markets & Live Order Books Desk with Microstructure Gauges
 'use client'
 
-import { useState, useMemo, memo } from 'react'
+import { useState, useMemo, useRef, memo } from 'react'
 import { OrderBook } from '@/hooks/useBot'
 import { formatHierarchicalMarket } from '@/lib/formatters'
-import { fmtPrice } from '@/lib/design-tokens'
+import PriceTicker from './PriceTicker'
+import PriceHistoryChart from './charts/PriceHistoryChart'
 
 interface Props {
   books: OrderBook[]
@@ -13,6 +14,11 @@ interface Props {
   // When present, the mid-price cell applies the `.price-up` / `.price-down`
   // CSS class so a CSS keyframe can briefly tint the cell green/red on tick.
   priceFlashes?: Record<string, 'up' | 'down'>
+  // W15-2 — preference flag. When false, the `.price-up` / `.price-down`
+  // CSS class is suppressed on the implied-probability cell (traders
+  // who find the flashing distracting). Defaults to `true` so every
+  // existing call site + existing test keeps the prior behaviour.
+  showPriceFlashes?: boolean
 }
 
 function ageSec(ts: number) {
@@ -70,12 +76,25 @@ const CATEGORIES = ['ALL', 'CRYPTO', 'POLITICS', 'ECONOMY', 'SPORTS', 'TECH']
 // We still wrap with React.memo (default shallow compare) so that any
 // future parent-side memoization of `books` (e.g. via a selector hook)
 // would automatically skip this panel's re-render.
-function MarketsPanel({ books, onSelectMarket, priceFlashes }: Props) {
+function MarketsPanel({ books, onSelectMarket, priceFlashes, showPriceFlashes = true }: Props) {
   const [search, setSearch] = useState('')
   const [selectedCat, setSelectedCat] = useState('ALL')
   const [sortBy, setSortBy] = useState<'mid' | 'spread' | 'age'>('mid')
   const [sortAsc, setSortAsc] = useState(false)
   const [copiedToken, setCopiedToken] = useState<string | null>(null)
+  // W15-1 — internal modal state for the PriceHistoryChart viewer.
+  // The "View History" button per row sets this; the modal renders
+  // PriceHistoryChart with the row's tokenId. Closed on backdrop click
+  // or Escape (handled by the modal itself).
+  const [historyMarket, setHistoryMarket] = useState<{ tokenId: string; slug: string } | null>(null)
+
+  // W15-1 — Track previous mid price per token so PriceTicker can
+  // compute change-since-last-tick. The ref is mutated on every render
+  // (NOT in an effect — otherwise the first render after a tick would
+  // see the new price as both `current` and `previous`, hiding the flash).
+  // The lookup is keyed by token_id; we lazily populate it on each
+  // render so a brand-new market starts with no previous (no flash).
+  const prevMidsRef = useRef<Record<string, number>>({})
 
   // W9-6 — handlers kept as inline functions rather than useCallback:
   // they are wrapped in per-row arrow lambdas inside the JSX
@@ -210,8 +229,10 @@ function MarketsPanel({ books, onSelectMarket, priceFlashes }: Props) {
             <thead>
               <tr className="border-b border-[#1f2335] text-[#7e8aaa] text-[10.5px]">
                 <th scope="col" className="min-w-[240px] text-left">Event &amp; Contract Question</th>
-                <th scope="col" className="text-right">Bid (YES)</th>
-                <th scope="col" className="text-right">Ask (YES)</th>
+                {/* W15-1 — PriceTicker replaces the static Bid / Ask / Spread
+                    columns with a single animated price cell that shows
+                    mid + bid/ask chip + spread chip + change-since-last-tick. */}
+                <th scope="col" className="text-right">Live Price (Bid / Ask / Δ)</th>
                 <th
                   scope="col"
                   onClick={() => handleSort('mid')}
@@ -236,7 +257,7 @@ function MarketsPanel({ books, onSelectMarket, priceFlashes }: Props) {
                 >
                   Freshness {sortBy === 'age' ? (sortAsc ? '▲' : '▼') : ''}
                 </th>
-                <th scope="col" className="text-right">Action</th>
+                <th scope="col" className="text-right">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-[#1f2335]/50">
@@ -248,6 +269,27 @@ function MarketsPanel({ books, onSelectMarket, priceFlashes }: Props) {
                 // U12 — Resolve this row's price-flash direction once per render.
                 // Undefined (no flash active) yields no extra class on the cell.
                 const flashDir = priceFlashes?.[b.token_id]
+                // W15-2 — suppress the flash class entirely when the
+                // `showPriceFlashes` preference is off; the cell renders
+                // without the green/red tint so a trader who finds the
+                // flashing distracting gets a calmer view.
+                const flashClass =
+                  showPriceFlashes && flashDir === 'up'
+                    ? ' price-up'
+                    : showPriceFlashes && flashDir === 'down'
+                    ? ' price-down'
+                    : ''
+                // W15-1 — Look up the previous mid for this token to feed
+                // PriceTicker's change-since-last-tick computation. We
+                // snapshot the previous value BEFORE updating the ref below,
+                // so the row renders with the correct delta.
+                const previousMid = b.mid != null ? prevMidsRef.current[b.token_id] ?? null : null
+                // Update the ref with the current mid for the next render.
+                // This must happen during render (not in an effect) so the
+                // very next render of the same book gets this as previous.
+                if (b.mid != null && Number.isFinite(b.mid)) {
+                  prevMidsRef.current[b.token_id] = b.mid
+                }
 
                 return (
                   <tr
@@ -281,20 +323,30 @@ function MarketsPanel({ books, onSelectMarket, priceFlashes }: Props) {
                       </div>
                     </td>
 
-                    {/* Best Bid */}
-                    <td className="text-green-400 mono font-semibold text-right">
-                      {fmtPrice(b.best_bid)}
-                    </td>
-
-                    {/* Best Ask */}
-                    <td className="text-red-400 mono font-semibold text-right">
-                      {fmtPrice(b.best_ask)}
+                    {/* W15-1 — PriceTicker replaces the static Bid / Ask / Spread cells.
+                        The component shows mid (animated + colored by tick direction),
+                        a bid/ask chip on the left, a spread chip on the right, and a
+                        change-since-last-tick line beneath. */}
+                    <td className="text-right py-2.5 pr-3">
+                      <div className="flex justify-end relative">
+                        <PriceTicker
+                          price={b.mid}
+                          previousPrice={previousMid}
+                          bestBid={b.best_bid}
+                          bestAsk={b.best_ask}
+                          spread={b.spread}
+                          size="sm"
+                          label={`${info.eventTitle} ${info.question} mid price`}
+                        />
+                      </div>
                     </td>
 
                     {/* Implied Probability Gauge — mid-price cell.
                         U12: apply .price-up / .price-down when a flash is active
-                        for this token so CSS can animate the cell background. */}
-                    <td className={`text-right${flashDir === 'up' ? ' price-up' : flashDir === 'down' ? ' price-down' : ''}`}>
+                        for this token so CSS can animate the cell background.
+                        W15-2: flash class is empty when `showPriceFlashes`
+                        preference is off (computed in `flashClass` above). */}
+                    <td className={`text-right${flashClass}`}>
                       <ProbabilityGauge mid={b.mid} />
                     </td>
 
@@ -312,18 +364,32 @@ function MarketsPanel({ books, onSelectMarket, priceFlashes }: Props) {
                       </span>
                     </td>
 
-                    {/* Quick Trade Button */}
+                    {/* W15-1 — Action buttons: Depth (opens DepthChartModal which
+                        now contains MarketDepthChart) + History (opens the
+                        PriceHistoryChart modal). */}
                     <td className="text-right">
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation()
-                          onSelectMarket && onSelectMarket(b.token_id, b.slug)
-                        }}
-                        className="btn btn-primary btn-xs font-bold shadow-md hover:shadow-cyan-500/20"
-                        aria-label={`Open depth and trade ticket for ${info.question}`}
-                      >
-                        Trade
-                      </button>
+                      <div className="flex items-center justify-end gap-1.5">
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            onSelectMarket && onSelectMarket(b.token_id, b.slug)
+                          }}
+                          className="btn btn-primary btn-xs font-bold shadow-md hover:shadow-cyan-500/20"
+                          aria-label={`View order book depth and trade ticket for ${info.question}`}
+                        >
+                          Depth
+                        </button>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            setHistoryMarket({ tokenId: b.token_id, slug: b.slug })
+                          }}
+                          className="btn btn-ghost btn-xs font-bold"
+                          aria-label={`View price history chart for ${info.question}`}
+                        >
+                          History
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 )
@@ -332,6 +398,57 @@ function MarketsPanel({ books, onSelectMarket, priceFlashes }: Props) {
           </table>
         )}
       </div>
+
+      {/* W15-1 — PriceHistoryChart modal. Rendered when the user clicks
+          the "History" button on any row. Self-fetches OHLCV bars from
+          /api/history/ohlcv and manages its own 5s polling. Escape key
+          and backdrop click both close the modal. */}
+      {historyMarket && (
+        <div
+          className="modal-backdrop"
+          onClick={(e) => { if (e.target === e.currentTarget) setHistoryMarket(null) }}
+          role="presentation"
+        >
+          <div
+            className="modal modal-wide"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="history-modal-title"
+          >
+            <div className="modal-header">
+              <div>
+                <div className="flex items-center gap-2">
+                  <span id="history-modal-title" className="text-sm font-bold text-[#dde1ed]">
+                    📈 Price History: <span className="text-cyan-300">{historyMarket.slug || historyMarket.tokenId.slice(0, 16)}</span>
+                  </span>
+                </div>
+                <span className="text-[11px] text-[#7e8aaa] mono mt-0.5 block">
+                  token: {historyMarket.tokenId.slice(0, 18)}…
+                </span>
+              </div>
+              <button
+                onClick={() => setHistoryMarket(null)}
+                className="modal-close"
+                aria-label="Close price history modal"
+              >
+                ✕
+              </button>
+            </div>
+            <div className="modal-body space-y-3">
+              <PriceHistoryChart
+                tokenId={historyMarket.tokenId}
+                resolution="5m"
+                count={60}
+                height={320}
+              />
+              <div className="text-[10px] text-[#7e8aaa] mono border-t border-[#1f2335] pt-2">
+                <span aria-hidden="true">ℹ️</span> Bars are synthetic when no TimescaleDB
+                candles are persisted. Chart auto-refreshes every 5s.
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
@@ -346,5 +463,7 @@ export default memo(MarketsPanel, (prev, next) => {
   if (prev.books !== next.books) return false
   if (prev.onSelectMarket !== next.onSelectMarket) return false
   if (JSON.stringify(prev.priceFlashes) !== JSON.stringify(next.priceFlashes)) return false
+  // W15-2 — preferences-driven display flag; flipped in the SettingsModal.
+  if (prev.showPriceFlashes !== next.showPriceFlashes) return false
   return true
 })

@@ -103,6 +103,14 @@ from core.prometheus_metrics import (
 # tracker holds the richer per-IP / per-limit / per-minute shape the
 # React ``RateLimitPanel`` renders. State is in-memory and process-local
 # — a restart zeroes it, which is fine for a "last hour" dashboard view.
+# W15-4 — Per-endpoint latency profiler. Sibling to
+# ``rate_limit_tracker`` — same singleton pattern, same coarse-grained
+# ``threading.Lock`` discipline. The request_logging_middleware below
+# feeds every request's (method, path, duration, status) into
+# ``profiler.record`` so the ``GET /api/profiling/stats`` / ``/slowest``
+# / ``POST /api/profiling/reset`` routes can surface p50/p95/p99 per
+# endpoint without an external tracing layer.
+from core.profiling import profiler
 from core.rate_limit_tracker import rate_limit_tracker
 from core.security import validate_token_strength
 from core.settlement import settlement_engine
@@ -1051,6 +1059,21 @@ async def request_logging_middleware(request: Request, call_next):
                 )
             except Exception:  # pragma: no cover
                 log.warning("[rate-limit-tracker] record_request failed", exc_info=True)
+            # W15-4 — Profiler: record the 500 so the per-endpoint
+            # ``error_rate`` reflects unhandled-exception paths (without
+            # this branch, only the success-path recording below would
+            # count, and a route that always 500s would show
+            # ``request_count=0`` in the profile). Best-effort — same
+            # contract as the rate-limit-tracker call above.
+            try:
+                profiler.record(
+                    method=request.method,
+                    endpoint=request.url.path,
+                    duration=duration,
+                    status=500,
+                )
+            except Exception:  # pragma: no cover
+                log.warning("[profiler] record failed", exc_info=True)
             request_id_var.reset(request_id_token)
             return JSONResponse(
                 status_code=500,
@@ -1080,6 +1103,24 @@ async def request_logging_middleware(request: Request, call_next):
             )
         except Exception:  # pragma: no cover — defensive: tracker must never break the response
             log.warning("[rate-limit-tracker] record_request failed", exc_info=True)
+        # W15-4 — Per-endpoint latency profiler. Best-effort (same
+        # contract as the rate-limit-tracker call above): a profiler
+        # exception must never change the response. Records the
+        # (method, path, duration, status) tuple so the
+        # ``GET /api/profiling/stats`` endpoint can surface p50/p95/p99
+        # per endpoint. Includes 4xx / 5xx responses so the
+        # ``error_rate`` field reflects the true failure ratio (a route
+        # that returns 200 fast but 500 slow is just as actionable as
+        # one that's slow on the happy path).
+        try:
+            profiler.record(
+                method=request.method,
+                endpoint=request.url.path,
+                duration=duration,
+                status=response.status_code if response is not None else 500,
+            )
+        except Exception:  # pragma: no cover — defensive: profiler must never break the response
+            log.warning("[profiler] record failed", exc_info=True)
         # Echo the id back to the client so support / debugging can self-service
         # a log trace without operator intervention.
         response.headers["X-Request-ID"] = request_id
@@ -1125,7 +1166,7 @@ async def rate_limit_headers(request: Request, call_next):
     return response
 
 
-# ── Security headers middleware (W11-6 — OWASP A05) ──────────────────────────
+# ── Security headers middleware (W11-6 — OWASP A05; expanded W15-6) ──────────
 # Adds a baseline set of defensive response headers to EVERY response so the
 # browser's own security machinery can apply defense-in-depth:
 #   * ``X-Content-Type-Options: nosniff``        — blocks MIME-type sniffing.
@@ -1135,10 +1176,24 @@ async def rate_limit_headers(request: Request, call_next):
 #   * ``Referrer-Policy: strict-origin-when-cross-origin`` — strips the path /
 #                                                   query from the Referer
 #                                                   header on cross-origin nav.
-#   * ``Content-Security-Policy: default-src 'self'`` — only same-origin
-#                                                   resources may load (the
-#                                                   dashboard is fully same-origin;
-#                                                   no external scripts / styles).
+#   * ``Permissions-Policy: geolocation=(), microphone=(), camera=()`` —
+#                                                   disables the most-abused
+#                                                   device-permission APIs even
+#                                                   if a future route is tricked
+#                                                   into requesting them.
+#                                                   (W15-6)
+#   * ``Content-Security-Policy`` — W15-6 expanded from ``default-src 'self'``
+#                                                   to a full directive list
+#                                                   that lets the dashboard
+#                                                   load inline scripts/styles
+#                                                   (Next.js requires them),
+#                                                   connect to its own ws/wss
+#                                                   back-channel, render
+#                                                   data/blob image URLs, and
+#                                                   load self-hosted fonts —
+#                                                   while still defaulting to
+#                                                   same-origin for anything
+#                                                   not explicitly allowed.
 # These headers do NOT affect the JSON API contract — they only instruct the
 # browser. They're applied after ``call_next`` so they land on every response
 # (200, 4xx, 5xx, OPTIONS preflight, WebSocket upgrade rejection, …). The
@@ -1146,6 +1201,17 @@ async def rate_limit_headers(request: Request, call_next):
 # must be terminated by the TLS-aware reverse proxy (Caddy) so it only ships
 # over an actual HTTPS connection (otherwise an active MITM could inject it
 # into a plain-HTTP response and pin the client).
+_CSP_HEADER_VALUE = (
+    "default-src 'self'; "
+    "script-src 'self' 'unsafe-inline'; "
+    "style-src 'self' 'unsafe-inline'; "
+    "connect-src 'self' ws: wss:; "
+    "img-src 'self' data: blob:; "
+    "font-src 'self' data:"
+)
+_PERMISSIONS_POLICY_VALUE = "geolocation=(), microphone=(), camera=()"
+
+
 @app.middleware("http")
 async def security_headers_middleware(request: Request, call_next):
     response = await call_next(request)
@@ -1153,7 +1219,8 @@ async def security_headers_middleware(request: Request, call_next):
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["X-XSS-Protection"] = "1; mode=block"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
-    response.headers["Content-Security-Policy"] = "default-src 'self'"
+    response.headers["Permissions-Policy"] = _PERMISSIONS_POLICY_VALUE
+    response.headers["Content-Security-Policy"] = _CSP_HEADER_VALUE
     return response
 
 
@@ -1519,13 +1586,35 @@ async def get_analytics():
 @app.get("/api/exposure", tags=["risk"])
 async def get_exposure():
     """Full exposure decomposition (mandate section 2)."""
-    return compute_exposure()
+    # W15-4 — cache exposure for 15s (general_cache's default TTL).
+    # ``compute_exposure`` walks every open position + every pending
+    # order against the live book on each call — a 15s TTL collapses
+    # the dashboard's polling burst. ``POST /api/trade`` and
+    # ``POST /api/positions/{token_id}/close`` invalidate so the
+    # next read after a mutation sees fresh data.
+    cache_key = "exposure"
+    cached = general_cache.get(cache_key)
+    if cached is not None:
+        return cached
+    result = compute_exposure()
+    general_cache.set(cache_key, result)
+    return result
 
 
 @app.get("/api/risk/reconcile", tags=["risk"])
 async def get_reconciliation():
     """Reconciliation investigation for the current open exposure."""
-    return compute_reconciliation(bankroll_ceiling=float(BANKROLL_CEILING))
+    # W15-4 — cache the reconciliation report for 30s. The report
+    # walks every open position vs. the book-keeping layer's recorded
+    # totals — recompute on every poll is wasted work between
+    # mutations. Same invalidation hook as ``/api/exposure``.
+    cache_key = "risk_reconcile"
+    cached = general_cache.get(cache_key)
+    if cached is not None:
+        return cached
+    result = compute_reconciliation(bankroll_ceiling=float(BANKROLL_CEILING))
+    general_cache.set(cache_key, result)
+    return result
 
 
 @app.get("/api/leaderboard", tags=["risk"])
@@ -2169,6 +2258,13 @@ async def place_manual_trade(request: Request, req: ManualTradeRequest):
     analytics_cache.invalidate("analytics")
     analytics_cache.invalidate("leaderboard")
     attribution_cache.clear()
+    # W15-4 — invalidate the W15-4 hot-path caches that depend on
+    # open-position / open-order state so the next dashboard poll
+    # reflects the new order. Same rationale as the analytics_cache
+    # invalidations above.
+    general_cache.invalidate("exposure")
+    general_cache.invalidate("risk_reconcile")
+    general_cache.invalidate("database_reconciliation")
     # W14-1 — broadcast the placement to the ``trades`` (placement event)
     # and ``orders`` (open-orders update) channels. ``positions`` is also
     # nudged because a paper fill may have landed since the last periodic
@@ -2547,6 +2643,13 @@ async def close_position(request: Request, token_id: str, req: PositionCloseRequ
     # which is captured by the trade POST invalidation path above.
     analytics_cache.invalidate("analytics")
     analytics_cache.invalidate("leaderboard")
+    # W15-4 — invalidate the W15-4 hot-path caches that depend on
+    # open-position / open-order state so the next dashboard poll
+    # reflects the position close. Same rationale as the analytics
+    # invalidations above.
+    general_cache.invalidate("exposure")
+    general_cache.invalidate("risk_reconcile")
+    general_cache.invalidate("database_reconciliation")
     # W14-1 — broadcast the close-submit to ``trades`` (close event) and
     # ``positions`` (state-change nudge). The actual fill (with realised
     # P&L) lands asynchronously via the paper_sim fill loop — this
@@ -2846,6 +2949,16 @@ async def retrain_ml_model(request: Request):
     # pre-retrain cached dict. Done BEFORE constructing the response so the
     # invalidation lands even if the response construction itself raises.
     ml_metrics_cache.invalidate("ml_metrics")
+    # W15-4 — invalidate the W15-4 hot-path caches that depend on the
+    # ML model's state. The registry summary (``ml_registry``), drift
+    # status (``ml_drift``), orchestrator stats
+    # (``ml_training_orchestrator``), and deep-analysis roll-up
+    # (``analysis_deep`` — which calls into the ML ensemble's
+    # predictions) all need to be recomputed against the new model.
+    ml_metrics_cache.invalidate("ml_registry")
+    general_cache.invalidate("ml_drift")
+    general_cache.invalidate("ml_training_orchestrator")
+    general_cache.invalidate("analysis_deep")
     # W14-1 — broadcast the post-retrain ML metrics so any dashboard
     # panel subscribed to the ``metrics`` channel refreshes its
     # Brier / AUC / ECE display without re-polling /api/ml. The
@@ -2906,13 +3019,25 @@ async def get_drift_report():
 @app.get("/api/ml/training-orchestrator", tags=["ml"])
 async def get_training_orchestrator_stats():
     """Return training orchestrator status: retrain count, last champion Brier, drift thresholds."""
+    # W15-4 — cache the orchestrator stats for 30s (general_cache's
+    # default TTL). The orchestrator's stats (retrain count, last
+    # champion Brier, drift thresholds) only change on a fresh fit
+    # (``POST /api/ml/retrain``) — caching collapses the dashboard's
+    # polling burst without exposing stale data beyond one natural
+    # shift window.
+    cache_key = "ml_training_orchestrator"
+    cached = general_cache.get(cache_key)
+    if cached is not None:
+        return cached
     from ml.training_orchestrator import training_orchestrator
-    return {
+    result = {
         **training_orchestrator.stats,
         "model_version": model_registry.active_version,
         "model_ready": ml_model.rf is not None,
         "drift_status": drift_detector.drift_status,
     }
+    general_cache.set(cache_key, result)
+    return result
 
 
 @app.post("/api/ml/learn", tags=["ml"])
@@ -2982,14 +3107,28 @@ async def ml_learn(request: Request, token_id: str = Query(..., min_length=1, ma
 @app.get("/api/analysis/deep", tags=["analysis"])
 async def get_deep_analysis():
     """Return top multi-factor opportunity rankings and fundamental sentiment."""
+    # W15-4 — cache the deep-analysis roll-up for 30s (general_cache's
+    # default TTL). ``get_top_ranked_opportunities`` walks every
+    # tracked market's feature vector through the analysis engine's
+    # 9-factor scoring — the dashboard polls every few seconds and
+    # the underlying opportunities only shift when order books or
+    # ML predictions move (which the per-poller / per-strategy
+    # cadence already throttles). 30s is well inside the natural
+    # shift window.
+    cache_key = "analysis_deep"
+    cached = general_cache.get(cache_key)
+    if cached is not None:
+        return cached
     from core.analysis_engine import deep_analysis_engine
     top_opps = deep_analysis_engine.get_top_ranked_opportunities(limit=15)
     news = [n.to_dict() for n in fundamental_engine.news_feed[:15]]
-    return {
+    result = {
         "top_opportunities": top_opps,
         "recent_news": news,
         "timestamp": time.time(),
     }
+    general_cache.set(cache_key, result)
+    return result
 
 
 @app.get("/api/analysis/market/{token_id}", tags=["analysis"])
@@ -3019,13 +3158,39 @@ async def get_fundamental_news(limit: int = Query(50, ge=1, le=500), category: s
 @app.get("/api/analysis/news/sources", tags=["analysis"])
 async def get_fundamental_news_sources():
     """Return catalog of configured news sources. GDELT is config-only (not connected)."""
-    return fundamental_engine.get_source_catalog()
+    # W15-4 — cache the source catalog for 5 min (markets_cache's
+    # default TTL). The catalog is built at ``fundamental_engine``
+    # construction time from ``config.settings`` — it never changes
+    # at runtime (a new source requires a config edit + restart).
+    # Without caching, the dashboard's "News Sources" panel re-walks
+    # the catalog on every poll, which the profiler flagged as a
+    # hot path (the ``get_source_catalog`` call constructs a fresh
+    # list of dicts each time).
+    cache_key = "analysis_news_sources"
+    cached = markets_cache.get(cache_key)
+    if cached is not None:
+        return cached
+    result = fundamental_engine.get_source_catalog()
+    markets_cache.set(cache_key, result)
+    return result
 
 
 @app.get("/api/analysis/news/stats", tags=["analysis"])
 async def get_fundamental_news_stats():
     """Return live NLP sentiment breakdown and global ingestion rate telemetry."""
-    return fundamental_engine.get_news_stats()
+    # W15-4 — cache the news stats for 15s (general_cache's default
+    # TTL). ``get_news_stats`` walks the entire ``news_feed`` deque
+    # to compute sentiment distribution + ingestion rate — the
+    # dashboard polls every few seconds and the underlying feed only
+    # refreshes every 60s, so a 15s TTL collapses the burst without
+    # exposing stale data beyond one feed-tick window.
+    cache_key = "analysis_news_stats"
+    cached = general_cache.get(cache_key)
+    if cached is not None:
+        return cached
+    result = fundamental_engine.get_news_stats()
+    general_cache.set(cache_key, result)
+    return result
 
 
 # ── Model Registry & Drift Detection ──────────────────────────────────────────
@@ -3033,13 +3198,35 @@ async def get_fundamental_news_stats():
 @app.get("/api/ml/registry", tags=["ml"])
 async def get_model_registry():
     """Return model version lineage, benchmarks, ECE, and validation status."""
-    return model_registry.get_summary()
+    # W15-4 — cache the registry summary for 60s (ml_metrics_cache's
+    # default TTL). The registry's lineage / benchmark / ECE data
+    # only changes on a fresh fit (``POST /api/ml/retrain``) which
+    # invalidates the key; the dashboard polls this endpoint every
+    # few seconds, so caching collapses the burst.
+    cache_key = "ml_registry"
+    cached = ml_metrics_cache.get(cache_key)
+    if cached is not None:
+        return cached
+    result = model_registry.get_summary()
+    ml_metrics_cache.set(cache_key, result)
+    return result
 
 
 @app.get("/api/ml/drift", tags=["ml"])
 async def get_model_drift():
     """Return real-time Population Stability Index (PSI) and concept shift metrics."""
-    return drift_detector.get_status_report()
+    # W15-4 — cache the drift status for 30s (general_cache's default
+    # TTL). ``get_status_report`` walks the rolling prediction
+    # distribution to compute PSI — the underlying distribution only
+    # shifts when new predictions land (one per strategy cycle, ~15s
+    # cadence). 30s is well inside the natural shift window.
+    cache_key = "ml_drift"
+    cached = general_cache.get(cache_key)
+    if cached is not None:
+        return cached
+    result = drift_detector.get_status_report()
+    general_cache.set(cache_key, result)
+    return result
 
 
 # ── Quantitative Backtesting Lab ──────────────────────────────────────────────
@@ -3188,10 +3375,20 @@ async def get_database_records(table: str = Query("market_snapshots", max_length
 @app.get("/api/database/reconciliation", tags=["database"])
 async def get_reconciliation_report():
     """Most recent storage-vs-engine reconciliation artifact (P0-DAT-03)."""
+    # W15-4 — cache the reconciliation artifact for 30s. A fresh
+    # ``run_reconciliation()`` walks every persisted record vs. the
+    # in-memory store — recompute on every poll is wasted work. The
+    # artifact only shifts on a write (which the per-write
+    # ``record_fill`` / ``add_order`` hooks already throttle).
+    cache_key = "database_reconciliation"
+    cached = general_cache.get(cache_key)
+    if cached is not None:
+        return cached
     from core.reconciliation import last_reconciliation, run_reconciliation
     report = last_reconciliation()
     if report is None:
         report = run_reconciliation()
+    general_cache.set(cache_key, report)
     return report
 
 
@@ -3867,6 +4064,170 @@ async def rate_limit_stats(request: Request):  # noqa: ARG001 — slowapi requir
     window.
     """
     return rate_limit_tracker.get_stats()
+
+
+# ── W15-4 — Per-endpoint latency profiling endpoints ─────────────────────────
+# Additive: appends three endpoints under ``/api/profiling/*`` so an
+# operator (or the ``scripts/perf_report.py`` CLI) can surface p50 /
+# p95 / p99 latencies per route without an external tracing layer.
+#
+# The data is fed by the ``profiler.record(...)`` call inserted into
+# the existing ``request_logging_middleware`` (same path that already
+# feeds the W14-7 ``rate_limit_tracker.record_request`` call) so every
+# authenticated route — including 4xx / 5xx responses — is captured.
+#
+# All state is in-memory and process-local: a restart zeroes the
+# counters (same contract as the rate-limit-tracker panel — see
+# W14-7). The ``POST /api/profiling/reset`` route lets an operator
+# wipe the counters WITHOUT a restart so a short-window profile run
+# after a deploy starts from a fresh baseline.
+#
+# Auth enforced by ``enforce_api_auth`` (none of the three paths are
+# in ``PUBLIC_PATHS``). Rate-limited by ``READ_LIMIT`` on the two GETs
+# so a dashboard polling the panel every few seconds can't starve
+# the trading path; the POST reset is rate-limited by ``WRITE_LIMIT``
+# because it mutates state.
+@app.get(
+    "/api/profiling/stats",
+    tags=["system"],
+    summary="Per-endpoint latency statistics",
+    description=(
+        "Returns per-endpoint request count, average latency, p50 / p95 / "
+        "p99 latencies (ms), error count, error rate, and last-called "
+        "timestamp. Sorted by ``sort_by`` (one of ``p95``, ``p99``, "
+        "``avg``, ``count``, ``errors``; default ``p95``) descending. "
+        "Use ``GET /api/profiling/slowest?limit=N`` for the top-N view. "
+        "In-memory only — a process restart zeroes the data."
+    ),
+)
+@limiter.limit(READ_LIMIT)
+async def profiling_stats(
+    request: Request,  # noqa: ARG001 — slowapi requires the `request` arg
+    sort_by: str = Query("p95", max_length=20),
+):
+    """Get per-endpoint latency statistics."""
+    return {
+        "summary": profiler.get_summary(),
+        "endpoints": profiler.get_stats(sort_by),
+    }
+
+
+@app.get(
+    "/api/profiling/slowest",
+    tags=["system"],
+    summary="Slowest endpoints by p95 latency",
+    description=(
+        "Returns the top ``limit`` endpoints ranked by p95 latency "
+        "(descending). Useful for surfacing the small handful of routes "
+        "that dominate tail latency without paging through the full "
+        "``/api/profiling/stats`` table."
+    ),
+)
+@limiter.limit(READ_LIMIT)
+async def profiling_slowest(
+    request: Request,  # noqa: ARG001 — slowapi requires the `request` arg
+    limit: int = Query(10, ge=1, le=100),
+):
+    """Get the slowest endpoints by p95 latency."""
+    return {"slowest": profiler.get_slowest(limit)}
+
+
+@app.post(
+    "/api/profiling/reset",
+    tags=["system"],
+    summary="Reset all profiling data",
+    description=(
+        "Drop every endpoint's latency / error / count stats so the "
+        "next ``GET /api/profiling/stats`` call starts from a fresh "
+        "baseline. In-memory only — equivalent to restarting the "
+        "service for clean numbers, without the restart. Useful for "
+        "capturing a short-window profile run after a deploy."
+    ),
+)
+@limiter.limit(WRITE_LIMIT)
+async def profiling_reset(
+    request: Request,  # noqa: ARG001 — slowapi requires the `request` arg
+):
+    """Reset all profiling data."""
+    profiler.reset()
+    return {"ok": True}
+
+
+# ── W15-8 — Advanced execution planner endpoint ──────────────────────────────
+# Surfaces ``execution.advanced_router.AdvancedOrderRouter`` to the dashboard
+# so an operator can preview an execution schedule (TWAP / VWAP / iceberg /
+# immediate) BEFORE committing capital. Auth enforced by ``enforce_api_auth``
+# (this path is NOT in ``PUBLIC_PATHS``); rate-limited by ``READ_LIMIT`` so a
+# misbehaving client polling the planner can't starve the trading path.
+#
+# The endpoint is a PURE PLANNER — it does not submit any orders, touch the
+# order book, or mutate any state. The live trading path can call the same
+# ``AdvancedOrderRouter`` to obtain a plan and then route each slice through
+# ``SmartOrderRouter`` (for book-aware sizing) and the venue adapter.
+@app.post("/api/execution/plan", tags=["execution"])
+@limiter.limit(READ_LIMIT)
+async def plan_execution(request: Request, params: dict):  # noqa: ARG001 — slowapi requires the `request` arg
+    """Get an execution plan for a large order.
+
+    Body shape::
+
+        {
+          "total_size": float,                 # parent order size (USDC or shares)
+          "strategy": "auto" | "twap" | "vwap" | "iceberg" | "immediate",  # default "auto"
+          "duration": float,                  # TWAP duration (s); default 60
+          "n_slices": int,                    # TWAP / VWAP slice count; default 5
+          "volume_profile": [float, ...],    # VWAP per-bin volumes; default uniform
+          "visible_size": float | null,       # Iceberg visible quantum; default auto
+          "avg_daily_volume": float,          # ADV — for "auto" recommendation; default 1000
+          "spread_bps": float,                # top-of-book spread in BPS; default 20
+          "urgency": "normal" | "urgent"      # urgency hint for "auto"; default "normal"
+        }
+
+    Returns::
+
+        {
+          "strategy": str,                    # the strategy actually used
+          "slices": [{"index", "size", "price_target", "delay_seconds"}, ...],
+          "total_size": float,
+          "duration_seconds": float
+        }
+
+    The ``strategy`` field reflects the chosen strategy — when ``strategy``
+    is ``"auto"`` (or omitted), the router's ``recommend_strategy`` is
+    invoked with the supplied ADV / spread / urgency to pick the best
+    strategy, and the resolved name is echoed back so the caller can
+    display it in the dashboard.
+    """
+    from execution.advanced_router import AdvancedOrderRouter
+
+    router = AdvancedOrderRouter()
+
+    total_size = float(params.get("total_size", 0) or 0)
+    strategy = (params.get("strategy") or "auto").lower()
+
+    if strategy == "auto":
+        strategy = router.recommend_strategy(
+            total_size=total_size,
+            avg_daily_volume=float(params.get("avg_daily_volume", 1000) or 1000),
+            spread_bps=float(params.get("spread_bps", 20) or 20),
+            urgency=(params.get("urgency") or "normal"),
+        )
+
+    plan = router.plan(
+        strategy,
+        total_size,
+        duration=float(params.get("duration", 60) or 60),
+        n_slices=int(params.get("n_slices", 5) or 5),
+        volume_profile=params.get("volume_profile"),
+        visible_size=params.get("visible_size"),
+    )
+
+    return {
+        "strategy": plan.strategy,
+        "slices": plan.slices,
+        "total_size": plan.total_size,
+        "duration_seconds": plan.duration_seconds,
+    }
 
 
 # ── W14-8 — Client-side error reporting endpoint ──────────────────────────────

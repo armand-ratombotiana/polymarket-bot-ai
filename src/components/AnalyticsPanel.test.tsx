@@ -1,7 +1,54 @@
 // components/AnalyticsPanel.test.tsx — KPI rendering, formatting & error state.
-import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { render, screen, waitFor, act } from '@testing-library/react'
 import AnalyticsPanel from './AnalyticsPanel'
+
+// W15-5 — MockWebSocket stub. Same pattern as useWebSocket.test.ts /
+// useRealtimeData.test.ts. The panel now opens a real WS via
+// useRealtimeData → useWebSocket; without this stub, jsdom attempts an
+// actual ws://localhost:8080/ws connection that errors on every test.
+class MockWebSocket {
+  static instances: MockWebSocket[] = []
+  static CONNECTING = 0
+  static OPEN = 1
+  static CLOSING = 2
+  static CLOSED = 3
+
+  url: string
+  readyState: number
+  onopen: (() => void) | null = null
+  onmessage: ((event: { data: string }) => void) | null = null
+  onclose: (() => void) | null = null
+  onerror: ((event: unknown) => void) | null = null
+
+  constructor(url: string) {
+    this.url = url
+    this.readyState = MockWebSocket.CONNECTING
+    MockWebSocket.instances.push(this)
+  }
+
+  triggerOpen() {
+    this.readyState = MockWebSocket.OPEN
+    this.onopen?.()
+  }
+
+  triggerMessage(data: unknown) {
+    const payload = typeof data === 'string' ? data : JSON.stringify(data)
+    this.onmessage?.({ data: payload })
+  }
+
+  triggerClose() {
+    this.readyState = MockWebSocket.CLOSED
+    this.onclose?.()
+  }
+
+  close() {
+    this.readyState = MockWebSocket.CLOSED
+    this.onclose?.()
+  }
+
+  send() {}
+}
 
 // fmtPnl emits a Unicode "−" (U+2212) for negative values.
 const MINUS = '\u2212'
@@ -54,9 +101,22 @@ function mockFetchNotOk(status = 500) {
 }
 
 describe('AnalyticsPanel', () => {
+  let originalWebSocket: typeof WebSocket
+
   beforeEach(() => {
     // Re-install a fresh fetch mock before each test.
     global.fetch = vi.fn() as unknown as typeof fetch
+    // W15-5 — install MockWebSocket so useRealtimeData's internal
+    // useWebSocket() call doesn't attempt a real ws:// connection.
+    originalWebSocket = global.WebSocket
+    MockWebSocket.instances = []
+    ;(global as unknown as { WebSocket: typeof WebSocket }).WebSocket =
+      MockWebSocket as unknown as typeof WebSocket
+  })
+
+  afterEach(() => {
+    ;(global as unknown as { WebSocket: typeof WebSocket }).WebSocket =
+      originalWebSocket
   })
 
   it('renders the loading state on first mount before data arrives', () => {
@@ -278,6 +338,104 @@ describe('AnalyticsPanel', () => {
       const card = expectancyLabel.closest('.kpi-card')
       const valueSpan = card?.querySelector('.kpi-value')
       expect(valueSpan?.textContent).toBe('—')
+    })
+  })
+
+  // ─────────────────────────────────────────────────────────────────────
+  // W15-5 — Realtime migration tests
+  // ─────────────────────────────────────────────────────────────────────
+
+  describe('W15-5: realtime migration', () => {
+    it('renders the "Polling" badge before the WS connects', async () => {
+      vi.mocked(fetch).mockImplementation(mockFetchOk(sampleAnalytics))
+      render(<AnalyticsPanel />)
+      await waitFor(() => {
+        expect(screen.getByText('📊 Performance Analytics')).toBeInTheDocument()
+      })
+      // WS is constructed but `triggerOpen()` hasn't been called yet —
+      // isRealtime=false → amber "⟳ Polling" badge should be visible.
+      expect(screen.getByText('⟳ Polling')).toBeInTheDocument()
+      expect(screen.queryByText('● Live')).not.toBeInTheDocument()
+    })
+
+    it('flips to the "Live" badge when the WS connects', async () => {
+      vi.mocked(fetch).mockImplementation(mockFetchOk(sampleAnalytics))
+      render(<AnalyticsPanel />)
+      await waitFor(() => {
+        expect(screen.getByText('📊 Performance Analytics')).toBeInTheDocument()
+      })
+      // Before open: polling badge.
+      expect(screen.getByText('⟳ Polling')).toBeInTheDocument()
+      // Drive the MockWebSocket through its lifecycle.
+      const ws = MockWebSocket.instances[0]
+      expect(ws).toBeTruthy()
+      ws.triggerOpen()
+      // After open: live badge.
+      expect(await screen.findByText('● Live')).toBeInTheDocument()
+      expect(screen.queryByText('⟳ Polling')).not.toBeInTheDocument()
+    })
+
+    it('drops metrics-channel WS payloads that do not look like Analytics', async () => {
+      // The `metrics` channel canonically pushes BotSnapshot — not the
+      // Analytics shape. The panel's `validate` predicate should drop
+      // such payloads so the displayed KPIs are not clobbered with
+      // mismatched fields.
+      vi.mocked(fetch).mockImplementation(mockFetchOk(sampleAnalytics))
+      render(<AnalyticsPanel />)
+      await waitFor(() => {
+        expect(screen.getByText('71.4% Win Rate')).toBeInTheDocument()
+      })
+      const ws = MockWebSocket.instances[0]
+      expect(ws).toBeTruthy()
+      ws.triggerOpen()
+      // Push a BotSnapshot-shaped payload — no `equity` numeric field.
+      ws.triggerMessage({
+        channel: 'metrics',
+        data: { mode: 'paper', kill_switch: false, order_books: [] },
+      })
+      // The win rate label is still the REST-derived 71.4% (not clobbered).
+      expect(screen.getByText('71.4% Win Rate')).toBeInTheDocument()
+    })
+
+    it('accepts metrics-channel WS payloads that match the Analytics shape', async () => {
+      // Initial REST response with win_rate 71.4%.
+      vi.mocked(fetch).mockImplementation(mockFetchOk(sampleAnalytics))
+      render(<AnalyticsPanel />)
+      await waitFor(() => {
+        expect(screen.getByText('71.4% Win Rate')).toBeInTheDocument()
+      })
+      const ws = MockWebSocket.instances[0]
+      expect(ws).toBeTruthy()
+      ws.triggerOpen()
+      // Push an Analytics-shaped payload via the metrics channel —
+      // win_rate moves from 0.714 to 0.85.
+      ws.triggerMessage({
+        channel: 'metrics',
+        data: { ...sampleAnalytics, win_rate: 0.85 },
+      })
+      // The new win rate (85.0%) should be reflected in BOTH the header
+      // pill and the KPI card.
+      await waitFor(() => {
+        expect(screen.getByText('85.0% Win Rate')).toBeInTheDocument()
+      })
+      expect(screen.getByText('85.0%')).toBeInTheDocument()
+    })
+
+    it('ignores WS messages on channels it did not subscribe to', async () => {
+      vi.mocked(fetch).mockImplementation(mockFetchOk(sampleAnalytics))
+      render(<AnalyticsPanel />)
+      await waitFor(() => {
+        expect(screen.getByText('71.4% Win Rate')).toBeInTheDocument()
+      })
+      const ws = MockWebSocket.instances[0]
+      expect(ws).toBeTruthy()
+      ws.triggerOpen()
+      // Push on the wrong channel — data should be unchanged.
+      ws.triggerMessage({
+        channel: 'positions',
+        data: { positions: [] },
+      })
+      expect(screen.getByText('71.4% Win Rate')).toBeInTheDocument()
     })
   })
 })

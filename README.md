@@ -4,41 +4,55 @@
 ![Python](https://img.shields.io/badge/Python-3.12-blue)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.111%2B-009688)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5-3178C6)
-![Tests](https://img.shields.io/badge/tests-916%2B%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-1429%2B%20passing-brightgreen)
 ![E2E](https://img.shields.io/badge/E2E-Playwright-2EAD33)
 ![Docker](https://img.shields.io/badge/Docker-ready-2496ED)
 ![PWA](https://img.shields.io/badge/PWA-installable-5A0FC8)
+![i18n](https://img.shields.io/badge/i18n-EN%2FFR-orange)
 ![Trading Mode](https://img.shields.io/badge/trading-paper-orange)
 
 Polymarket Pro is an institutional-grade algorithmic trading bot for
 [Polymarket](https://polymarket.com) prediction markets. It pairs a 4-model ML
 ensemble with a Level-2 meta-learner, a 10-check live safety gate, full decision
-auditability, paper-trading-by-default semantics, and a 37-panel React
-workstation — so every PREDICTION → SIGNAL → RISK → ORDER → FILL chain can be
-reconstructed, attributed, and stress-tested end-to-end.
+auditability, paper-trading-by-default semantics, an A/B testing framework, a
+Prometheus/Grafana observability stack, a 55+ panel React workstation with
+dark/light theme + i18n (EN/FR) + Cmd+K command palette, and a CLI tool — so
+every PREDICTION → SIGNAL → RISK → ORDER → FILL chain can be reconstructed,
+attributed, and stress-tested end-to-end.
 
 ---
 
 ## Project Status
 
 **Maturity: production-ready for paper trading; live trading gated behind a 10-check safety gate.**
+Wave 13–14 added an A/B testing framework, Prometheus + Grafana observability,
+API versioning, a circuit breaker for external APIs, dark/light theme, a Cmd+K
+command palette, browser push notifications, walk-forward + Monte Carlo
+backtest, an i18n layer (EN/FR), a CLI tool, an audit log viewer, backup
+verification + rotation, a rate-limit dashboard, frontend error reporting,
+user preferences, API contract tests, performance profiling, and a security
+hardening pass (including penetration tests).
 
 | Dimension             | Status                                                                                  |
 | --------------------- | --------------------------------------------------------------------------------------- |
-| Backend tests         | 709 passing (pytest, 44+ files)                                                         |
-| Frontend tests        | 207 passing (vitest + Testing Library)                                                  |
-| E2E tests             | 38 passing (Playwright: dashboard, navigation, API health)                              |
-| Total tests           | 916+ across the full stack                                                              |
-| API surface           | 77+ routes, all rate-limited, OpenAPI-documented (21 tags, 11 response models)         |
-| UI panels             | 37 React panels, WCAG 2.1 AA, dark theme, responsive                                    |
-| Real-time             | WebSocket multiplexed push (5 channels) + REST polling fallback                         |
-| ML pipeline           | 4-model ensemble + Level-2 meta-learner + Platt/isotonic calibration + drift detection  |
-| Security              | OWASP Top 10 hardening, constant-time token compare, SSRF guard, fail-closed auth      |
-| Offline / PWA         | Installable, service-worker cached, offline indicator                                  |
-| Observability         | 31 auto-collected metrics, structured JSON logging, decision-ledger audit chain         |
-| Deployment            | Docker multi-stage, docker-compose, Caddy gateway, supervisord                         |
+| Backend tests         | 970+ passing (pytest, 71+ files)                                                        |
+| Frontend tests        | 459+ passing (vitest + Testing Library)                                                |
+| E2E tests             | 38 passing (Playwright: dashboard, navigation, API health)                             |
+| Total tests           | 1429+ across the full stack                                                             |
+| API surface           | 90+ routes across 13 modules, all rate-limited, OpenAPI-documented (v1 versioning)       |
+| UI panels             | 55+ React panels + 5 chart primitives, WCAG 2.1 AA, dark/light theme, EN/FR i18n     |
+| Real-time             | WebSocket multiplexed broadcast (5 channels) + REST polling fallback                   |
+| ML pipeline           | 4-model ensemble + Level-2 meta-learner + Platt/isotonic calibration + drift + A/B      |
+| Risk                  | Kill switch + max drawdown + per-trade breaker + 10-check gate + external API breaker   |
+| Security              | OWASP Top 10, penetration-tested, constant-time token, SSRF guard, fail-closed auth     |
+| Observability         | 31 metrics + Prometheus /metrics + Grafana dashboard + audit log viewer + perf profile |
+| Offline / PWA         | Installable, service-worker cached, offline indicator, browser push notifications        |
+| Deployment            | Docker multi-stage, docker-compose, Caddy gateway, supervisord, DB migrations           |
+| Operational tooling   | CLI (14 commands), backup + verify + rotation, integrity checker, restore round-trip    |
 
-See the [Documentation Index](docs/README.md) for the full doc map.
+See the [Documentation Index](docs/README.md) for the full doc map, and
+[docs/METRICS_SUMMARY.md](docs/METRICS_SUMMARY.md) for a one-glance metric
+summary.
 
 ---
 
@@ -88,12 +102,19 @@ See the [Documentation Index](docs/README.md) for the full doc map.
 - **Drift detection** — Population Stability Index (PSI), KS-statistic, rolling
   and EWMA Brier scores; status escalates `HEALTHY → MODERATE_SHIFT →
   SIGNIFICANT_DRIFT` against documented thresholds.
+- **Probability calibration** — Platt scaling + isotonic regression applied
+  per-model; reliability diagrams render in the ML Validation panel.
 - **Label backfill** — settled Polymarket outcomes are streamed back into the
   feature store so the model can be retrained against resolved markets rather
   than synthetic-only labels.
 - **Shadow inference** — challenger models run in shadow mode against live
   predictions; the comparison view surfaces when a challenger is ready to
   promote to production.
+- **A/B testing framework** — multi-variant experiments comparing model
+  variants, strategy parameters, or capital-allocation curves; statistical
+  significance tracked via Brier-score deltas and ROC-AUC deltas.
+- **Advanced backtest** — walk-forward + Monte Carlo simulation; confidence
+  intervals on Sharpe / max drawdown / win rate derived from N resampled runs.
 
 ### Risk
 
@@ -110,6 +131,11 @@ See the [Documentation Index](docs/README.md) for the full doc map.
   can be enabled in-memory.
 - **Capital allocator** — sizes new entries with a saturating Michaelis-Menten
   edge curve, modulated by confidence, calibration, drawdown, and liquidity.
+- **Per-trade circuit breaker** — a single trade that loses more than the
+  configured threshold triggers a 300s strategy cooldown.
+- **External-API circuit breaker** — wraps every outbound Polymarket / Gamma
+  / CLOB call; trips open after N consecutive failures and half-opens for a
+  probe request before closing again.
 
 ### Observability
 
@@ -124,21 +150,96 @@ See the [Documentation Index](docs/README.md) for the full doc map.
 - **31 auto-collected system metrics** — collected across 6 categories
   (`system`, `data_source`, `execution`, `ml`, `risk`, `bot`) by the
   observability collector loop and persisted to `data/observability.db`.
+- **Prometheus /metrics endpoint** — request counters, latency histograms,
+  rate-limit-hit counters, and active WebSocket gauges exposed in the
+  Prometheus exposition format at `GET /metrics`.
+- **Grafana dashboard** — provisioned datasource + dashboard JSON under
+  `grafana/` so a single `docker-compose up` ships a turnkey observability
+  stack with pre-wired p50/p95/p99 latency + error-rate panels.
+- **Audit log viewer** — every state change, auth event, and order decision
+  is recorded with severity (INFO/WARN/ERROR/CRITICAL) and surfaced on the
+  Audit Log panel with CSV + JSON export of the filtered set.
+- **Rate-limit dashboard** — per-endpoint, per-client, per-minute hit counts
+  (last 1h) with most-requested-endpoints breakdown, distinct from the
+  Prometheus rate-limit counter so per-IP cardinality stays bounded.
+- **Performance profiling** — in-process `cProfile` middleware + per-route
+  timing histogram; `scripts/status_report.py` summarises p50/p95/p99.
+- **Frontend error reporting** — client-side crash reporter posts batches to
+  `POST /api/client-errors` (deduped + throttled) so a renderer crash in a
+  user's browser is visible in the backend log within seconds.
 
 ### UI
 
-- **37 React panels** — Command Center, Live Books, Screener, Positions,
+- **55+ React panels** — Command Center, Live Books, Screener, Positions,
   Orders, Trades, Strategy Registry, Arbitrage, Deep Analysis, AI/ML Engine,
   Copilot, Shadow Inference, ML Validation, Performance, Backtest Lab,
   Attribution, Execution Quality, Closed Positions, Capital Allocator, System
   Health, Data Explorer, Observability, Retention, Decision Ledger, Safety
-  Gate, and supporting modals.
-- **Dark dashboard** — bespoke design system (`#0e1015` surface, `#13161e`
-  cards, `#1f2335` borders) implemented on Tailwind v4 + shadcn/ui primitives.
+  Gate, Audit Log, Rate Limits, plus 5 Recharts primitives (EquityCurveChart,
+  PnLBarChart, Sparkline, GaugeChart, ReliabilityDiagram) and supporting
+  modals.
+- **Dark + light theme switcher** — bespoke design system
+  (`#0e1015` surface / `#13161e` cards / `#1f2335` borders for dark) with a
+  one-token-flip light theme; toggle in the top status bar (next-themes,
+  class-based, persisted to localStorage).
+- **i18n (EN / FR)** — next-intl + a `useTranslation` hook with full nav /
+  group / status / positions / analytics message catalogs; LocaleSwitcher in
+  the top status bar.
+- **Command palette (Cmd+K)** — shadcn/ui Command (cmdk) dialog exposing 25+
+  navigation entries + 6 page-level actions (refresh, open shortcuts, open
+  config, cancel-all, kill switch, toggle theme).
+- **Browser push notifications** — Web Notifications API primitives +
+  `useNotifications` hook (30s visibility-aware alert polling, deduplication,
+  severity-tagged `requireInteraction` for critical alerts).
+- **Recharts visualizations** — equity curve with drawdown overlay,
+  sign-coloured P&L bar chart, sparkline, radial gauge, calibration
+  reliability diagram — all theme-aware + height-responsive.
+- **PWA** — installable, service-worker cached, offline indicator.
 - **Responsive** — auto-collapsing sidebar at ≤1024px, mobile drawer, and
   keyboard shortcuts (1–8) for the most-used panels.
-- **Real-time polling** — 500 ms dashboard refresh by default, paused while the
-  document is hidden and re-fired immediately on tab return.
+- **Real-time updates** — WebSocket broadcast (5 channels) + 500 ms REST
+  polling fallback, paused while the document is hidden.
+
+### Infrastructure
+
+- **API versioning** — `/api/v1/...` prefix with a version negotiator + a
+  deprecation header so future breaking changes ship under `/api/v2/...`
+  without churning existing clients.
+- **Rate limiting** — slowapi-based request throttling (120/min read,
+  30/min write, 5/min heavy, 20/min trade, 10/min arbitrage, 3/min live-enable).
+- **Circuit breaker** — external-API calls (Polymarket CLOB / Gamma) wrap in
+  a breaker that opens on N consecutive failures + half-opens for a probe.
+- **DB migration system** — `core/db/migration_runner.py` + idempotent
+  `001_initial_schema.sql` and `001_initial_enterprise_schemas.sql` applied
+  on app startup; `scripts/migrate.py` for ad-hoc runs.
+- **Backup + verification + rotation** — `scripts/backup.sh` (gzip + manifest),
+  `scripts/verify_backup.py` (round-trip integrity), `scripts/backup_rotation.py`
+  (GFS: 7 daily + 4 weekly + 12 monthly + 90d hard cap),
+  `scripts/check_integrity.py` (per-DB PRAGMA + orphan checks),
+  `scripts/test_restore.py` (full restore round-trip).
+- **Feature flags** — 13 default flags (circuit-breaker, advanced-backtest,
+  ab-testing, etc.) runtime-toggleable via `GET /api/flags` and
+  `POST /api/flags/{key}`.
+- **Structured JSON logging** — JSONFormatter + ColoredFormatter,
+  request-id middleware, sanitised upstream error details.
+- **WebSocket broadcast layer** — `core/ws_broadcast.py` multiplexes 5
+  channels (book, orders, trades, events, alerts) to all connected clients.
+
+### Operational Tooling
+
+- **CLI tool** — `mini-services/polymarket-bot/cli.py` (14 typer commands:
+  status, balance, positions, orders, trades, health, retrain, kill-switch,
+  flags, flag, alerts, metrics, circuit-breakers, cache); runs from any shell
+  with `BOT_API_URL` + `API_TOKEN` env vars set.
+- **API contract tests** — `tests/test_openapi.py` (33 tests) verifies every
+  OpenAPI-documented route matches the live response shape.
+- **Performance profiling** — `scripts/status_report.py` + in-process
+  `cProfile` middleware surfaces p50/p95/p99 latency per route.
+- **Security hardening** — penetration-test pass + OWASP Top 10 audit
+  (constant-time compare, SSRF guard, fail-closed auth, sanitised 500s,
+  locked-down `/docs` in live mode); see [docs/SECURITY.md](docs/SECURITY.md).
+- **User preferences** — theme, locale, notification opt-in, sidebar
+  collapse state, and audio mute persist across sessions via localStorage.
 
 ---
 
@@ -164,7 +265,7 @@ FastAPI backend, and a Caddy gateway that fronts both.
 ┌──────────────────────────┐   ┌──────────────────────────┐
 │ Frontend  (port 3000)    │   │ Backend  (port 8080)     │
 │ Next.js 16 + React 19    │   │ FastAPI + uvicorn        │
-│ • 37 React panels        │◄──┤ • 77 REST routes         │
+│ • 55+ React panels       │◄──┤ • 90+ REST routes        │
 │ • /api/bot (spawns       │   │ • WebSocket broadcast    │
 │   backend)               │   │ • 13 route modules       │
 │ • 500 ms polling         │   │                          │
@@ -184,7 +285,7 @@ FastAPI backend, and a Caddy gateway that fronts both.
 - **Frontend** — Next.js 16 (Turbopack) on port 3000, React 19, Tailwind v4, and
   shadcn/ui. The `/api/bot` route bootstraps the Python backend as a child
   process of the next-server so the two lifecycles are coupled.
-- **Backend** — FastAPI on port 8080 with `uvicorn[standard]`. Exposes 77 REST
+- **Backend** — FastAPI on port 8080 with `uvicorn[standard]`. Exposes 90+ REST
   routes (55 declared inline in `api/server.py` plus 22 registered by 13
   feature modules via the `register_routes(app)` pattern) and a WebSocket
   broadcast manager.
@@ -345,13 +446,13 @@ All configuration is environment-variable driven. The canonical source is
 /home/z/my-project/
 ├── src/                              # Next.js 16 frontend (Turbopack)
 │   ├── app/
-│   │   ├── page.tsx                  # Workstation shell — 37 panel render blocks
+│   │   ├── page.tsx                  # Workstation shell — 55+ panel render blocks
 │   │   ├── layout.tsx               # Root layout + theme provider
 │   │   ├── globals.css              # Dark design-system tokens + utility classes
 │   │   └── api/
 │   │       └── bot/route.ts         # Next.js API route — spawns FastAPI on :8080
-│   ├── components/                  # 37 React panels + shadcn/ui primitives
-│   │   ├── Sidebar.tsx              # 7 nav groups, 37 NavSections, kbd shortcuts
+│   ├── components/                  # 55+ React panels + shadcn/ui primitives + charts/
+│   │   ├── Sidebar.tsx              # 8 nav groups, 26+ NavSections, kbd shortcuts
 │   │   ├── TopStatusPanel.tsx       # Bot status banner (P&L, mode, exposure)
 │   │   ├── MLPanel.tsx              # AI/ML engine view (Brier / AUC / ECE / drift)
 │   │   ├── EquityCurve.tsx          # Realised equity chart
@@ -370,7 +471,7 @@ All configuration is environment-variable driven. The canonical source is
 │
 ├── mini-services/polymarket-bot/    # Python 3.12 backend
 │   ├── api/
-│   │   └── server.py                # FastAPI app — 55 inline routes + lifespan
+│   │   └── server.py                # FastAPI app — 62 inline routes + lifespan
 │   ├── core/                        # Core trading logic
 │   │   ├── data_store.py            # In-memory store (orders/positions/events)
 │   │   ├── decision_ledger.py       # Unified SQLite decision ledger
@@ -427,7 +528,7 @@ All configuration is environment-variable driven. The canonical source is
 │   │   └── simulator.py             # Paper-trade fill simulator
 │   ├── backtesting/
 │   │   └── engine.py                # Vectorised backtest engine
-│   ├── tests/                       # 709 tests across 44+ files
+│   ├── tests/                       # 970+ tests across 71+ files
 │   │   ├── conftest.py              # Shared fixtures
 │   │   └── test_*.py                # Module-level test suites
 │   ├── data/                        # SQLite DBs + model artifacts
@@ -588,9 +689,9 @@ are returned alongside the aggregate `passed` boolean.
 
 ## Testing
 
-The platform is covered by a four-layer test pyramid totalling **916+ tests**.
+The platform is covered by a four-layer test pyramid totalling **1429+ tests**.
 
-### Backend (pytest — 709 tests)
+### Backend (pytest — 970+ tests across 71+ files)
 
 ```bash
 cd /home/z/my-project/mini-services/polymarket-bot
@@ -598,14 +699,16 @@ python -m pytest tests/ -v
 ```
 
 Coverage spans every core module, every ML component (ensemble, meta-learner,
-calibration, drift detector, model registry), every strategy (signal trader,
-market maker, arbitrage scanner), the risk manager, the paper simulator, the
-10-check live safety gate, the decision ledger, the observability collector, the
-cache layer, the OpenAPI contract surface, the security helpers, and an
-end-to-end decision-chain test that exercises PREDICTION → SIGNAL → RISK →
-ORDER → FILL.
+calibration, drift detector, model registry, A/B testing), every strategy
+(signal trader, market maker, arbitrage scanner), the risk manager, the
+paper simulator, the 10-check live safety gate, the decision ledger, the
+observability collector, the cache layer, the rate-limit tracker, the
+external-API circuit breaker, the DB migration runner, the API-versioning
+negotiator, the Prometheus metrics endpoint, the OpenAPI contract surface,
+the security helpers, and an end-to-end decision-chain test that exercises
+PREDICTION → SIGNAL → RISK → ORDER → FILL.
 
-### Frontend (vitest + Testing Library — 207 tests)
+### Frontend (vitest + Testing Library — 459+ tests across 20 files)
 
 ```bash
 cd /home/z/my-project
@@ -642,10 +745,10 @@ tooling (`scripts/analyze-bundle.sh`, `@next/bundle-analyzer`).
 
 ## API Overview
 
-The FastAPI server exposes **77 routes** across 13 feature modules. A full
+The FastAPI server exposes **90+ routes** across 13 feature modules. A full
 OpenAPI spec is available at `/openapi.json` (paper mode) or `/docs` (Swagger
 UI) when the server is running. A complete route reference lives in
-`docs/API.md` (when generated).
+`docs/API.md`.
 
 | Category      | Count | Sample endpoints                                              |
 | ------------- | ----- | ------------------------------------------------------------- |
@@ -654,14 +757,16 @@ UI) when the server is running. A complete route reference lives in
 | Portfolio     | 6     | `GET /api/positions`, `GET /api/positions/closed`            |
 | Strategies    | 4     | `GET /api/strategies/catalog`, `POST /api/strategies/toggle` |
 | Trading       | 5     | `POST /api/order`, `POST /api/kill-switch/activate`         |
-| ML / AI       | 12    | `GET /api/ml/metrics`, `POST /api/ml/retrain`                |
+| ML / AI       | 14    | `GET /api/ml/metrics`, `POST /api/ml/retrain`, `GET /api/ab-test` |
 | Analysis      | 5     | `GET /api/attribution`, `GET /api/execution-quality`         |
 | Risk          | 4     | `GET /api/risk/reconcile`, `GET /api/exposure`               |
 | Capital       | 1     | `GET /api/capital/allocation`                                 |
-| System / data | 4     | `GET /api/database/tables`, `POST /api/system/prune`         |
+| System / data | 5     | `GET /api/database/tables`, `POST /api/system/prune`, `GET /api/audit/logs` |
 | Live safety   | 2     | `GET /api/live/readiness`, `POST /api/live/enable`           |
 | Decisions     | 1     | `GET /api/decisions/rejected`                                |
 | Shadow        | 2     | `GET /api/shadow/trades`, `GET /api/shadow/comparison`       |
+| Observability | 3     | `GET /api/observability`, `GET /metrics` (Prometheus), `GET /api/rate-limit/stats` |
+| Feature flags | 4     | `GET /api/flags`, `POST /api/flags/{key}`, `POST /api/flags/{key}/reset` |
 
 Route prefixes follow the category name: `System` = `/api/health`,
 `/api/status`, `/api/snapshot`; `Markets` = `/api/markets`, `/api/orderbooks`;

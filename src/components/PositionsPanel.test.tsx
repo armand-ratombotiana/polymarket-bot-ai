@@ -1,9 +1,58 @@
 // components/PositionsPanel.test.tsx — Active positions table rendering & actions.
-import { describe, it, expect, vi } from 'vitest'
-import { render, screen, within } from '@testing-library/react'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { render, screen, within, act } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import PositionsPanel from './PositionsPanel'
 import { Position } from '@/hooks/useBot'
+
+// W15-5 — MockWebSocket stub. The panel now opens a real WS via
+// useRealtimeData → useWebSocket; without this stub, jsdom attempts an
+// actual ws://localhost:8080/ws connection that errors on every test
+// (loud stderr noise) without actually driving the hook's connection
+// state. Installing this stub lets us trigger `open` / `message` /
+// `close` events imperatively for the Live/Polling badge tests below.
+class MockWebSocket {
+  static instances: MockWebSocket[] = []
+  static CONNECTING = 0
+  static OPEN = 1
+  static CLOSING = 2
+  static CLOSED = 3
+
+  url: string
+  readyState: number
+  onopen: (() => void) | null = null
+  onmessage: ((event: { data: string }) => void) | null = null
+  onclose: (() => void) | null = null
+  onerror: ((event: unknown) => void) | null = null
+
+  constructor(url: string) {
+    this.url = url
+    this.readyState = MockWebSocket.CONNECTING
+    MockWebSocket.instances.push(this)
+  }
+
+  triggerOpen() {
+    this.readyState = MockWebSocket.OPEN
+    this.onopen?.()
+  }
+
+  triggerMessage(data: unknown) {
+    const payload = typeof data === 'string' ? data : JSON.stringify(data)
+    this.onmessage?.({ data: payload })
+  }
+
+  triggerClose() {
+    this.readyState = MockWebSocket.CLOSED
+    this.onclose?.()
+  }
+
+  close() {
+    this.readyState = MockWebSocket.CLOSED
+    this.onclose?.()
+  }
+
+  send() {}
+}
 
 // fmtPnl emits a Unicode "−" (U+2212) for negative values, not a hyphen.
 const MINUS = '\u2212'
@@ -34,6 +83,31 @@ const samplePositions: Position[] = [
 ]
 
 describe('PositionsPanel', () => {
+  let originalWebSocket: typeof WebSocket
+
+  beforeEach(() => {
+    // W15-5 — install MockWebSocket so useRealtimeData's internal
+    // useWebSocket() call doesn't attempt a real ws:// connection.
+    originalWebSocket = global.WebSocket
+    MockWebSocket.instances = []
+    ;(global as unknown as { WebSocket: typeof WebSocket }).WebSocket =
+      MockWebSocket as unknown as typeof WebSocket
+    // Default fetch mock returns a 200 with empty positions list so
+    // useRealtimeData's initial REST fetch resolves cleanly (the
+    // positions prop override below takes precedence anyway).
+    global.fetch = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ positions: [] }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    ) as unknown as typeof fetch
+  })
+
+  afterEach(() => {
+    ;(global as unknown as { WebSocket: typeof WebSocket }).WebSocket =
+      originalWebSocket
+  })
+
   it('renders the header with the active position count', () => {
     render(<PositionsPanel positions={samplePositions} dailyPnl={0} />)
     expect(screen.getByText(/ACTIVE POSITIONS/)).toBeInTheDocument()
@@ -308,5 +382,139 @@ describe('PositionsPanel', () => {
     expect(rows.length).toBe(2)
     const firstRowText = rows[0].textContent ?? ''
     expect(firstRowText).toContain('BITCOIN')
+  })
+
+  // ─────────────────────────────────────────────────────────────────────
+  // W15-5 — Realtime migration tests
+  // ─────────────────────────────────────────────────────────────────────
+
+  describe('W15-5: realtime migration', () => {
+    it('renders the "Polling" badge by default (WS not yet open)', () => {
+      // WS is constructed but `triggerOpen()` hasn't been called yet —
+      // isRealtime=false → amber "⟳ Polling" badge should be visible.
+      render(<PositionsPanel positions={samplePositions} dailyPnl={0} />)
+      expect(screen.getByText('⟳ Polling')).toBeInTheDocument()
+      expect(screen.queryByText('● Live')).not.toBeInTheDocument()
+    })
+
+    it('flips to the "Live" badge when the WS connects', async () => {
+      render(<PositionsPanel positions={samplePositions} dailyPnl={0} />)
+      // Before open: polling badge.
+      expect(screen.getByText('⟳ Polling')).toBeInTheDocument()
+      // Drive the MockWebSocket through its lifecycle.
+      const ws = MockWebSocket.instances[0]
+      expect(ws).toBeTruthy()
+      await act(async () => { ws.triggerOpen() })
+      // After open: live badge.
+      await screen.findByText('● Live')
+      expect(screen.queryByText('⟳ Polling')).not.toBeInTheDocument()
+    })
+
+    it('honours an explicit `isRealtime` prop override (true → Live)', () => {
+      // When the parent (page.tsx) passes isRealtime explicitly, the
+      // panel should use that value instead of useRealtimeData's flag.
+      render(
+        <PositionsPanel
+          positions={samplePositions}
+          dailyPnl={0}
+          isRealtime
+        />,
+      )
+      expect(screen.getByText('● Live')).toBeInTheDocument()
+      expect(screen.queryByText('⟳ Polling')).not.toBeInTheDocument()
+    })
+
+    it('honours an explicit `isRealtime` prop override (false → Polling)', () => {
+      // Even if the WS is open, the explicit prop wins.
+      render(
+        <PositionsPanel
+          positions={samplePositions}
+          dailyPnl={0}
+          isRealtime={false}
+        />,
+      )
+      expect(screen.getByText('⟳ Polling')).toBeInTheDocument()
+      // Open the WS — the explicit false override still wins.
+      MockWebSocket.instances[0]?.triggerOpen()
+      expect(screen.getByText('⟳ Polling')).toBeInTheDocument()
+      expect(screen.queryByText('● Live')).not.toBeInTheDocument()
+    })
+
+    it('renders data pushed over the WS `positions` channel', async () => {
+      // No `positions` prop → panel relies on useRealtimeData's data.
+      // Initial REST fetch returns [] (the beforeEach mock).
+      // Then we open the WS and push a fresh positions payload — the
+      // rendered count + slug should reflect the WS push, not the REST
+      // empty-state.
+      render(<PositionsPanel dailyPnl={0} />)
+      // Initially empty (REST returned []).
+      expect(screen.getByText(/No positions found/)).toBeInTheDocument()
+
+      const ws = MockWebSocket.instances[0]
+      expect(ws).toBeTruthy()
+      await act(async () => { ws.triggerOpen() })
+      await act(async () => {
+        ws.triggerMessage({
+          channel: 'positions',
+          data: { positions: samplePositions },
+        })
+      })
+
+      // After the WS push, the two sample positions should render.
+      await screen.findByText(/BITCOIN/, {}, { timeout: 3000 })
+      expect(screen.getByText(/ETHEREUM/)).toBeInTheDocument()
+      // And the header count should reflect the WS-pushed array length.
+      expect(screen.getByText(/ACTIVE POSITIONS \(2\)/)).toBeInTheDocument()
+    })
+
+    it('ignores WS messages on channels it did not subscribe to', async () => {
+      render(<PositionsPanel dailyPnl={0} />)
+      const ws = MockWebSocket.instances[0]
+      expect(ws).toBeTruthy()
+      ws.triggerOpen()
+      // Push a message on the wrong channel — data should be unchanged.
+      ws.triggerMessage({
+        channel: 'orders',
+        data: { orders: [{ order_id: 'X' }] },
+      })
+      // Still the REST-empty-state, not the orders payload.
+      expect(screen.getByText(/No positions found/)).toBeInTheDocument()
+    })
+
+    it('falls back to the REST response when no `positions` prop is passed', async () => {
+      // Override the beforeEach mock for this test — return 1 position
+      // from the REST endpoint. The panel should render it.
+      vi.mocked(fetch).mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({ positions: [samplePositions[0]] }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        ),
+      )
+      render(<PositionsPanel dailyPnl={0} />)
+      // Wait for the REST fetch to resolve.
+      await screen.findByText(/BITCOIN/)
+      expect(screen.getByText(/ACTIVE POSITIONS \(1\)/)).toBeInTheDocument()
+    })
+
+    it('renders the loading state before the initial REST fetch resolves (no override)', () => {
+      // Never-resolving fetch → isLoading stays true.
+      vi.mocked(fetch).mockImplementation(
+        () => new Promise<Response>(() => {}),
+      )
+      render(<PositionsPanel dailyPnl={0} />)
+      expect(screen.getByText(/Loading positions/)).toBeInTheDocument()
+    })
+
+    it('does NOT render the loading state when a `positions` override is provided', () => {
+      // Even with a never-resolving fetch, the override short-circuits
+      // the loading gate.
+      vi.mocked(fetch).mockImplementation(
+        () => new Promise<Response>(() => {}),
+      )
+      render(<PositionsPanel positions={samplePositions} dailyPnl={0} />)
+      expect(screen.queryByText(/Loading positions/)).not.toBeInTheDocument()
+      // The override rows render immediately.
+      expect(screen.getByText(/BITCOIN/)).toBeInTheDocument()
+    })
   })
 })

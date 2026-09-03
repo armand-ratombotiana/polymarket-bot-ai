@@ -41,6 +41,16 @@ export interface UseRealtimeDataOptions {
   pollInterval?: number
   /** Optional initial data so the first render isn't `null`. */
   initialData?: unknown
+  /**
+   * Optional predicate — if it returns false, the WS message's payload is
+   * dropped (data state is left untouched). Useful when the subscribed
+   * channel pushes a different shape than the REST endpoint (e.g. the
+   * `metrics` channel pushes a full BotSnapshot, but the consumer fetched
+   * `/api/analytics` which returns an Analytics object). Without this
+   * guard, the mismatched payload would clobber the typed state with
+   * fields the render code doesn't expect. (W15-5)
+   */
+  validate?: (data: unknown) => boolean
 }
 
 export interface UseRealtimeDataResult<T> {
@@ -55,7 +65,7 @@ export function useRealtimeData<T>(
   endpoint: string,
   options: UseRealtimeDataOptions = {},
 ): UseRealtimeDataResult<T> {
-  const { wsChannel, pollInterval = 10000, initialData } = options
+  const { wsChannel, pollInterval = 10000, initialData, validate } = options
   const [data, setData] = useState<T | null>(
     (initialData as T | undefined) ?? null,
   )
@@ -93,6 +103,12 @@ export function useRealtimeData<T>(
   // WebSocket for real-time updates. The useWebSocket hook owns the
   // connection lifecycle (connect / reconnect / pause-on-hidden); we
   // just supply the onMessage handler that filters by channel.
+  // W15-5 — when the caller provides a `validate` predicate, we drop
+  // payloads that don't match the expected shape instead of clobbering
+  // the typed state. This lets a panel subscribe to a channel whose
+  // payload type doesn't 1:1 mirror the REST response (e.g. the
+  // `metrics` channel pushes BotSnapshot, but AnalyticsPanel fetched
+  // /api/analytics whose body is the Analytics object).
   const { isConnected } = useWebSocket({
     onMessage: (raw) => {
       // The backend pushes JSON objects with `{ channel, data }`. The
@@ -101,6 +117,7 @@ export function useRealtimeData<T>(
       // subscribe to are silently dropped.
       const msg = raw as { channel?: string; data?: unknown }
       if (wsChannel && msg && msg.channel === wsChannel) {
+        if (validate && !validate(msg.data)) return
         setData(msg.data as T)
         setError(null)
       }

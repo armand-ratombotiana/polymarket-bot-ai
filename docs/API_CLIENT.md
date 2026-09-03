@@ -1,7 +1,7 @@
 # API Client (Frontend)
 
 The frontend talks to the FastAPI backend through two complementary layers in
-[`src/lib/`](../src/lib/):
+`src/lib/` ([`api.ts`](../src/lib/api.ts) + [`api-client.ts`](../src/lib/api-client.ts)):
 
 1. **`api.ts`** — low-level fetch utilities (gateway routing, auth headers,
    WebSocket URL). One auth-aware fetch path shared by every call site.

@@ -41,6 +41,14 @@ export interface UseWebSocketOptions {
   onMessage?: (data: unknown) => void
   onConnect?: () => void
   onDisconnect?: () => void
+  /**
+   * W15-5 — Fires when the underlying socket's `onerror` handler runs.
+   * The browser emits `onerror` immediately before `onclose` whenever the
+   * transport fails (TLS handshake, DNS, refused connection, etc.).
+   * Callers can use this to surface a transient "error" state before the
+   * auto-reconnect logic flips the connection back to "polling".
+   */
+  onError?: (event: unknown) => void
   reconnectInterval?: number
   maxReconnectAttempts?: number
 }
@@ -50,6 +58,7 @@ export function useWebSocket(options: UseWebSocketOptions = {}) {
     onMessage,
     onConnect,
     onDisconnect,
+    onError,
     reconnectInterval = 3000,
     maxReconnectAttempts = 10,
   } = options
@@ -71,6 +80,10 @@ export function useWebSocket(options: UseWebSocketOptions = {}) {
   const onMessageRef = useRef(onMessage)
   const onConnectRef = useRef(onConnect)
   const onDisconnectRef = useRef(onDisconnect)
+  // W15-5 — same ref-pattern as the other callbacks: refreshed on every
+  // render so the WS handler always invokes the freshest closure without
+  // forcing a socket reconnect.
+  const onErrorRef = useRef(onError)
 
   // Keep refs updated — runs on every render so the WS handlers (which
   // read from refs) always see the freshest closure passed by the caller.
@@ -78,6 +91,7 @@ export function useWebSocket(options: UseWebSocketOptions = {}) {
     onMessageRef.current = onMessage
     onConnectRef.current = onConnect
     onDisconnectRef.current = onDisconnect
+    onErrorRef.current = onError
   })
 
   const connect = useCallback(() => {
@@ -115,6 +129,10 @@ export function useWebSocket(options: UseWebSocketOptions = {}) {
 
       ws.onerror = (error) => {
         console.error('WebSocket error:', error)
+        // W15-5 — surface the transport failure to the caller (e.g. the
+        // ConnectionStatus pill) before the imminent `onclose` flips us
+        // back into the polling state via the reconnect logic below.
+        onErrorRef.current?.(error)
       }
     } catch (e) {
       console.error('WebSocket connection failed:', e)

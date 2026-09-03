@@ -594,7 +594,11 @@ class TestSecurityMisconfiguration:
             ("X-Frame-Options", "DENY"),
             ("X-XSS-Protection", "1; mode=block"),
             ("Referrer-Policy", "strict-origin-when-cross-origin"),
-            ("Content-Security-Policy", "default-src 'self'"),
+            # W15-6 — Permissions-Policy header added to disable the
+            # most-abused device-permission APIs (geolocation, microphone,
+            # camera) at the browser level, even if a future route is
+            # tricked into requesting them.
+            ("Permissions-Policy", "geolocation=(), microphone=(), camera=()"),
         ],
     )
     def test_security_header_present_on_200_response(self, client, auth_headers, header, expected):
@@ -607,6 +611,40 @@ class TestSecurityMisconfiguration:
             f"security header {header!r} expected {expected!r}, got {actual!r}"
         )
 
+    def test_csp_header_starts_with_default_src_self(self, client, auth_headers):
+        """W15-6 — the Content-Security-Policy was expanded from the
+        W11-6 ``default-src 'self'`` baseline to a full directive list
+        (``script-src``, ``style-src``, ``connect-src``, ``img-src``,
+        ``font-src``) so the Next.js dashboard can load inline
+        scripts/styles, talk to its WebSocket back-channel, render
+        data/blob image URLs, and load self-hosted fonts — while still
+        defaulting to same-origin for anything not explicitly allowed.
+
+        The exact directive list is asserted in
+        ``tests/test_penetration.py::TestSecurityHeaders``; here we just
+        verify the CSP is present and starts with ``default-src 'self'``
+        (the load-bearing same-origin default).
+        """
+        response = client.get("/api/health", headers=auth_headers)
+        assert response.status_code == 200
+        csp = response.headers.get("Content-Security-Policy", "")
+        assert csp.startswith("default-src 'self'"), (
+            f"CSP must start with default-src 'self'; got {csp!r}"
+        )
+        # Each W15-6 directive must be present (script-src, style-src,
+        # connect-src, img-src, font-src) — verifying the full hardening
+        # shipped, not just the baseline default-src.
+        for directive in (
+            "script-src 'self' 'unsafe-inline'",
+            "style-src 'self' 'unsafe-inline'",
+            "connect-src 'self' ws: wss:",
+            "img-src 'self' data: blob:",
+            "font-src 'self' data:",
+        ):
+            assert directive in csp, (
+                f"CSP missing directive {directive!r}; full value: {csp!r}"
+            )
+
     @pytest.mark.parametrize(
         "header",
         [
@@ -614,6 +652,7 @@ class TestSecurityMisconfiguration:
             "X-Frame-Options",
             "X-XSS-Protection",
             "Referrer-Policy",
+            "Permissions-Policy",
             "Content-Security-Policy",
         ],
     )
@@ -634,6 +673,7 @@ class TestSecurityMisconfiguration:
             "X-Frame-Options",
             "X-XSS-Protection",
             "Referrer-Policy",
+            "Permissions-Policy",
             "Content-Security-Policy",
         ],
     )

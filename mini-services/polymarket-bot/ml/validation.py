@@ -805,10 +805,33 @@ def register_routes(app: Any) -> None:
         except HTTPException:
             raise
         except ValueError as e:
-            raise HTTPException(400, str(e))
+            # W15-6 (OWASP A02 — Information Disclosure): log the raw
+            # ValueError server-side (it may include internal context like
+            # column names or shape mismatches that are useful for the
+            # operator), but return a generic 400 to the client so an
+            # attacker can't probe the ML stack's internal structure.
+            log.warning(
+                "[ml_validation] /api/ml/validate ValueError: %s",
+                e,
+                exc_info=True,
+            )
+            raise HTTPException(
+                400,
+                "Validation request rejected — check the request schema "
+                "(feature / label array shapes, validation_type value) and retry.",
+            )
         except Exception as e:  # pragma: no cover — defensive last net
+            # W15-6 (OWASP A02 — Information Disclosure): same posture as
+            # the ValueError branch above — full traceback to the log, a
+            # generic 500 to the client. The X-Request-ID response header
+            # lets the operator correlate the client-visible 500 with the
+            # server-side log entry.
             log.error("[ml_validation] /api/ml/validate failed: %s", e, exc_info=True)
-            raise HTTPException(500, f"validation failed: {e}")
+            raise HTTPException(
+                500,
+                "Validation failed — see server logs for details "
+                "(correlate via the X-Request-ID response header).",
+            )
 
         return response
 

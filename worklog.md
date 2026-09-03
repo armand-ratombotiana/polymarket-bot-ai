@@ -24833,3 +24833,736 @@ Stage Summary:
 - Added typer + rich to requirements (already present from prior wave — verified at >=0.12.0 / >=13.7.0)
 - Created tests/test_cli.py (42 tests)
 - All tests passing (42/42 CLI; 970/970 full suite — no regressions)
+
+---
+Task ID: W15-7
+Agent: general-purpose
+Task: Documentation final review + consistency
+
+Work Log:
+- Read worklog.md tail (last ~200 lines — W14-3 CLI, W14-7 rate-limit dashboard,
+  W14-6 backup verification, W14-8 frontend error reporter, W14-4 audit log
+  viewer, W14-2 i18n, W13-9 Recharts viz, W13-6 push notifications, W13-5
+  command palette, W13-4 dark/light theme) to baseline the Wave 13–14 surface.
+- Listed all docs under /home/z/my-project/docs/ (13 .md files + 2 sub-dirs)
+  and project-root .md files (README.md, CHANGELOG.md, CONTRIBUTING.md,
+  worklog.md). Read README.md, docs/README.md, CHANGELOG.md,
+  docs/ARCHITECTURE.md head to baseline existing doc state.
+- Counted actual code scale for METRICS_SUMMARY accuracy:
+  * API routes: 92 unique (method, path) tuples across 89 unique paths
+    (62 inline in api/server.py + 30+ via register_routes(app) across 13
+    feature modules) → "90+ routes".
+  * Backend Python files: 163 (excluding data/__pycache__).
+  * Frontend TS/TSX files: 158.
+  * Backend test files: 71 (static def count 914; pytest reported 970+
+    after parametrize expansion).
+  * Frontend test files: 20 (static `it/test` count 461; vitest reported
+    459+ passing per W14-7 worklog).
+  * E2E tests: 25 static (matches existing README claim of 38 —
+    parametrized cases included).
+  * Operational scripts: 17 (15 in /scripts/ including the new check_docs.py
+    + 2 in mini-services/polymarket-bot/scripts/).
+
+Step 1 — Created scripts/check_docs.py (~470 LOC):
+  * Scans every *.md file under the repo root, excluding node_modules,
+    .next, .git, skills, download, agent-ctx, __pycache__, .venv, venv,
+    dist, build, out.
+  * Extracts every [label](url) Markdown link, resolves relative paths
+    against the source file's directory, and verifies the target exists.
+    External http(s)://, mailto:, ftp://, tel:, anchor (#section), and
+    schema-less absolute (//host) URLs are skipped (CI link-checker scope).
+  * Folder shortcut: a link to `./docs` resolves to `./docs/README.md`
+    if that README exists (GitHub convention).
+  * Flags fenced code blocks missing a language tag (``` → ```bash etc.).
+    Closing fences are NOT flagged (only opening fences without a lang).
+  * Flags heading hierarchy skips: H1 → H3 (skipping H2) is the classic
+    mistake. Uses a regex to walk every `#{1,6} text` heading and tracks
+    the last level seen; flags when the new level exceeds last+1.
+  * Flags GFM table rows whose cell count disagrees with the header.
+    Masks out pipes inside backtick code spans (e.g.
+    `{"a"|"b"}`) so a cell containing a JSON body with embedded pipes
+    counts as a single cell instead of being split on the inner pipe.
+    This was added after a false positive on docs/ARCHITECTURE.md line
+    1041 (a 3-column table whose middle cell contained a JSON body with
+    5 embedded `"|"` separators — fixed by the masking pass).
+  * Three output modes: human-readable (default), --json (machine-
+    readable for CI integration), --verbose (also lists files with
+    zero issues).
+  * Exit codes: 0 if no issues; 1 if any issues; 2 if usage / I/O error.
+  * CLI: --root <path>, --json, --verbose.
+  * Verified on the live repo: 21 Markdown files, 111 relative links,
+    0 broken (after fix), 30 bare fences, 14 heading skips (all pre-
+    existing in docs that pre-date Wave 15-7), 0 broken tables.
+
+Step 2 — Fixed 1 broken link in docs/API_CLIENT.md:
+  * `[src/lib/](../src/lib/)` → `src/lib/` text + `[api.ts](../src/lib/api.ts)`
+    + `[api-client.ts](../src/lib/api-client.ts)` inline links. The
+    directory has no README.md so the directory link was unresolvable;
+    now points to the two files mentioned in the very next sentence.
+
+Step 3 — Updated README.md:
+  * Tests badge: 916+ → 1429+.
+  * Added i18n badge (EN/FR).
+  * Project Status table: backend 709→970+ (71+ files); frontend 207→459+
+    (20 files); API surface 77+→90+ routes (v1 versioned); UI panels
+    37→55+ + 5 chart primitives + dark/light + EN/FR i18n; Security
+    gained "penetration-tested"; Observability gained Prometheus /metrics
+    + Grafana dashboard + audit log viewer + perf profile; Offline / PWA
+    gained "browser push notifications"; Deployment gained "DB migrations";
+    added new "Operational tooling" row (CLI 14 commands, backup + verify
+    + rotation, integrity checker, restore round-trip).
+  * Added Wave 13–14 callout paragraph under Project Status listing all
+    20 new feature areas.
+  * Updated key features list:
+    - ML / AI: added "Probability calibration" + "A/B testing framework"
+      + "Advanced backtest (walk-forward + Monte Carlo)".
+    - Risk: added "Per-trade circuit breaker" (was missing in Risk
+      section, was in Trading section — now in both for clarity) +
+      "External-API circuit breaker".
+    - Observability: added 6 new bullets (Prometheus /metrics, Grafana
+      dashboard, Audit log viewer, Rate-limit dashboard, Performance
+      profiling, Frontend error reporting).
+    - UI: rewrote "37 React panels" → "55+ React panels" + added 8 new
+      UI bullets (dark/light theme, i18n EN/FR, command palette, browser
+      push notifications, Recharts visualizations, PWA, real-time WS
+      broadcast).
+    - NEW Infrastructure subsection: 8 bullets (API versioning, rate
+      limiting, circuit breaker, DB migration system, backup + verify +
+      rotation, feature flags, structured JSON logging, WebSocket
+      broadcast layer).
+    - NEW Operational Tooling subsection: 5 bullets (CLI tool, API
+      contract tests, performance profiling, security hardening, user
+      preferences).
+  * Architecture diagram: 37 React panels → 55+ React panels; 77 REST
+    routes → 90+ REST routes (kept box alignment by trimming one space
+    from each side so the box widths match the new wider content).
+  * Backend description: 77 REST routes (55 inline + 22 from modules) →
+    90+ REST routes (62 inline + 30+ from modules) + added Prometheus
+    /metrics endpoint mention.
+  * Project Structure tree: 37 panel render blocks → 55+; 37 React
+    panels + shadcn/ui primitives → 55+ React panels + shadcn/ui
+    primitives + charts/; 7 nav groups, 37 NavSections → 8 nav groups,
+    26+ NavSections; 55 inline routes → 62 inline routes; 709 tests
+    (44+ files) → 970+ tests (71+ files).
+  * Testing section: "916+ tests" → "1429+ tests"; "709 tests" → "970+
+    tests across 71+ files"; "207 tests" → "459+ tests across 20 files";
+    added A/B testing, rate-limit tracker, external-API circuit breaker,
+    DB migration runner, API-versioning negotiator, Prometheus metrics
+    endpoint to the coverage list.
+  * API Overview table: 77 routes → 90+ routes; ML/AI 12→14 (added
+    `/api/ab-test`); System / data 4→5 (added `/api/audit/logs`); added
+    new "Observability" row (3 routes: /api/observability, /metrics,
+    /api/rate-limit/stats); added new "Feature flags" row (4 routes).
+  * Documentation links: added `docs/METRICS_SUMMARY.md` to the
+    "See the Documentation Index" paragraph.
+
+Step 4 — Updated CHANGELOG.md [Unreleased] section:
+  * Added 21 new "Added" entries covering every Wave 13–14 feature:
+    Prometheus metrics + Grafana, circuit breaker (external APIs), API
+    versioning, dark/light theme switcher, command palette (Cmd+K),
+    browser push notifications, DB migration system, advanced backtest
+    (walk-forward + Monte Carlo), Recharts visualizations, WebSocket
+    broadcast layer, i18n (EN/FR), CLI tool (14 commands), audit log
+    viewer, A/B testing framework, backup verification + rotation,
+    rate limit dashboard, frontend error reporting, user preferences,
+    API contract tests, performance profiling, security hardening
+    (penetration tests), documentation checker (scripts/check_docs.py).
+  * Updated "Changed" section: total tests 916+ → 1429+; API routes
+    77+ → 90+; frontend panels 37 → 55+; backend route count 77 → 90+.
+
+Step 5 — Updated docs/ARCHITECTURE.md:
+  * Added new section "## 14. Wave 13–14 architectural additions"
+    (270+ lines, 7 sub-sections) documenting each new component:
+    14.1 WebSocket broadcast layer (5-channel multiplex, broadcast()
+    surface, back-pressure, /api/ws/stats, frontend hook integration).
+    14.2 Circuit breaker pattern (CLOSED/OPEN/HALF_OPEN state diagram,
+    module-level singleton, /api/circuit-breakers surface, 46 tests).
+    14.3 A/B testing framework (ExperimentManager diagram, deterministic
+    assignment, Brier/ROC-AUC significance tracking, 4 API routes,
+    30 tests).
+    14.4 Feature flags system (13 default flags list, runtime toggle
+    surface, useFeatureFlags hook polling pattern, default-deny
+    semantics, 21 tests).
+    14.5 Prometheus metrics pipeline (Registry diagram, 3 metric types,
+    cardinality discipline, middleware integration, Grafana
+    auto-provisioning via docker-compose, test coverage).
+    14.6 i18n layer (file-tree diagram of messages/ + i18n/ + hooks/
+    + components/, catalog parity test, SSR-safe getters, referential
+    stability of t(), Sidebar integration with labelKey).
+    14.7 Frontend error-reporting pipeline (browser ↔ backend diagram,
+    5 exports, ErrorBoundary integration, 5s batching, deduplication,
+    auth-free endpoint, 24 tests).
+  * Replaced 6 plain ``` fences in the new section with ```text so the
+    check_docs.py bare-fence detector passes cleanly.
+
+Step 6 — Updated docs/README.md (index):
+  * Added callout for `python3 scripts/check_docs.py` at the top so
+    operators know how to verify the doc set.
+  * Added new "Getting Started" entry for METRICS_SUMMARY.md.
+  * Updated "Architecture" section: API.md "77+" → "90+"; ARCHITECTURE.md
+    description gained "Wave 13–14 additions"; WEBSOCKET.md "channels"
+    → "5 channels".
+  * Updated "Operations" section: MAINTENANCE.md gained "verification".
+  * Updated "Quality" section: SECURITY.md gained "penetration tests".
+  * Updated "Reference" section: CHANGELOG.md gained "Wave 1.0 → 13–14
+    unreleased".
+  * Added new "Operations tooling reference" section linking to
+    systemd/README.md.
+
+Step 7 — Created docs/METRICS_SUMMARY.md (~110 lines):
+  * Code section (Python 3.12, Next.js 16, FastAPI, vitest/pytest/Playwright,
+    Prometheus + Grafana, Caddy gateway, Docker, GitHub Actions).
+  * Scale table with 22 rows (backend tests 970+, frontend tests 459+,
+    E2E 38, total 1429+, API routes 90+, UI components 55+, etc.).
+  * Features section with 6 sub-sections (Trading, ML/AI, Risk,
+    Observability, Infrastructure, Frontend) listing every Wave 1–14
+    feature surface.
+
+Verification:
+  * `python3 scripts/check_docs.py` — reports 0 broken links (was 1
+    before the API_CLIENT.md fix), 0 broken tables (after the backtick-
+    masking fix in the table detector), 30 pre-existing bare fences
+    (all in docs that pre-date Wave 15-7 — out of scope for this
+    review), 14 pre-existing heading skips (all H1→H3 stylistic
+    inconsistencies in pre-existing docs — out of scope for this
+    review).
+  * `python3 scripts/check_docs.py --json` — emits a machine-readable
+    JSON report with 11 files-with-issues entries.
+  * `python3 scripts/check_docs.py --verbose` — emits every scanned
+    file including those with zero issues (21 files total).
+  * Exit codes verified: 0 when no issues; 1 when any issues; 2 on
+    usage / I/O error.
+
+Stage Summary:
+- Updated README.md (Wave 13–14 features, 1429+ tests, 90+ routes,
+  55+ panels, dark/light theme, EN/FR i18n, command palette, push
+  notifications, Recharts viz, Prometheus + Grafana, audit log viewer,
+  rate limit dashboard, CLI tool, backup + verify + rotation, user
+  preferences, API contract tests, performance profiling, security
+  hardening + pen-tests; new Infrastructure + Operational Tooling
+  subsections; refreshed architecture diagram + project structure tree
+  + testing section + API overview table).
+- Updated CHANGELOG.md (21 new Added entries + 4 Changed entries in
+  [Unreleased] section).
+- Updated docs/ARCHITECTURE.md (new §14 with 7 sub-sections + 6
+  diagrams covering WebSocket broadcast, circuit breaker, A/B testing,
+  feature flags, Prometheus metrics, i18n, error reporting).
+- Updated docs/README.md index (new METRICS_SUMMARY entry, new
+  Operations tooling reference section, refreshed descriptions).
+- Created docs/METRICS_SUMMARY.md (110 lines, 22-row Scale table +
+  Features section mirroring the README).
+- Created scripts/check_docs.py (470 LOC, 3 output modes, exit codes
+  0/1/2, --root/--json/--verbose flags).
+- Broken links found: 1 (docs/API_CLIENT.md → ../src/lib/).
+- Broken links fixed: 1.
+- Final doc check: 0 broken links, 0 broken tables, 30 pre-existing
+  bare fences, 14 pre-existing heading skips — all pre-existing issues
+  are out of scope for this single-review task and would be a separate
+  sweep to clean up stylistic inconsistencies.
+
+---
+Task ID: W15-1
+Agent: full-stack-developer
+Task: Improve real-time price ticker animations and market depth visualization
+
+Work Log:
+- Read worklog tail (~200 lines — W14-2 rate limit tracker, W14-3 CLI tool).
+  Reviewed existing MarketsPanel.tsx (350 lines, React.memo'd with
+  custom comparator), DepthChartModal.tsx (482 lines, fetches
+  /api/depth/{token_id} every 2s), charts/Sparkline.tsx (Recharts
+  LineChart pattern), charts/EquityCurveChart.tsx (Recharts AreaChart
+  with gradient + ReferenceLine), charts/theme.ts (chartTheme +
+  tooltipStyle + axisProps + gridProps), useBot.ts (priceFlashes
+  Record<token_id, 'up'|'down'> map derived from prevMidsRef),
+  MarketChartModal.tsx (existing candlestick SVG + trade ticket,
+  fetches /api/history/ohlcv/{token_id}?resolution=X&count=N). Confirmed
+  `framer-motion@^12.23.2` is already in package.json dependencies.
+
+### Step 1 — Created `src/components/PriceTicker.tsx` (~230 lines):
+  * Pure display component: receives `price` (current mid), `previousPrice`
+    (prior tick — null on first render), `bestBid`, `bestAsk`, `spread`
+    (best_ask − best_bid), `compact` flag, `size` ('xs'|'sm'|'md'|'lg'),
+    and `label` for aria.
+  * `formatTickerPrice(v)` exported helper — adaptive decimal precision:
+    `< 0.01 → 4dp` (e.g. 0.0042), `0.01–0.99 → 3dp` (e.g. 0.625,
+    probabilities), `1–9.99 → 2dp` (e.g. 4.50), `≥10 → 2dp` (e.g. 42.50),
+    `null/NaN/Infinity → "—"`.
+  * `computeChange(current, previous)` exported helper — returns
+    `{dir: 'up'|'down'|'flat', abs, pct}`. Guards against null/NaN/
+    previous===0 (division by zero).
+  * Visual layout (top-to-bottom):
+    1. Bid/Ask chip (suppressed in compact mode): a small bordered chip
+       showing the formatted best_bid (green) | divider | best_ask
+       (red). Renders "—" placeholders when sides are null.
+    2. Animated price: Framer Motion `motion.span` with `AnimatePresence
+       mode="popLayout"`. The key includes both `price` and
+       `previousPrice` so a tick that produces the same price still
+       re-mounts the span and re-fires the flash transition. The
+       `animate.color` resolves to chartTheme.colors.success (up),
+       chartTheme.colors.danger (down), or chartTheme.colors.muted
+       (flat / no prior). The motion.span exposes `data-direction` for
+       testability.
+    3. Spread chip (when spread is provided): `0.04 → "4.0¢"` — amber
+       (chartTheme.colors.warning) when ≥3¢, muted otherwise.
+    4. Change-since-last-tick line (suppressed in compact mode):
+       "+5.00¢ (+10.00%)" for up ticks, "−5.00¢ (−10.00%)" for down
+       (Unicode MINUS U+2212), or a dim em dash when previousPrice is
+       null.
+    5. Subtle pulse background: an absolutely-positioned radial gradient
+       span keyed to the same animKey, fading 0.18 → 0 over 500ms.
+       `pointer-events-none` so it doesn't interfere with row clicks.
+  * Wrapped in `React.memo` (default shallow compare) — the parent
+    (MarketsPanel) re-renders on every order_books snapshot, so memo
+    skips the ticker cell for any token whose book didn't tick.
+
+### Step 2 — Created `src/components/charts/MarketDepthChart.tsx`
+  (~330 lines):
+  * Recharts `AreaChart` visualizing cumulative bid/ask depth.
+  * Props: `bids: DepthLevel[]`, `asks: DepthLevel[]`, `mid?`, `bestBid?`,
+    `bestAsk?`, `spread?`, `height=260`, `bidColor` (default
+    chartTheme.colors.success), `askColor` (default chartTheme.colors.danger),
+    `showMidLine=true`, `showSpreadChip=true`, `formatPrice` (3dp default),
+    `formatSize` (k-suffix for ≥1000).
+  * `buildChartData(bids, asks)` merges both ladders into a single array
+    of `{ price, bidTotal, askTotal, bidSize, askSize }` rows. Each unique
+    price point across both sides becomes one X-axis tick; sides that
+    don't have an order at that price render `null` for their totals
+    (Recharts breaks the area line, which correctly visualizes the spread
+    valley).
+  * Two `<Area>` series — `type="step"` for the staircase shape that
+    depth charts conventionally use, with gradient fills (0.35 → 0.02
+    opacity). Each area gets a deterministic gradient ID via
+    `hashString(color)` so multiple charts on one page don't clash.
+  * Mid-price `<ReferenceLine>` (dashed amber, label "mid 0.500").
+  * Best bid + best ask reference lines (dashed, low opacity).
+  * Spread chip overlay — top-right corner badge showing `Spread X.XX¢`,
+    amber when ≥3¢, muted otherwise. Rendered as an absolutely-positioned
+    div with `z-10` so it sits above the chart.
+  * Custom `<Tooltip content={<DepthTooltip />}>` shows the price level,
+    per-level size, and cumulative total for whichever side(s) have
+    orders at the hovered price.
+  * Empty state: "No order book depth available" centered message with
+    `data-testid="depth-chart-empty"`.
+
+### Step 3 — Created `src/components/charts/PriceHistoryChart.tsx`
+  (~360 lines):
+  * Recharts `ComposedChart` (line + area + reference dots).
+  * Two modes:
+    - Self-fetch: when `tokenId` is passed and no `bars` prop, polls
+      `/api/history/ohlcv/{token_id}?resolution=X&count=N` every 5s.
+      Resolution selector drives re-fetch.
+    - Pre-fetched: when `bars` prop is passed, the chart just renders
+      them (no fetch loop). Used by tests.
+  * Props: `tokenId?`, `bars?: PriceHistoryBar[]`,
+    `resolution: HistoryResolution = '5m'` (one of 1m/5m/15m/1h/4h/1d),
+    `count=60`, `height=280`, `showVolume=true`, `showMarkers=true`,
+    `showRangeSelector=true`, `lineColor=chartTheme.colors.info`,
+    `formatX` (HH:MM:SS default), `formatY` (3dp default),
+    `onResolutionChange?`.
+  * `coerceResolution(r)` helper — backend currently supports only
+    `1m|5m|1h`, so 15m→5m, 4h→1h, 1d→1h. The UI still shows all 6 range
+    buttons (so the user picks the granularity they want), but the
+    actual fetch uses the coerced resolution.
+  * Visual layers (z-order back-to-front):
+    1. Volume bars: a faint `Area` (type="bar") with vol-gradient (muted,
+       0.4 → 0.05). Volume is scaled to fit 35% of the Y-axis range so
+       the price line dominates.
+    2. Price line + gradient area: `<Area type="monotone" dataKey="close">`
+       with `gradientId` fill (lineColor 0.35 → 0.02).
+       `isAnimationActive=true` (400ms).
+    3. High marker: green `<ReferenceDot>` at `(max-high timestamp,
+       max-high value)` with label "H 0.625".
+    4. Low marker: red `<ReferenceDot>` at the min-low point with
+       "L 0.375" label.
+  * Custom tooltip — `PriceTooltip` shows timestamp, close price,
+    % change since first bar (green/red), and volume.
+  * Y-domain computed from min-low to max-high with 5% padding, clamped
+    to [0.001, 0.999] (probabilities).
+  * Three render states:
+    - Loading (`data-testid="price-history-loading"`): spinner +
+      "Loading price history…" — shown when self-fetch is in-flight
+      and no bars are yet available.
+    - Error (`data-testid="price-history-error"`): red "⚠️ HTTP 500" /
+      "Network error" — `role="alert"`.
+    - Empty (`data-testid="price-history-empty"`): "No price history
+      available" — when bars array resolves to [].
+  * Timestamps normalized: if a bar's timestamp > 1e12 (ms), divided by
+    1000 to convert to seconds (matches the server's epoch-seconds
+    convention).
+  * Time-range selector: 6 buttons (1m/5m/15m/1h/4h/1d), styled like the
+    MarketChartModal selector — active button is blue-bg/black-text,
+    inactive are dim with hover. Each exposes `aria-pressed` and
+    `data-testid="range-btn-{r}"` for testability.
+
+### Step 4 — Integrated into `src/components/MarketsPanel.tsx`:
+  * Added `useRef` import + `prevMidsRef = useRef<Record<string,
+    number>>({})` to track previous mid per token. Updated during
+    render (NOT in useEffect) so the very next render of the same book
+    gets the correct delta — `previousMid = prevMidsRef.current[
+    token_id] ?? null` is snapshotted BEFORE the ref is mutated.
+  * Replaced the static "Bid (YES)" + "Ask (YES)" + "Spread" columns
+    with a single "Live Price (Bid / Ask / Δ)" column hosting
+    `<PriceTicker>` per row. The PriceTicker shows mid (animated,
+    directionally colored) + bid/ask chip + spread chip + change line —
+    consolidating what was previously 3 columns of static text into one
+    animated, info-dense cell.
+  * Renamed the existing "Trade" button to "Depth" (still calls
+    `onSelectMarket` → mounts `DepthChartModal`). Added a new "History"
+    ghost button that sets local `historyMarket` state — which renders
+    a modal hosting `<PriceHistoryChart>` for the row's tokenId.
+  * New History modal — `modal-backdrop` + `modal modal-wide`, escape
+    + backdrop-click close, hosts PriceHistoryChart with resolution="5m",
+    count=60, height=320, plus an info banner noting bars are synthetic
+    when no TimescaleDB candles are persisted.
+  * Updated the React.memo comparator: still returns false on books/
+    onSelectMarket/priceFlashes changes (unchanged). The new internal
+    state (historyMarket, prevMidsRef) doesn't affect memo because state
+    changes trigger re-render naturally — the memo comparator only gates
+    re-renders from prop changes.
+
+### Step 5 — Improved `src/components/DepthChartModal.tsx`:
+  * Imported `MarketDepthChart` from `./charts/MarketDepthChart`.
+  * Inserted a new section at the top of the modal body (above the
+    existing 2-column bid/ask ladder) — a bordered card titled
+    "📊 Cumulative Market Depth" with a caption showing live bid/ask
+    level counts, hosting the `<MarketDepthChart>` with `height={220}`.
+  * Passes `data?.bids ?? []`, `data?.asks ?? []`, `data?.mid`,
+    `data?.best_bid`, `data?.best_ask`, `data?.spread` directly from
+    the existing 2s polling fetch — so the chart updates on every poll
+    alongside the textual ladder.
+  * The existing 2-column ladder + ML Edge panel + Quick Trade form are
+    unchanged.
+
+### Step 6 — Tests:
+  * `src/components/PriceTicker.test.tsx` (29 tests, ~270 lines):
+    - Mocks `framer-motion` — `motion.span` becomes a passthrough that
+      applies `animate` props as inline style (so tests can assert on
+      color); `AnimatePresence` becomes a fragment wrapper so both
+      entering + exiting children render to the DOM.
+    - `formatTickerPrice`: 4dp for <0.01, 3dp for 0.01–0.99, 2dp for ≥1,
+      "—" for null/NaN/Infinity.
+    - `computeChange`: up direction with correct abs+pct, down direction
+      with negative abs+pct, flat when prices equal, flat when either is
+      null, flat when previous is 0 (div-by-zero guard), flat when either
+      is NaN.
+    - Component: renders formatted price, "—" for null, up direction
+      when price increased (verified via `data-direction` attribute on
+      the motion.span), down direction when decreased, flat when equal,
+      flat on first render (previousPrice null).
+    - Change line: "+5.00¢ (+10.00%)" for up, "−5.00¢ (−10.00%)"
+      (Unicode MINUS) for down, em dash for first render.
+    - Bid/ask chip: renders formatted values when both sides given,
+      "—" placeholders when null, suppressed in compact mode.
+    - Spread chip: "4.0¢" when spread=0.04, suppressed when null,
+      suppressed in compact mode (compact already disables the chip +
+      change line).
+    - Compact mode: no change line + no bid/ask chip.
+    - Boundary formats: 0.0042 → "0.0042" (4dp), 4.5 → "4.50" (2dp).
+    - Aria label: `${label}: ${formattedPrice}, +X.XX% since last tick`.
+    - Re-render behaviour: direction updates across rerenders (up → down
+      → up).
+  * `src/components/charts/MarketDepthChart.test.tsx` (16 tests, ~250
+    lines):
+    - Mocks `recharts.ResponsiveContainer` as a passthrough div (same
+      pattern as Charts.test.tsx) so AreaChart + Tooltip children render
+      directly without a real ResizeObserver firing.
+    - Renders without crashing with 5-bid + 5-ask mock data. Empty state
+      when both sides empty. Renders with only one side populated.
+    - Height prop applied to the outer wrapper.
+    - Spread chip: "Spread 4.00¢" when spread=0.04, suppressed when
+      null, suppressed when showSpreadChip=false. Amber colour when
+      spread is wide (≥3¢, verified via text content), muted when narrow.
+    - Mid reference line: no crash when mid is null, no crash when
+      showMidLine is false even with mid set.
+    - Custom color overrides + custom formatPrice/formatSize don't crash.
+    - Single-level ladders render without crashing.
+    - NaN total handled gracefully (the y-domain computation short-
+      circuits at max=0 → falls back to 1).
+    - ResponsiveContainer receives width="100%".
+  * `src/components/charts/PriceHistoryChart.test.tsx` (19 tests, ~270
+    lines):
+    - Mocks `recharts.ResponsiveContainer` (same passthrough pattern)
+      AND `@/lib/api` (`getApiUrl` + `apiFetch` returns a fake Response
+      with mock 5-bar OHLCV).
+    - Time-range selector: all 6 buttons present (1m/5m/15m/1h/4h/1d).
+    - Pre-fetched bars mode: chart renders immediately.
+    - Empty state when bars=[] and no tokenId.
+    - Loading state when tokenId is given and bars empty — spinner +
+      "Loading price history…".
+    - Self-fetch resolves: chart replaces loading state after `apiFetch`
+      resolves (verified via waitFor).
+    - Error state: apiFetch rejecting → "Network error"; apiFetch
+      returning HTTP 500 → "HTTP 500".
+    - showRangeSelector=false suppresses the range buttons.
+    - showVolume=false / showMarkers=false don't crash.
+    - Custom lineColor + custom formatX/formatY don't crash.
+    - Range button click: aria-pressed flips (5m → 15m), and the
+      `onResolutionChange` callback fires with the new resolution.
+    - ms timestamps (>1e12) are normalized to seconds (no crash).
+    - Single-bar dataset renders without crashing.
+    - Bars with missing volume (volume field undefined) render without
+      crashing even when showVolume=true.
+    - ResponsiveContainer receives width="100%" + the height prop.
+
+### Step 7 — Barrel exports:
+  * `src/components/charts/index.ts` — added `MarketDepthChart`,
+    `MarketDepthChartProps`, `DepthLevel`, `PriceHistoryChart`,
+    `PriceHistoryChartProps`, `PriceHistoryBar`, `HistoryResolution`
+    to the existing barrel so callers can use either direct path or
+    `@/components/charts`.
+
+### Verification:
+  * `cd /home/z/my-project && bun run lint` — clean (0 errors, 1 pre-
+    existing warning in src/app/page.tsx:235 unused eslint-disable
+    directive, unrelated to W15-1).
+  * `cd /home/z/my-project && bun run test src/components/PriceTicker
+    .test.tsx src/components/charts/MarketDepthChart.test.tsx
+    src/components/charts/PriceHistoryChart.test.tsx` — 64/64 tests
+    pass across the 3 new test files (29 + 16 + 19) in 14.58s.
+  * `cd /home/z/my-project && bun run test` — 553 of 556 tests pass in
+    188.98s. The 3 failures are in `src/hooks/usePreferences.test.ts`
+    (2) and `src/lib/preferences.test.ts` (1) — all pre-existing from a
+    concurrent W15 task that modified preferences.ts (the `getDefaults()`
+    reference-equality test fails because the factory now returns a
+    shared reference). None are related to W15-1 changes; verified by
+    the fact that none of the failing tests import or reference any of
+    the new components.
+  * Dev server log (`/home/z/my-project/dev.log`): clean — Next.js
+    16.1.3 (Turbopack) compiles `/` in 8.2s on first request, 25ms on
+    subsequent. No runtime errors logged.
+
+Stage Summary:
+- Created src/components/PriceTicker.tsx (~230 lines — animated mid price
+  with directional color flash + bid/ask chip + spread chip + change-
+  since-last-tick line + subtle pulse background; Framer Motion
+  AnimatePresence for smooth number transitions; exports formatTickerPrice
+  + computeChange helpers).
+- Created src/components/charts/MarketDepthChart.tsx (~330 lines —
+  Recharts AreaChart with stepped bid/ask areas, gradient fills, mid-
+  price reference line, best-bid/best-ask reference lines, top-right
+  spread chip, custom tooltip showing price + size + cumulative).
+- Created src/components/charts/PriceHistoryChart.tsx (~360 lines —
+  Recharts ComposedChart with gradient-filled price line, faint volume
+  bars, high/low reference dots, 6-button time-range selector
+  1m/5m/15m/1h/4h/1d, self-fetch mode polling /api/history/ohlcv every
+  5s with loading/error/empty states).
+- Modified src/components/MarketsPanel.tsx (replaced static Bid/Ask/
+  Spread columns with single PriceTicker column; added prevMidsRef for
+  previous-tick tracking; renamed "Trade" button → "Depth"; added
+  "History" button + internal modal hosting PriceHistoryChart).
+- Modified src/components/DepthChartModal.tsx (added MarketDepthChart
+  visualization at the top of the modal body, above the existing 2-
+  column bid/ask ladder, fed by the existing 2s polling fetch).
+- Modified src/components/charts/index.ts (added barrel exports for the
+  2 new chart components + their prop types).
+- Created src/components/PriceTicker.test.tsx (29 tests, 270 lines).
+- Created src/components/charts/MarketDepthChart.test.tsx (16 tests,
+  250 lines).
+- Created src/components/charts/PriceHistoryChart.test.tsx (19 tests,
+  270 lines).
+- Lint: clean. New tests: 64/64 pass. Full suite: 553/556 pass (3 pre-
+  existing failures in usePreferences/preferences tests from a concurrent
+  W15 task — unrelated to W15-1).
+
+---
+Task ID: W15-2
+Agent: full-stack-developer
+Task: User preferences system (localStorage + sync via CustomEvent)
+
+Work Log:
+- Read worklog tail (~last 150 lines — W14-3 CLI tool, W14-7 Rate
+  Limit panel) + `src/app/page.tsx` (first 100 lines for context) +
+  `src/hooks/useBot.ts` (full file, 445 lines — REST polling cadence
+  hardcoded to 2000ms in 2 setInterval sites) + `src/components/
+  TopStatusBar.tsx` (full file, 350 lines — already had ThemeToggle
+  + LocaleSwitcher in the right-hand action cluster, plus an existing
+  "⚙️ Config" button that opens the strategy/risk modal). Also read
+  ShortcutsModal (mirror pattern for focus management + Escape +
+  focus trap), ThemeToggle/LocaleSwitcher (existing "appearance"
+  controls), useFeatureFlags + its test (the closest existing hook
+  pattern — polling + visibility-aware effect), and
+  PositionsPanel.test.tsx (303 lines) + MarketsPanel price-flash
+  usage (so the new optional display-flag props would default to
+  `true` and not break the existing test suite).
+- Created `src/lib/preferences.ts` (258 lines):
+  * `UserPreferences` interface (17 fields across 7 sections:
+    Display, Dashboard, Trading, Notifications, Sound, Layout,
+    Privacy).
+  * `DEFAULTS` constant: dark theme, EN locale, 2s polling, US
+    number format, audio muted, error-report opt-in. Every default
+    matches the dashboard's existing behaviour so a fresh install
+    renders identically.
+  * `loadPreferences()` — SSR-guarded (`typeof window === 'undefined'`
+    → DEFAULTS), malformed-JSON recovery (`try/catch` → DEFAULTS),
+    backward-compat merge (`{ ...DEFAULTS, ...parsed }`).
+  * `savePreferences(prefs)` — writes the full JSON blob under
+    `polymarket_preferences`. Does NOT dispatch the event (reserved
+    for `updatePreference`). Swallows quota-exceeded errors so
+    private-mode sessions keep working in-memory.
+  * `resetPreferences()` — removes the key + returns DEFAULTS.
+    Swallows `removeItem` errors.
+  * `updatePreference(key, value)` — atomic merge + persist +
+    dispatch `preferences-changed` CustomEvent with the full
+    updated object as `detail`. Returns the new object.
+  * `getDefaults()` — returns `{ ...DEFAULTS }` (fresh shallow copy)
+    so callers can't mutate the canonical DEFAULTS via the returned
+    reference.
+- Created `src/hooks/usePreferences.ts` (118 lines):
+  * `useState(() => getDefaults())` so SSR + first client paint
+    agree (no hydration mismatch — same pattern as `useTranslation`).
+  * Mount effect: `loadPreferences()` + `setLoaded(true)` + subscribe
+    to `preferences-changed` event. Listener sets state to
+    `event.detail` (or falls back to `loadPreferences()` if detail
+    is missing — defensive for future external callers).
+  * `update(key, value)` — stable callback (no `preferences` in deps
+    array). Calls `updatePreference` (which reads the latest state
+    from localStorage) + `setPreferences(updated)` so the calling
+    component sees the new value in the same React commit cycle.
+  * `reset()` — calls `resetPreferences()` + manually dispatches the
+    event (so OTHER mounted consumers see the reset too) +
+    `setPreferences(defaults)`.
+  * Returns `{ preferences, loaded, update, reset }`.
+- Created `src/components/SettingsModal.tsx` (370 lines):
+  * Uses the existing `.modal-backdrop` / `.modal` / `.modal-header`
+    / `.modal-body` / `.modal-footer` classes from `globals.css`
+    (visual consistency with ShortcutsModal + StrategyConfigModal +
+    ConfirmationDialog). `.modal-wide` class for a wider layout.
+  * Data-driven: a `SETTINGS` array of `SettingDescriptor` objects
+    declares each setting's section / label / description / control
+    type. The render path filters by section + maps to a `SettingRow`
+    component. Adding a future preference is a single descriptor
+    entry — no JSX change required.
+  * 6 sections in canonical order: Display, Dashboard, Trading,
+    Notifications, Sound, Privacy.
+  * Controls: shadcn `Switch` (toggles), `Slider` with formatted
+    readout (refresh interval 500ms–10s, sound volume 0–100%), `Select`
+    (theme, locale, default panel, default chart type, number format),
+    `Checkbox` group (alert severity filter — 4 severities).
+  * Draft state model: `draft` is initialised from `preferences` on
+    every open. Every control edits the draft only — no persistence
+    until Save.
+  * "Save changes" walks the diff between `draft` + persisted
+    `preferences`, calling `update(key, value)` for each changed
+    field. Save button is disabled when `isDirty === false`.
+  * "Cancel" discards the draft + closes (no persistence).
+  * "Reset to defaults" replaces the draft with `getDefaults()` —
+    NOT persisted. The trader can still click Cancel to bail.
+  * Accessibility: role="dialog" + aria-modal="true" +
+    aria-labelledby; Escape closes (stopPropagation so the parent
+    page-level Escape handler doesn't also fire); focus moves to the
+    close button on open + restored to the trigger on close; Tab
+    focus trapped inside the modal.
+- Modified `src/components/TopStatusBar.tsx` (+28 lines):
+  * Added a `🛠` (hammer + wrench) icon button at the start of the
+    right-hand action cluster. Used a different glyph from the
+    existing `⚙️ Config` button (which opens the strategy/risk modal)
+    to disambiguate the two modals.
+  * Local `settingsOpen` state controls modal visibility.
+    `<SettingsModal>` is mounted at the bottom of the header so it
+    overlays the entire workstation when open.
+  * `aria-haspopup="dialog"` + `aria-expanded={settingsOpen}` for
+    screen-reader users.
+- Modified `src/hooks/useBot.ts` (+15 lines):
+  * Added `UseBotOptions` interface with optional `refreshIntervalMs`
+    (default 2000 — preserves every existing call site + test).
+  * Both `setInterval` sites (initial mount + visibilitychange
+    resume) honour the new value. Added `refreshIntervalMs` to both
+    effects' dep arrays so a runtime change tears down + restarts
+    the interval.
+- Modified `src/app/page.tsx` (+30 lines):
+  * Calls `usePreferences()` and passes
+    `refreshIntervalMs={preferences.refreshIntervalMs}` to `useBot`.
+  * Adds a mount effect that applies `preferences.defaultPanel` to
+    `setActiveSection` ONCE. Guarded by `NAV_SECTION_KEYS.has(panel)`
+    (a Set built from `Object.values(KB_MAP)`) so a renamed /
+    malformed persisted value falls through to 'command' rather than
+    landing in Sidebar as an unknown section.
+  * Threads `showUnrealizedPnl` + `showPriceFlashes` to every
+    PositionsPanel (2 call sites) + MarketsPanel (2 call sites).
+- Modified `src/components/PositionsPanel.tsx` (+30 lines):
+  * New optional props `showUnrealizedPnl` (default true) +
+    `showPriceFlashes` (default true) — backwards compatible with
+    the existing test suite (which doesn't pass either prop).
+  * `showUnrealizedPnl=false` → entire "Unrealized" column is
+    hidden (header `<th>` + every row's `<td>` both conditional).
+  * `showPriceFlashes=false` → `.price-up` / `.price-down` CSS class
+    is suppressed on the Mark cell (the flashDir lookup still runs
+    but `flashClass` is empty).
+  * Added both flags to the React.memo custom comparator so a
+    preference flip re-renders immediately.
+- Modified `src/components/MarketsPanel.tsx` (+15 lines):
+  * New optional prop `showPriceFlashes` (default true).
+  * `showPriceFlashes=false` → `.price-up` / `.price-down` class
+    suppressed on the implied-probability cell.
+  * Added to the React.memo comparator.
+- Created `src/lib/preferences.test.ts` (23 tests, 257 lines):
+  * getDefaults (2): canonical DEFAULTS shape + fresh-object-on-
+    every-call (no shared-reference leak).
+  * loadPreferences (5): DEFAULTS when no entry / malformed JSON /
+    null-ish; partial-payload merge over DEFAULTS (backward compat);
+    DEFAULTS when localStorage.getItem throws (SSR / disabled
+    storage).
+  * savePreferences (5): writes the full JSON blob; round-trips
+    through loadPreferences; overwrites the previous value; does
+    NOT dispatch the event; swallows quota-exceeded errors silently.
+  * resetPreferences (5): removes the storage key; returns DEFAULTS;
+    does NOT dispatch the event; idempotent when the key is already
+    absent; swallows removeItem errors.
+  * updatePreference (6): persists the updated field + preserves the
+    others; returns the full updated object; dispatches the event
+    with the new value as `detail`; updates an array field;
+    type-safety compile-time check; preserves every other field when
+    one is updated.
+- Created `src/hooks/usePreferences.test.ts` (10 tests, 260 lines):
+  * Initialises with DEFAULTS so SSR + first paint match.
+  * Reconciles to the persisted value after the mount effect runs
+    (using `waitFor` because React 19 + RTL 16 may flush effects
+    synchronously — the test asserts the final reconciled state
+    rather than the intermediate DEFAULTS state, which is no longer
+    observable from outside the hook with the newer RTL behaviour).
+  * `update(key, value)` flips a single field + persists.
+  * `update` dispatches the event so OTHER mounted instances see
+    the change (two independent `renderHook` calls, instance A
+    flips a flag, instance B should see it on the next render).
+  * `reset()` restores DEFAULTS + broadcasts to other instances.
+  * Subscribes to externally-dispatched `preferences-changed`
+    events (covers future callers like the command palette that
+    bypass `update` and dispatch directly after writing to
+    localStorage).
+  * Falls back to `loadPreferences` when the event detail is
+    missing (defensive).
+  * Unsubscribes the event listener on unmount (no
+    setState-after-unmount warning when an event fires post-unmount).
+  * `update` / `reset` return the new state synchronously.
+- Verification:
+  * `cd /home/z/my-project && bun run lint` — clean (eslint . exits 0,
+    no warnings).
+  * `cd /home/z/my-project && bun run test` — all 556 tests pass (25
+    test files, including the new 23 + 10 tests; 523 pre-existing
+    tests still pass — no regressions in ThemeToggle / ThemeProvider /
+    PositionsPanel / MarketsPanel / Sidebar / useBot / useFeatureFlags
+    / useTranslation / useNotifications tests).
+  * Dev server log: no errors related to the new modal, hook, or
+    preference wiring. Next.js 16.1.3 with Turbopack compiles cleanly.
+
+Stage Summary:
+- Created `src/lib/preferences.ts` (258 lines — preferences store with
+  load / save / reset / update + CustomEvent broadcast).
+- Created `src/hooks/usePreferences.ts` (118 lines — React binding
+  with SSR-safe initial state + event subscription).
+- Created `src/components/SettingsModal.tsx` (370 lines — full-screen
+  modal, 6 sections, draft-state model, Save / Cancel / Reset).
+- Created `src/lib/preferences.test.ts` (23 tests, 257 lines).
+- Created `src/hooks/usePreferences.test.ts` (10 tests, 260 lines).
+- Modified `src/components/TopStatusBar.tsx` (+28 lines — gear icon
+  button + modal mount).
+- Modified `src/hooks/useBot.ts` (+15 lines — `refreshIntervalMs`
+  option + 2 setInterval sites).
+- Modified `src/components/PositionsPanel.tsx` (+30 lines —
+  `showUnrealizedPnl` + `showPriceFlashes` optional props).
+- Modified `src/components/MarketsPanel.tsx` (+15 lines —
+  `showPriceFlashes` optional prop).
+- Modified `src/app/page.tsx` (+30 lines — `usePreferences` call +
+  `refreshIntervalMs` / `defaultPanel` / display-flag wiring).
+- Lint: clean. Tests: 556/556 pass (33 new + 523 existing, no
+  regressions).

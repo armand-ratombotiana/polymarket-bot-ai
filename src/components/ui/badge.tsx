@@ -17,6 +17,16 @@ const badgeVariants = cva(
           "border-transparent bg-destructive text-white [a&]:hover:bg-destructive/90 focus-visible:ring-destructive/20 dark:focus-visible:ring-destructive/40 dark:bg-destructive/60",
         outline:
           "text-foreground [a&]:hover:bg-accent [a&]:hover:text-accent-foreground",
+        // W15-5 — Live/Polling status badges for useRealtimeData consumers.
+        // `success` mirrors a healthy green dot (WS connected, real-time
+        // pushes active); `warning` mirrors an amber dot (polling fallback
+        // because the WS is still handshaking, mid-reconnect, or has
+        // permanently failed). Both keep the shadcn Badge contract so
+        // they size / pad identically to the default variants.
+        success:
+          "border-transparent bg-green-500/15 text-green-400 border border-green-500/30 [a&]:hover:bg-green-500/25",
+        warning:
+          "border-transparent bg-amber-500/15 text-amber-300 border border-amber-500/30 [a&]:hover:bg-amber-500/25",
       },
     },
     defaultVariants: {

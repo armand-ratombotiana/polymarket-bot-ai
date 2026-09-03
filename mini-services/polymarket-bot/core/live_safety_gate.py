@@ -793,10 +793,24 @@ def register_routes(app: Any) -> None:
                 ),
             }
         except Exception as e:
-            log.error("[live_safety_gate] live enable failed post-gate: %s", e)
+            # W15-6 (OWASP A02 — Cryptographic Failures / Information
+            # Disclosure): the raw exception message MUST NOT be reflected to
+            # the client — it can leak internal paths / class names / SQL
+            # fragments. The full traceback is logged server-side (the
+            # ``log.error`` call below) so the operator can debug; the client
+            # sees only a generic 500.
+            log.error(
+                "[live_safety_gate] live enable failed post-gate: %s",
+                e,
+                exc_info=True,
+            )
             raise HTTPException(
                 status_code=500,
-                detail=f"All §82 checks passed but the in-memory mode flip failed: {e}",
+                detail=(
+                    "All §82 checks passed but the in-memory mode flip "
+                    "failed — see server logs for details (request_id "
+                    "in the X-Request-ID response header)."
+                ),
             )
 
 

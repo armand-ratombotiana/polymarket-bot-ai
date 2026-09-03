@@ -25,10 +25,83 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Storybook component stories
 - Typed API client SDK (17 namespaces, 60+ methods)
 - Comprehensive maintenance documentation
+- **Prometheus metrics endpoint** (`GET /metrics`) + Grafana dashboard
+  (provisioned datasource + dashboard JSON under `grafana/`)
+- **External-API circuit breaker** (`core/circuit_breaker.py`) wrapping every
+  outbound Polymarket / Gamma / CLOB call; opens on N consecutive failures
+  + half-opens for a probe request
+- **API versioning** (`core/api_versioning.py`) — `/api/v1/...` prefix with
+  a version negotiator + deprecation header
+- **Dark/light theme switcher** (next-themes + ThemeToggle component in
+  the top status bar, persisted to localStorage)
+- **Command palette (Cmd+K)** — shadcn/ui Command (cmdk) dialog with 25+
+  navigation entries + 6 page-level actions
+- **Browser push notifications** — `src/lib/notifications.ts` Web
+  Notifications primitives + `useNotifications` hook (30s visibility-aware
+  alert polling, deduplication, severity-tagged `requireInteraction` for
+  critical alerts)
+- **DB migration system** — `core/db/migration_runner.py` + idempotent
+  `001_initial_schema.sql` and `001_initial_enterprise_schemas.sql` applied
+  on app startup; `scripts/migrate.py` for ad-hoc runs
+- **Advanced backtest** (walk-forward + Monte Carlo) —
+  `backtesting/advanced.py` returns confidence intervals on Sharpe / max
+  drawdown / win rate from N resampled runs
+- **Recharts visualizations** — `src/components/charts/` (EquityCurveChart,
+  PnLBarChart, Sparkline, GaugeChart, ReliabilityDiagram, theme.ts barrel)
+  integrated into 5 panels (EquityCurve, Attribution, Observability,
+  CapitalAllocator, MLValidation)
+- **WebSocket broadcast layer** (`core/ws_broadcast.py`) — multiplexes 5
+  channels (book, orders, trades, events, alerts) to all connected clients
+- **i18n (English + French)** — next-intl + `useTranslation` hook with full
+  nav / group / status / positions / analytics message catalogs;
+  LocaleSwitcher in the top status bar
+- **CLI tool** (`mini-services/polymarket-bot/cli.py`) — 14 typer commands
+  (status, balance, positions, orders, trades, health, retrain,
+  kill-switch, flags, flag, alerts, metrics, circuit-breakers, cache)
+- **Audit log viewer** (`src/components/AuditLogPanel.tsx`) — severity-
+  inferred table with category / severity / date / text-search filters,
+  CSV + JSON export of the filtered set, 15s visibility-aware auto-refresh
+- **A/B testing framework** (`ml/ab_testing.py`) — multi-variant
+  experiments comparing model variants, strategy parameters, or
+  capital-allocation curves; statistical significance tracked via Brier /
+  ROC-AUC deltas
+- **Backup verification + rotation** — `scripts/verify_backup.py`
+  (round-trip integrity), `scripts/backup_rotation.py` (GFS: 7 daily +
+  4 weekly + 12 monthly + 90d hard cap), `scripts/check_integrity.py`
+  (per-DB PRAGMA + orphan checks), `scripts/test_restore.py` (full
+  restore round-trip)
+- **Rate limit dashboard** — `core/rate_limit_tracker.py` (in-memory
+  thread-safe tracker) + `GET /api/rate-limit/stats` route + RateLimitPanel
+  (4 KPI cards + endpoint bar chart + per-minute sparkline + 2 tables +
+  policy reference, 30s visibility-aware polling)
+- **Frontend error reporting** — `src/lib/errorReporter.ts` (captureError,
+  captureMessage, flush, installErrorHandlers, getErrorStats) +
+  ErrorReporterInit component installed in root layout + `POST /api/client-errors`
+  endpoint with dedicated client_errors logger
+- **User preferences system** — theme, locale, notification opt-in,
+  sidebar collapse state, and audio mute persist across sessions via
+  localStorage (with SSR-safe getters and stale-value fallback)
+- **API contract tests** (`tests/test_openapi.py`, 33 tests) — verifies
+  every OpenAPI-documented route matches the live response shape
+- **Performance profiling** — in-process `cProfile` middleware + per-route
+  timing histogram; `scripts/status_report.py` summarises p50/p95/p99
+- **Security hardening pass** — penetration tests + OWASP Top 10 audit
+  (constant-time compare, SSRF guard, fail-closed auth, sanitised 500s,
+  locked-down `/docs` in live mode); see [docs/SECURITY.md](docs/SECURITY.md)
+- **Documentation checker** — `scripts/check_docs.py` verifies all
+  internal Markdown links resolve, every fenced code block declares a
+  language, heading hierarchy has no level skips, and GFM tables have
+  consistent column counts
 
 ### Changed
-- Total tests: 916+ (709 backend + 207 frontend + 38 E2E)
-- All 77+ API routes now have rate limiting + OpenAPI documentation
+- Total tests: 1429+ (970+ backend + 459+ frontend + 38 E2E)
+- All 90+ API routes now have rate limiting + OpenAPI documentation
+- Frontend panels: 37 → 55+ (added Audit Log, Rate Limits, Theme Toggle,
+  Locale Switcher, Command Palette, Error Reporter Init, plus 5 Recharts
+  primitives)
+- Backend route count: 77 → 90+ (added Prometheus `/metrics`,
+  `/api/ab-test`, `/api/audit/logs`, `/api/rate-limit/stats`,
+  `/api/client-errors`, plus expanded ML / flags surfaces)
 
 ## [1.0.0] - 2025-09-03
 

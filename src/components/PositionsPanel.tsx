@@ -1,23 +1,59 @@
 // components/PositionsPanel.tsx — Active Portfolio Positions, Real-Time P&L & Exposure Governance
+//
+// W15-5 — Migrated from `useBot`'s 2-second REST polling to the hybrid
+// `useRealtimeData` hook. The panel now:
+//   1. On mount, REST-prefetches /api/positions to populate state without
+//      a flash of empty content.
+//   2. In parallel, opens a WebSocket and subscribes to the `positions`
+//      channel — when a message arrives with `msg.channel === 'positions'`,
+//      the data state is swapped in atomically (sub-millisecond vs. the
+//      previous 2s poll lag).
+//   3. If the WS is not connected (handshaking / mid-reconnect / permanently
+//      failed), falls back to polling /api/positions every 5s.
+//   4. The header renders a "● Live" badge while the WS is connected, and
+//      a "⟳ Polling" badge while it isn't — so the trader can tell at a
+//      glance whether the displayed positions are real-time or lagged.
+//
+// Backwards-compat: callers MAY still pass `positions` as a prop (the
+// existing tests do this, and page.tsx still threads the prop through).
+// When provided, the prop overrides the fetched data — the WS subscription
+// still runs (so `isRealtime` stays accurate), but the rendered rows come
+// from the override. When omitted, the panel self-fetches via
+// useRealtimeData.
 'use client'
 
 import { useState, useMemo, useCallback, memo } from 'react'
 import { Position } from '@/hooks/useBot'
 import { formatHierarchicalMarket } from '@/lib/formatters'
 import { fmtPnl, fmtUsd } from '@/lib/design-tokens'
+import { useRealtimeData } from '@/hooks/useRealtimeData'
+import { Badge } from '@/components/ui/badge'
+
+interface PositionsApiResponse {
+  positions: Position[]
+}
 
 interface Props {
-  positions: Position[]
+  /**
+   * Optional override for the positions list. When provided, the panel
+   * uses this directly and skips rendering the useRealtimeData result
+   * (the WS subscription still runs so the Live/Polling badge reflects
+   * the actual transport state). When omitted, the panel self-fetches
+   * via useRealtimeData('/api/positions', { wsChannel: 'positions' }).
+   */
+  positions?: Position[]
   dailyPnl: number
   onSelectMarket?: (market: { tokenId: string; slug: string }) => void
-  // S1 — optional close handler. When provided, renders a "✕ Close" button
-  // next to the existing Trade button for each position row.
   onClosePosition?: (tokenId: string) => void
-  // W12 — per-token_id price-flash direction map (mirrors useBot.priceFlashes).
-  // When present, the Mark (current_price) cell on each row picks up the
-  // `.price-up` / `.price-down` CSS class so the cell briefly flashes
-  // green/red on a tick move (cleared automatically by the hook after ~500ms).
   priceFlashes?: Record<string, 'up' | 'down'>
+  /**
+   * Optional override for the realtime indicator. When omitted, the
+   * panel derives the badge state from useRealtimeData's `isRealtime`
+   * flag. Useful when the parent (e.g. page.tsx) is already tracking the
+   * WS connection state via useBot and wants to drive the badge
+   * consistently across sibling panels.
+   */
+  isRealtime?: boolean
 }
 
 // W9-6 — wrapped in React.memo with a custom comparator. The component
@@ -28,10 +64,36 @@ interface Props {
 // and the callback identities. priceFlashes is intentionally compared by
 // JSON-stringified snapshot so two flashes maps with identical contents
 // don't trigger a re-render (rare but possible).
-function PositionsPanel({ positions, dailyPnl, onSelectMarket, onClosePosition, priceFlashes }: Props) {
+function PositionsPanel({
+  positions: positionsOverride,
+  dailyPnl,
+  onSelectMarket,
+  onClosePosition,
+  priceFlashes,
+  isRealtime: isRealtimeOverride,
+}: Props) {
   const [filterQuery, setFilterQuery] = useState('')
   const [outcomeFilter, setOutcomeFilter] = useState<'ALL' | 'YES' | 'NO'>('ALL')
   const [sortBy, setSortBy] = useState<'size' | 'pnl' | 'market'>('size')
+
+  // W15-5 — hybrid REST + WS subscription. Always invoked (Rules of Hooks
+  // forbid conditional calls), even when the caller passes a `positions`
+  // override — the WS subscription still drives `isRealtime` so the
+  // Live/Polling badge accurately reflects the transport state.
+  const {
+    data: fetched,
+    isLoading,
+    isRealtime: wsIsRealtime,
+  } = useRealtimeData<PositionsApiResponse>('/api/positions', {
+    wsChannel: 'positions',
+    pollInterval: 5000, // was 2s under useBot's REST poll; relaxed to 5s
+  })
+
+  // Resolve the effective positions array + realtime flag. The override
+  // takes precedence when provided (backwards-compat with tests + the
+  // page.tsx wiring that still threads useBot's snapshot through).
+  const positions = positionsOverride ?? fetched?.positions ?? []
+  const isRealtime = isRealtimeOverride ?? wsIsRealtime
 
   const MAX_PER_MARKET = 3.0 // USD 3.00 institutional limit
   const MAX_TOTAL_PORTFOLIO = 25.0 // USD 25.00 total exposure cap
@@ -98,6 +160,16 @@ function PositionsPanel({ positions, dailyPnl, onSelectMarket, onClosePosition, 
             💼 ACTIVE POSITIONS ({positions.length})
           </span>
           <span className="badge badge-amber text-[9.5px]">USD 25 Exposure Cap</span>
+          {/* W15-5 — Live / Polling badge. Reflects the actual transport
+              state of the underlying useRealtimeData subscription. The
+              dot color + label give the trader an at-a-glance signal of
+              whether the displayed rows are real-time (WS push) or
+              lagged (5s poll fallback). */}
+          {isRealtime ? (
+            <Badge variant="success" className="text-[9.5px] py-0.5">● Live</Badge>
+          ) : (
+            <Badge variant="warning" className="text-[9.5px] py-0.5">⟳ Polling</Badge>
+          )}
         </div>
 
         {/* Aggregate KPI Badges */}
@@ -132,6 +204,19 @@ function PositionsPanel({ positions, dailyPnl, onSelectMarket, onClosePosition, 
           </button>
         </div>
       </div>
+
+      {/* W15-5 — loading state. Only surfaces on the FIRST fetch (before
+          useRealtimeData has resolved any data) AND when no `positions`
+          override was passed. Once the initial REST fetch returns, the
+          panel renders the table even when the WS is still handshaking —
+          the Live/Polling badge in the header conveys the transport lag
+          instead of blanking the panel. */}
+      {isLoading && positions.length === 0 && (
+        <div className="flex items-center justify-center py-8 text-xs text-[#7e8aaa]">
+          <span className="spinner mr-2" aria-hidden="true" />
+          Loading positions…
+        </div>
+      )}
 
       {/* Filter & Search Bar */}
       <div className="flex items-center justify-between gap-2 mb-2">
@@ -382,11 +467,18 @@ function PositionsPanel({ positions, dailyPnl, onSelectMarket, onClosePosition, 
 // compare equal, the component skips re-rendering entirely — a meaningful
 // win since this panel renders ~50 positions × ~9 columns on the command
 // center grid plus its own dedicated tab.
+//
+// W15-5 — the `isRealtime` override is a primitive boolean; it's diffed
+// inline alongside `dailyPnl`. The useRealtimeData hook lives inside the
+// component and re-runs on every render — but its internal state updates
+// (data / isLoading / isRealtime) trigger React's normal re-render path,
+// so memo on the prop surface doesn't interfere with WS-driven re-renders.
 export default memo(PositionsPanel, (prev, next) => {
   if (prev.positions !== next.positions) return false
   if (prev.dailyPnl !== next.dailyPnl) return false
   if (prev.onSelectMarket !== next.onSelectMarket) return false
   if (prev.onClosePosition !== next.onClosePosition) return false
+  if (prev.isRealtime !== next.isRealtime) return false
   // priceFlashes is intentionally compared by serialized contents.
   if (JSON.stringify(prev.priceFlashes) !== JSON.stringify(next.priceFlashes)) return false
   return true

@@ -4,6 +4,13 @@
 import { useEffect, useState, useCallback, useRef, type ComponentType } from 'react'
 import { useBot } from '@/hooks/useBot'
 import { useAudio } from '@/hooks/useAudio'
+// W15-2 — preferences store hook. Powers the user-tunable settings:
+// polling cadence (refreshIntervalMs), initial panel (defaultPanel),
+// display flags (showUnrealizedPnl / showPriceFlashes), and more.
+// Reads DEFAULTS on first paint (so SSR + hydration match), then
+// reconciles to the persisted blob on mount — same hydration pattern
+// as useTranslation + ThemeToggle.
+import { usePreferences } from '@/hooks/usePreferences'
 import Sidebar, { NavSection } from '@/components/Sidebar'
 import TopStatusBar from '@/components/TopStatusBar'
 import ConfirmationDialog from '@/components/ConfirmationDialog'
@@ -156,9 +163,23 @@ const KB_MAP: Record<string, NavSection> = {
   '8': 'analytics-performance',
 }
 
+// W15-2 — Set of valid NavSection values, used to guard the persisted
+// `defaultPanel` preference against drift (a renamed section, a
+// malformed persisted value, etc.). Built once at module scope so
+// the same Set instance is reused across renders.
+const NAV_SECTION_KEYS = new Set<string>(Object.values(KB_MAP))
+
 export default function Dashboard() {
   const [mounted, setMounted] = useState(false)
-  const { snapshot, status, priceFlashes, activateKillSwitch, deactivateKillSwitch, cancelAllOrders, cancelOrder, closePosition } = useBot()
+  // W15-2 — preferences drives the polling cadence + display flags.
+  // `refreshIntervalMs` is passed to `useBot` so the REST fallback
+  // poll honours the trader's tuning; `defaultPanel` is applied on
+  // mount via a one-shot effect below; `showUnrealizedPnl` +
+  // `showPriceFlashes` flow into PositionsPanel / MarketsPanel.
+  const { preferences } = usePreferences()
+  const { snapshot, status, wsConnected, priceFlashes, activateKillSwitch, deactivateKillSwitch, cancelAllOrders, cancelOrder, closePosition } = useBot({
+    refreshIntervalMs: preferences.refreshIntervalMs,
+  })
   const audio = useAudio()
 
   const [uptime, setUptime] = useState(0)
@@ -190,6 +211,40 @@ export default function Dashboard() {
 
   useEffect(() => {
     setMounted(true)
+  }, [])
+
+  // W15-2 — apply the persisted `defaultPanel` preference on first mount.
+  // Done as a separate effect (rather than initialising `useState` with
+  // the persisted value) because `preferences` is still DEFAULTS during
+  // the first render — the persisted value only loads via the mount
+  // effect inside `usePreferences`. By the time this effect runs, the
+  // preferences have reconciled to the persisted blob (or stayed at
+  // DEFAULTS on a fresh install) and `preferences.defaultPanel` reflects
+  // the trader's chosen landing panel.
+  //
+  // Intentionally runs ONCE on mount (empty deps array). We do NOT
+  // want to re-flip the active section every time the trader edits
+  // `defaultPanel` in the SettingsModal — they're already looking at
+  // some panel by then, and silently yanking them to the new default
+  // would be jarring. The `preferences.defaultPanel` read here
+  // captures whatever the persisted value is at mount time; subsequent
+  // edits to the preference are intentionally ignored by this effect.
+  //
+  // The cast is defensive: a malformed persisted value (e.g. an old
+  // panel key that was since renamed) falls through to `command` via
+  // the `NAV_SECTION_KEYS.has(panel)` guard. Without the guard, an
+  // unknown string would land in `setActiveSection` and Sidebar would
+  // render the empty-state (no section header highlights).
+  //
+  // `react-hooks/exhaustive-deps` is disabled in the project's
+  // eslint.config.mjs so the empty deps array doesn't trigger a
+  // warning — the intent is "mount-only", not "respond to every
+  // preference change".
+  useEffect(() => {
+    const panel = preferences.defaultPanel
+    if (typeof panel === 'string' && panel.length > 0 && NAV_SECTION_KEYS.has(panel as NavSection)) {
+      setActiveSection(panel as NavSection)
+    }
   }, [])
 
   // Uptime counter
@@ -397,6 +452,7 @@ export default function Dashboard() {
                     books={snapshot.order_books}
                     onSelectMarket={handleSelectMarketForChart}
                     priceFlashes={priceFlashes}
+                    showPriceFlashes={preferences.showPriceFlashes}
                   />
                 </div>
                 <div style={{ gridArea: 'pos', minHeight: 0, overflow: 'hidden' }}>
@@ -406,6 +462,9 @@ export default function Dashboard() {
                     onSelectMarket={handleSelectPositionForChart}
                     onClosePosition={closePosition}
                     priceFlashes={priceFlashes}
+                    showUnrealizedPnl={preferences.showUnrealizedPnl}
+                    showPriceFlashes={preferences.showPriceFlashes}
+                    isRealtime={wsConnected}
                   />
                 </div>
                 <div style={{ gridArea: 'orders', minHeight: 0, overflow: 'hidden' }}>
@@ -413,6 +472,7 @@ export default function Dashboard() {
                     orders={snapshot.open_orders}
                     onCancel={cancelOrder}
                     onCancelAll={handleOpenCancelAllDialog}
+                    isRealtime={wsConnected}
                   />
                 </div>
                 <div style={{ gridArea: 'events', minHeight: 0, overflow: 'hidden' }}>
@@ -445,6 +505,7 @@ export default function Dashboard() {
                   books={snapshot.order_books}
                   onSelectMarket={handleSelectMarketForChart}
                   priceFlashes={priceFlashes}
+                  showPriceFlashes={preferences.showPriceFlashes}
                 />
               </div>
               </PanelErrorBoundary>
@@ -472,6 +533,9 @@ export default function Dashboard() {
                   onSelectMarket={handleSelectPositionForChart}
                   onClosePosition={closePosition}
                   priceFlashes={priceFlashes}
+                  showUnrealizedPnl={preferences.showUnrealizedPnl}
+                  showPriceFlashes={preferences.showPriceFlashes}
+                  isRealtime={wsConnected}
                 />
               </div>
               </PanelErrorBoundary>
@@ -485,6 +549,7 @@ export default function Dashboard() {
                   orders={snapshot.open_orders}
                   onCancel={cancelOrder}
                   onCancelAll={handleOpenCancelAllDialog}
+                  isRealtime={wsConnected}
                 />
               </div>
               </PanelErrorBoundary>

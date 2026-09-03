@@ -1,9 +1,25 @@
 // components/AnalyticsPanel.tsx — Institutional Performance Analytics
+//
+// W15-5 — Migrated from a self-managed 4-second REST polling loop to
+// the hybrid `useRealtimeData` hook. The panel now:
+//   1. REST-prefetches /api/analytics on mount.
+//   2. Subscribes to the `metrics` WS channel for live push updates.
+//      Note: the `metrics` channel pushes the full BotSnapshot, whose
+//      shape doesn't match the Analytics object the panel renders. To
+//      avoid clobbering the typed state with mismatched data, the hook
+//      is given a `validate` predicate that drops any payload missing
+//      the `equity` field. When the backend eventually pushes Analytics
+//      objects over the metrics channel, the validator will accept them.
+//   3. Falls back to polling /api/analytics every 10s when the WS isn't
+//      connected.
+//   4. Renders a "● Live" / "⟳ Polling" badge so the trader can tell at
+//      a glance whether the KPIs are real-time or lagged.
 'use client'
 
-import { useEffect, useState, useCallback, useRef, memo } from 'react'
-import { getApiUrl, apiFetch } from '@/lib/api'
+import { memo } from 'react'
 import { fmtUsd, fmtPnl, fmtPct } from '@/lib/design-tokens'
+import { useRealtimeData } from '@/hooks/useRealtimeData'
+import { Badge } from '@/components/ui/badge'
 
 interface Analytics {
   equity: number
@@ -43,6 +59,18 @@ const STRATEGY_LABELS: Record<string, string> = {
   ml_random_forest_quant: 'RF Quant Ensemble',
 }
 
+// W15-5 — type guard for the metrics WS channel. The channel is
+// specified by the task as `metrics`, whose canonical payload is a
+// BotSnapshot (mode / kill_switch / order_books / etc.) — that's NOT
+// the Analytics shape this panel renders. We accept only payloads
+// that look like Analytics (have the `equity` numeric field); the
+// REST polling continues to drive the displayed KPIs in the meantime.
+function isAnalyticsPayload(d: unknown): boolean {
+  if (!d || typeof d !== 'object') return false
+  const obj = d as Record<string, unknown>
+  return typeof obj.equity === 'number' && typeof obj.win_rate === 'number'
+}
+
 // W9-6 — wrapped in React.memo. The component takes no props, so React.memo
 // with default shallow compare would never re-render. That's incorrect
 // here: the panel self-polls every 4s and updates its own state. React.memo
@@ -53,60 +81,19 @@ const STRATEGY_LABELS: Record<string, string> = {
 // parent-driven re-renders. Internal state updates (data/loading) still
 // trigger re-renders normally.
 function AnalyticsPanel() {
-  const [data, setData] = useState<Analytics | null>(null)
-  const [loading, setLoading] = useState(true)
+  // W15-5 — hybrid REST + WS subscription. Replaces the previous 4s
+  // self-managed setInterval + visibilitychange listener (the
+  // useRealtimeData hook handles both concerns generically).
+  const { data, isLoading, isRealtime } = useRealtimeData<Analytics>(
+    '/api/analytics',
+    {
+      wsChannel: 'metrics',
+      pollInterval: 10000, // was 4s; relaxed to 10s with WS live updates
+      validate: isAnalyticsPayload,
+    },
+  )
 
-  // W9-6 — useCallback for the fetcher so the polling effect can list it
-  // as a stable dependency (effect only re-runs on mount). The fetcher
-  // references no closures except `setData`/`setLoading` which are stable.
-  const fetchAnalytics = useCallback(async () => {
-    try {
-      const apiUrl = getApiUrl()
-      const res = await apiFetch(`${apiUrl}/api/analytics`)
-      if (res.ok) {
-        setData(await res.json())
-      }
-    } catch {
-    } finally {
-      setLoading(false)
-    }
-  }, [])
-
-  // W9-6 — pause polling when the tab is hidden to avoid burning API
-  // quota and CPU on background tabs. Resumes immediately on visibility.
-  // The ref holds the current interval id; visibilitychange clears it
-  // and restarts it when the tab becomes visible again.
-  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
-
-  useEffect(() => {
-    const start = () => {
-      // immediate first fetch on start (covers both initial mount + resume)
-      fetchAnalytics()
-      if (intervalRef.current) clearInterval(intervalRef.current)
-      intervalRef.current = setInterval(fetchAnalytics, 4000)
-    }
-    const stop = () => {
-      if (intervalRef.current) {
-        clearInterval(intervalRef.current)
-        intervalRef.current = null
-      }
-    }
-    const onVis = () => {
-      if (document.hidden) {
-        stop()
-      } else {
-        start()
-      }
-    }
-    start()
-    document.addEventListener('visibilitychange', onVis)
-    return () => {
-      stop()
-      document.removeEventListener('visibilitychange', onVis)
-    }
-  }, [fetchAnalytics])
-
-  if (loading && !data) {
+  if (isLoading && !data) {
     return (
       <div className="card p-3 flex items-center justify-center text-xs text-[#7e8aaa]">
         <span className="spinner mr-2" aria-hidden="true" />
@@ -146,6 +133,13 @@ function AnalyticsPanel() {
           <span className="badge badge-amber text-[9.5px]">
             {data.mode?.toUpperCase() || 'PAPER'}
           </span>
+          {/* W15-5 — Live / Polling badge. Reflects the underlying
+              useRealtimeData transport state. */}
+          {isRealtime ? (
+            <Badge variant="success" className="text-[9.5px] py-0.5">● Live</Badge>
+          ) : (
+            <Badge variant="warning" className="text-[9.5px] py-0.5">⟳ Polling</Badge>
+          )}
         </div>
         <div className="flex items-center gap-2">
           <span className={`mono text-xs font-bold ${trendColor}`}>

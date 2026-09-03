@@ -109,13 +109,48 @@ const DEFAULT_SNAPSHOT: BotSnapshot = {
 
 export type ConnectionStatus = 'connecting' | 'connected' | 'disconnected' | 'error'
 
-export function useBot() {
+// W15-2 — Optional runtime config for useBot. Currently only the REST
+// polling cadence is configurable; `autoRefresh=false` is honoured at
+// the call-site (page.tsx) by simply not invoking the hook with a
+// polling interval. Both fields default to the prior hardcoded
+// values so existing call sites are unaffected.
+export interface UseBotOptions {
+  /** REST fallback polling interval, ms. Defaults to 2000. The
+   *  WebSocket connection is unaffected — this only gates the
+   *  setInterval fallback that fires when the WS is down or has
+   *  not yet connected. */
+  refreshIntervalMs?: number
+}
+
+export function useBot(opts?: UseBotOptions) {
+  // W15-2 — preferences-driven polling cadence. Defaults to 2s so
+  // every existing call site (and existing tests that don't pass
+  // options) keeps the historical behaviour.
+  const refreshIntervalMs = opts?.refreshIntervalMs ?? 2000
+  // W15-5 — heartbeat cadence when the WS is healthy. The WS pushes
+  // every state change, but a silent socket death (NAT timeout, server
+  // restart without a clean close frame) would leave us stuck without
+  // an `onclose` event. A heartbeat poll every 10s reconciles the
+  // snapshot via REST so we can detect such stalls. The interval fires
+  // every `Math.max(1, round(10000 / refreshIntervalMs))` ticks when
+  // the WS is up; when the WS is down, every tick fires (the original
+  // 2s polling fallback behaviour).
+  const heartbeatTicksPerCycle = Math.max(1, Math.round(10000 / refreshIntervalMs))
   const [snapshot, setSnapshot] = useState<BotSnapshot>(DEFAULT_SNAPSHOT)
   const [status, setStatus] = useState<ConnectionStatus>('connecting')
+  // W15-5 — exposed to callers so they can drive Live/Polling badges
+  // without having to track the WS lifecycle themselves. The ref is
+  // the source of truth (synchronously readable inside the WS event
+  // handlers); the state mirrors it for re-render purposes.
+  const [wsConnected, setWsConnected] = useState(false)
   const wsRef = useRef<WebSocket | null>(null)
   const retryRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const restPollRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const isWsConnectedRef = useRef(false)
+  // W15-5 — counts ticks since the last heartbeat fire. Reset to 0
+  // whenever the WS drops (so the first poll after a WS outage is
+  // immediate, not delayed by a partial heartbeat cycle).
+  const heartbeatTickRef = useRef(0)
 
   // U11 — Price-flash tracking state.
   // prevMidsRef holds the last-seen mid price per token_id so each incoming
@@ -218,6 +253,12 @@ export function useBot() {
 
       ws.onopen = () => {
         isWsConnectedRef.current = true
+        // W15-5 — mirror to state so consumers (page.tsx, ConnectionStatus)
+        // can re-render their Live/Polling badges when the transport flips.
+        setWsConnected(true)
+        // Reset the heartbeat counter so the first heartbeat fires 10s
+        // after a fresh connect rather than mid-cycle.
+        heartbeatTickRef.current = 0
         setStatus('connected')
       }
 
@@ -232,11 +273,17 @@ export function useBot() {
 
       ws.onerror = () => {
         isWsConnectedRef.current = false
+        setWsConnected(false)
         // Let fallback polling handle data
       }
 
       ws.onclose = () => {
         isWsConnectedRef.current = false
+        setWsConnected(false)
+        // Reset the heartbeat counter so the first REST poll after the
+        // WS drop fires immediately rather than waiting for the next
+        // heartbeat cycle.
+        heartbeatTickRef.current = 0
         if (retryRef.current) clearTimeout(retryRef.current)
         retryRef.current = setTimeout(() => {
           connectRef.current()
@@ -244,6 +291,7 @@ export function useBot() {
       }
     } catch {
       isWsConnectedRef.current = false
+      setWsConnected(false)
     }
   }, [])
 
@@ -256,12 +304,23 @@ export function useBot() {
     // 2. Start WebSocket connection
     connect()
 
-    // 3. Keep REST polling every 2s as a reliable fallback/refresh
+    // 3. Keep REST polling every `refreshIntervalMs` as a reliable fallback/refresh
+    //    (W15-2 — interval is configurable via preferences, default 2s).
+    //    W15-5 — when the WS is healthy, only fire a heartbeat every
+    //    `heartbeatTicksPerCycle` ticks (~10s) instead of every tick. This
+    //    catches silent socket deaths (NAT timeouts, server restarts
+    //    without a clean close frame) without re-introducing the 2s polling
+    //    load that the WS was supposed to eliminate. When the WS is down,
+    //    every tick fires (the original 2s polling fallback behaviour).
     restPollRef.current = setInterval(() => {
-      if (!isWsConnectedRef.current) {
+      if (isWsConnectedRef.current) {
+        heartbeatTickRef.current = (heartbeatTickRef.current + 1) % heartbeatTicksPerCycle
+        if (heartbeatTickRef.current !== 0) return
+        fetchRestSnapshot()
+      } else {
         fetchRestSnapshot()
       }
-    }, 2000)
+    }, refreshIntervalMs)
 
     return () => {
       if (wsRef.current) {
@@ -270,7 +329,7 @@ export function useBot() {
       if (retryRef.current) clearTimeout(retryRef.current)
       if (restPollRef.current) clearInterval(restPollRef.current)
     }
-  }, [connect, fetchRestSnapshot])
+  }, [connect, fetchRestSnapshot, refreshIntervalMs, heartbeatTicksPerCycle])
 
   // U11 — Derive price-flash directions on each new order_books snapshot.
   // For every token whose mid price moved relative to the prior snapshot,
@@ -415,14 +474,24 @@ export function useBot() {
         }
       } else {
         // Tab became visible — immediately fetch (in case state changed
-        // while hidden) and resume the 2s polling cadence.
+        // while hidden) and resume the polling cadence.
+        // W15-2 — uses the preferences-driven `refreshIntervalMs` so a
+        // trader who dialled the polling down to e.g. 5s sees that
+        // cadence preserved across visibility changes.
+        // W15-5 — same heartbeat logic as the mount-time interval: when
+        // the WS is healthy, only fire every Nth tick (~10s); when the
+        // WS is down, fire every tick.
         if (!restPollRef.current) {
           fetchRestSnapshot()
           restPollRef.current = setInterval(() => {
-            if (!isWsConnectedRef.current) {
+            if (isWsConnectedRef.current) {
+              heartbeatTickRef.current = (heartbeatTickRef.current + 1) % heartbeatTicksPerCycle
+              if (heartbeatTickRef.current !== 0) return
+              fetchRestSnapshot()
+            } else {
               fetchRestSnapshot()
             }
-          }, 2000)
+          }, refreshIntervalMs)
         }
       }
     }
@@ -430,11 +499,17 @@ export function useBot() {
     return () => {
       document.removeEventListener('visibilitychange', onVis)
     }
-  }, [fetchRestSnapshot])
+  }, [fetchRestSnapshot, refreshIntervalMs, heartbeatTicksPerCycle])
 
   return {
     snapshot,
     status,
+    // W15-5 — true when the WebSocket is open and pushing BotSnapshot
+    // updates. Callers use this to drive Live/Polling badges (e.g.
+    // page.tsx threads it into PositionsPanel / OrdersPanel as the
+    // `isRealtime` prop, so the badge reflects the bot's transport
+    // state rather than the panel's own WS subscription).
+    wsConnected,
     priceFlashes,
     activateKillSwitch,
     deactivateKillSwitch,

@@ -4,6 +4,7 @@
 import { useEffect, useState, useRef } from 'react'
 import { getApiUrl, apiFetch } from '@/lib/api'
 import { fmtPrice } from '@/lib/design-tokens'
+import MarketDepthChart from './charts/MarketDepthChart'
 
 interface DepthLevel {
   price: number
@@ -198,6 +199,31 @@ export default function DepthChartModal({ tokenId, slug, onClose, onOrderPlaced 
 
         {/* Content */}
         <div className="modal-body space-y-4">
+          {/* W15-1 — MarketDepthChart: a Recharts-powered cumulative-depth
+              visualization that complements the textual bid/ask ladder
+              below. The chart shows the stepped areas for bids (green,
+              left of mid) and asks (red, right of mid), with a dashed
+              mid-price reference line and a top-right spread chip.
+              Falls back gracefully to an empty-state message when no
+              depth data has loaded yet (first 2s fetch window). */}
+          <div className="bg-[#0e1015] p-2.5 rounded border border-[#1f2335]">
+            <div className="text-[10px] font-bold uppercase text-[#7e8aaa] mb-1.5 flex items-center justify-between">
+              <span>📊 Cumulative Market Depth</span>
+              <span className="text-[9px] mono text-[#3e4560]">
+                bids {data?.bids?.length ?? 0} · asks {data?.asks?.length ?? 0}
+              </span>
+            </div>
+            <MarketDepthChart
+              bids={data?.bids ?? []}
+              asks={data?.asks ?? []}
+              mid={data?.mid ?? null}
+              bestBid={data?.best_bid ?? null}
+              bestAsk={data?.best_ask ?? null}
+              spread={data?.spread ?? null}
+              height={220}
+            />
+          </div>
+
           {/* Depth Chart Columns */}
           <div className="grid grid-cols-2 gap-3 text-[11px]">
             {/* Bids */}

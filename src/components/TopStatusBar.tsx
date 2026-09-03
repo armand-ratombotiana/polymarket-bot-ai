@@ -13,6 +13,20 @@ import ThemeToggle from './ThemeToggle'
 // appearance + language controls cluster together; both are
 // "preference" controls rather than trading actions.
 import LocaleSwitcher from './LocaleSwitcher'
+// W15-5 — Live WS / polling transport pill. Sits next to the
+// connection status pill so the trader sees the full transport
+// stack at a glance: REST connection (bot API) + WebSocket (push
+// channel). Distinct from `ConnectionStatus` (the type alias from
+// useBot) — the imported `ConnectionStatus` identifier below refers
+// to the bot's transport state enum; the component is imported as
+// `ConnectionStatusPill` to avoid the name collision.
+import ConnectionStatusPill from './ConnectionStatus'
+// W15-2 — Full-screen Settings modal. Opened via the gear icon
+// (added below) so the trader can tune the polling cadence, sound,
+// privacy flags, etc. without leaving the workstation. Mirrors the
+// ShortcutsModal + StrategyConfigModal pattern (mounted by parent,
+// toggled via a status-bar icon).
+import SettingsModal from './SettingsModal'
 
 interface TopStatusBarProps {
   snapshot: BotSnapshot
@@ -73,6 +87,13 @@ export default function TopStatusBar({
 
   const [mlInfo, setMlInfo] = useState<{ brier: number; auc: number; status: string } | null>(null)
   const [latencyMs, setLatencyMs] = useState<number | null>(null)
+
+  // W15-2 — Local state for the full Settings modal. Rendered at the
+  // bottom of the header. The modal itself reads/writes the global
+  // preferences store (`usePreferences`) so opening it from any other
+  // entry point in the future (e.g. the command palette) just needs
+  // to flip `settingsOpen=true`.
+  const [settingsOpen, setSettingsOpen] = useState(false)
 
   useEffect(() => {
     const fetchMl = async () => {
@@ -169,6 +190,12 @@ export default function TopStatusBar({
         )}
 
         <StatusPill dotClass={connDotClass} label={connLabel} title={`Bot API Connection: ${connLabel}`} />
+
+        {/* W15-5 — WebSocket transport pill. Distinct from the REST
+            connection pill above: this surfaces whether the bot's
+            push channel is live (green dot) or whether the UI is
+            relying on REST polling (amber dot). Click for tooltip. */}
+        <ConnectionStatusPill />
 
         {/* Latency Telemetry */}
         {latencyMs !== null && status === 'connected' && (
@@ -272,6 +299,24 @@ export default function TopStatusBar({
           {nowUtc}
         </span>
 
+        {/* W15-2 — Full Settings modal trigger. Opens the comprehensive
+            preferences dialog (theme, polling cadence, sound, privacy, …).
+            Sits at the very start of the icon cluster so the trader's eye
+            lands on it first when scanning for "the gear". Uses 🛠 (hammer
+            + wrench) instead of ⚙️ to disambiguate from the existing
+            "⚙️ Config" button below (which is specifically the strategy &
+            risk configuration modal). */}
+        <button
+          onClick={() => setSettingsOpen(true)}
+          className="btn btn-ghost btn-sm p-1.5 text-xs text-[#7e8aaa] hover:text-white"
+          title="User preferences (theme, polling, sound, privacy)"
+          aria-label="Open user preferences"
+          aria-haspopup="dialog"
+          aria-expanded={settingsOpen}
+        >
+          <span aria-hidden="true">🛠</span>
+        </button>
+
         {/* W13-4 — Theme toggle (dark/light). Sits at the start of the
             icon cluster so it reads "appearance" → "language" → "audio"
             → "input help" → "config". The button itself renders null
@@ -344,6 +389,12 @@ export default function TopStatusBar({
           </button>
         )}
       </div>
+
+      {/* W15-2 — Full-screen Settings modal. Mounted at the bottom of the
+          header so it overlays the entire workstation when open. The modal
+          is lazy-rendered (only when settingsOpen=true) so the bundle
+          cost is paid on first open, not on initial workstation paint. */}
+      <SettingsModal isOpen={settingsOpen} onClose={() => setSettingsOpen(false)} />
     </header>
   )
 }

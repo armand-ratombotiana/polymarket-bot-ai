@@ -1267,4 +1267,276 @@ saturation contract.
 
 ---
 
+## 14. Wave 13–14 architectural additions
+
+Wave 13 and Wave 14 layered an enterprise operational surface onto the
+1.0 platform: a metrics pipeline, an external-API circuit breaker, an
+A/B testing framework, a feature-flags system, an i18n layer, and a
+frontend error-reporting pipeline. Each is documented below — none
+changes the core PREDICTION → SIGNAL → RISK → ORDER → FILL chain; they
+all wrap or observe it.
+
+### 14.1 WebSocket broadcast layer (`core/ws_broadcast.py`)
+
+```text
+                  ┌─────────────────────────────┐
+                  │  WebSocketBroadcastManager   │
+                  │  (module-level singleton)    │
+                  └──────────────┬──────────────┘
+                                 │  broadcast(channel, payload)
+       ┌─────────────────────────┼───────────────────────────┐
+       ▼                         ▼                           ▼
+  channel="book"        channel="orders"           channel="trades"
+  (book snapshots)      (order state changes)      (fill events)
+       │                         │                           │
+       └─────────────┬───────────┴────────────┬──────────────┘
+                     ▼                        ▼
+              channel="events"        channel="alerts"
+              (audit log entries)     (severity-tagged alerts)
+                     │
+                     ▼
+        ┌─────────────────────────────┐
+        │  Connected WS clients      │
+        │  (frontend useWebSocket()) │
+        └─────────────────────────────┘
+```text
+
+- **5 channels multiplexed** on a single `WS /ws` connection. Each
+  client subscribes to the union; the server broadcasts per-channel so
+  a single subscriber receives every channel without N round-trips.
+- **`broadcast(channel, payload)`** is the only public surface; any
+  subsystem (paper simulator, audit logger, alerting, decision ledger)
+  can push to all clients without holding a reference to the manager.
+- **Back-pressure**: if a client's send queue exceeds the soft cap, the
+  server drops the oldest queued messages for that client (rather than
+  blocking the broadcast call) and emits a `dropped_messages` gauge.
+- **Stats surface**: `GET /api/ws/stats` returns connected-client count,
+  per-channel message counts, and drop counts — surfaced on the
+  Observability panel.
+- **Frontend**: `useWebSocket` hook auto-reconnects with exponential
+  backoff; `useRealtimeData` is a REST-polling fallback that fires
+  when the WS connection is down.
+
+### 14.2 Circuit breaker pattern (`core/circuit_breaker.py`)
+
+A standalone circuit breaker wraps every outbound Polymarket / Gamma /
+CLOB call. Distinct from the per-trade strategy breaker in §11.3 —
+that one protects against a single bad trade; this one protects
+against a degraded upstream.
+
+```text
+                ┌───────────────┐
+                │  CLOSED       │  ← normal operation; requests pass through
+                └───────┬───────┘
+                        │  N consecutive failures
+                        ▼
+                ┌───────────────┐
+                │  OPEN          │  ← fast-fail; requests short-circuit with
+                │                │     a synthetic 503 (no upstream call made)
+                └───────┬───────┘
+                        │  cooldown_seconds elapsed
+                        ▼
+                ┌───────────────┐
+                │  HALF_OPEN     │  ← a single probe request is allowed through;
+                │                │     if it succeeds → CLOSED; if it fails → OPEN
+                └───────────────┘
+```text
+
+- **Three states** (CLOSED / OPEN / HALF_OPEN) with a configurable
+  failure threshold, cooldown, and probe window.
+- **State is shared** across all callers within the process via a
+  module-level singleton — a failing Polymarket CLOB call opens the
+  breaker for the next Gamma call too, because they share the upstream
+  network path.
+- **Surface**: `GET /api/circuit-breakers` returns the per-breaker
+  state (the breaker is keyed by upstream service name) — surfaced on
+  the System Health view.
+- **Tested**: `tests/test_circuit_breaker.py` (46 tests) covers every
+  state transition, concurrent access from multiple threads, and the
+  probe half-open contract.
+
+### 14.3 A/B testing framework (`ml/ab_testing.py`)
+
+```text
+        ┌─────────────────────────────┐
+        │  ExperimentManager (singleton) │
+        └──────────────┬──────────────┘
+                       │
+            ┌──────────┴───────────┐
+            ▼                      ▼
+   start_experiment()        evaluate_experiment()
+   (variant assignment)       (significance test)
+            │                      │
+            ▼                      ▼
+   ┌─────────────────┐   ┌──────────────────────┐
+   │  Variants        │   │  Metrics              │
+   │  • control        │   │  • Brier score delta  │
+   │  • challenger A   │   │  • ROC-AUC delta       │
+   │  • challenger B   │   │  • Sharpe delta        │
+   └─────────────────┘   └──────────────────────┘
+```text
+
+- **Multi-variant experiments** compare model variants, strategy
+  parameters, or capital-allocation curves against a control.
+- **Assignment** is deterministic per (experiment_id, subject_id) so
+  the same market always sees the same variant within an experiment.
+- **Significance tracking** uses Brier-score deltas + ROC-AUC deltas;
+  a variant is promoted when N consecutive evaluation windows show a
+  statistically significant improvement.
+- **Surface**: `GET /api/ab-test`, `POST /api/ab-test/start`,
+  `POST /api/ab-test/stop`, `GET /api/ab-test/evaluate`.
+- **Tested**: `tests/test_ab_testing.py` (30 tests) covers variant
+  assignment, evaluation, stop conditions, and concurrent access.
+
+### 14.4 Feature flags system (`core/feature_flags.py`)
+
+A runtime-toggleable flag system gates new functionality (advanced
+backtest, A/B testing, circuit breaker, etc.) so we can ship code paths
+dark and enable them per-deployment.
+
+- **13 default flags** declared in code: `circuit_breaker`,
+  `advanced_backtest`, `ab_testing`, `walk_forward_cv`,
+  `monte_carlo_backtest`, `prometheus_metrics`, `audit_log_viewer`,
+  `rate_limit_dashboard`, `frontend_error_reporting`, `user_preferences`,
+  `api_versioning`, `db_migrations`, `theme_switcher`.
+- **Runtime toggle** via `GET /api/flags`, `POST /api/flags/{key}`,
+  `POST /api/flags/{key}/reset` — flips the in-memory flag without a
+  restart.
+- **Frontend hook** `useFeatureFlags()` polls every 30s with visibility-
+  aware pause so a flag flip in production is reflected in the UI
+  within a minute.
+- **Default-deny**: unknown keys return `false`; a flag must be
+  explicitly declared to be `true`.
+- **Tested**: `tests/test_feature_flags.py` (21 tests).
+
+### 14.5 Prometheus metrics pipeline (`core/prometheus_metrics.py`)
+
+A `prometheus_client`-backed metrics surface exposes request counters,
+latency histograms, rate-limit-hit counters, and active WebSocket
+gauges in the Prometheus exposition format at `GET /metrics`.
+
+```text
+            ┌─────────────────────────────────────────┐
+            │  prometheus_client Registry (singleton)  │
+            └─────────────────────┬───────────────────┘
+                                  │
+       ┌──────────────────────────┼──────────────────────────┐
+       ▼                          ▼                          ▼
+  Counter                  Histogram                    Gauge
+  • requests_total         • request_duration_seconds  • active_ws_clients
+  • rate_limit_hits_total  • upstream_call_seconds     • open_orders
+  • client_errors_total    • db_query_seconds           • active_positions
+       │                          │                          │
+       └──────────┬───────────────┴──────────────────────────┘
+                  ▼
+       ┌────────────────────────────┐
+       │  GET /metrics               │  ← Prometheus exposition format
+       │  (no auth; /metrics is      │     (text/plain; version=0.0.4)
+       │   added to PUBLIC_PATHS)     │
+       └────────────────────────────┘
+                  │
+                  ▼
+       ┌────────────────────────────┐
+       │  Grafana dashboard         │  ← grafana/dashboard.json +
+       │  (provisioned datasource)  │    grafana/provisioning/{datasources,
+       │                            │    dashboards}/*.yml
+       └────────────────────────────┘
+```text
+
+- **3 metric types**: Counter (monotonic), Histogram (bucketed),
+  Gauge (live value).
+- **Cardinality discipline**: per-IP is intentionally NOT a label (would
+  blow up cardinality); the rate-limit tracker (§14.6 below) handles
+  the per-IP view in-memory.
+- **Middleware integration**: `request_logging_middleware` records
+  every request into the counter + histogram; the rate-limit handler
+  records hits into the rate-limit counter; the WS broadcast manager
+  updates the active-clients gauge on connect/disconnect.
+- **Grafana**: a single `docker-compose up` ships Grafana with the
+  datasource auto-provisioned (Prometheus at `http://prometheus:9090`)
+  and the dashboard auto-imported (p50/p95/p99 latency, error rate,
+  rate-limit hits per minute, active WS clients).
+- **Tested**: `tests/test_prometheus.py` (covers counter / histogram /
+  gauge emission + the `/metrics` endpoint shape).
+
+### 14.6 i18n layer (`src/i18n/` + `src/hooks/useTranslation.ts`)
+
+A bilingual (English + French) i18n surface powered by `next-intl`.
+
+```text
+       src/messages/
+       ├── en.json    ← 108 keys (nav, groups, common, status, positions, analytics)
+       └── fr.json    ← 108 keys (parity-tested via useTranslation.test.ts)
+              │
+              ▼
+       src/i18n/config.ts  ←  Locale type, getLocale(), setLocale() (SSR-safe)
+              │
+              ▼
+       src/i18n/request.ts ←  next-intl server config (pins to defaultLocale
+       │                       so SSR payload matches first client render)
+       ▼
+       src/hooks/useTranslation.ts  ←  useState + useEffect mount reconcile,
+                                       useCallback-memoised t(key),
+                                       changeLocale(locale) persists + flips
+       │
+       ▼
+       src/components/Sidebar.tsx       ←  t(group.labelKey) + t(item.labelKey)
+       src/components/TopStatusBar.tsx  ←  <LocaleSwitcher /> (EN / FR select)
+```text
+
+- **Catalog parity test**: `useTranslation.test.ts` asserts `en.json`
+  and `fr.json` expose IDENTICAL key sets so a half-finished
+  translation never leaks a raw key into the UI.
+- **SSR-safe**: `getLocale()` returns `defaultLocale` when `window` is
+  undefined; `setLocale()` is a no-op on the server. Stale persisted
+  values (e.g. a removed locale) fall back to `defaultLocale`.
+- **Referential stability**: the `t()` function is `useCallback`-memoised
+  per-locale so memoised consumers don't re-render on parent re-renders.
+- **Sidebar integration**: every NavItem and NavGroup carries a
+  `labelKey` resolved through `t()`; both the visible label AND the
+  collapsed-mode tooltip use the translated string. Kbd shortcuts,
+  icons, the collapse toggle, the mobile drawer, `aria-current` logic,
+  and sr-only hints are untouched.
+
+### 14.7 Frontend error-reporting pipeline (`src/lib/errorReporter.ts`)
+
+A Sentry-like client-side crash reporter that posts batches to the
+backend so a renderer crash in a user's browser is visible in the
+backend log within seconds.
+
+```text
+       Browser                                    Backend
+       ┌──────────────────────────────┐           ┌─────────────────────────────┐
+       │  installErrorHandlers()      │           │  POST /api/client-errors    │
+       │  • window 'error'            │           │  (PUBLIC_PATHS — auth-free   │
+       │  • window 'unhandledrejection'│  batch   │   so a crashed client can   │
+       │  • window 'beforeunload' →  │  POST     │   still report)              │
+       │    flush()                   │ ────────► │                              │
+       │                              │           │  ClientErrorBatch model      │
+       │  captureError(err, ctx)      │           │  + dedicated client_errors   │
+       │  captureMessage(msg, level)  │           │    logger                    │
+       │  flush()  (5s coalescing)    │           │                              │
+       │  getErrorStats()  (sessionId,│          │  → structured JSON log       │
+       │   queueLength, etc.)         │           │  → (future) Sentry export    │
+       └──────────────────────────────┘           └─────────────────────────────┘
+```text
+
+- **5 exports**: `captureError`, `captureMessage`, `flush`,
+  `installErrorHandlers`, `getErrorStats` (+ `_resetForTests`).
+- **ErrorBoundary integration**: `ErrorBoundary.componentDidCatch`
+  forwards the error + componentStack context to `captureError` so
+  every panel-level boundary reports its crashes.
+- **Batching**: errors are queued and flushed in a 5s coalescing window
+  (or immediately on `beforeunload`) so a crash storm doesn't DDoS the
+  backend.
+- **Deduplication**: identical errors (same message + same stack hash)
+  within a flush window are coalesced into a single batch entry with a
+  `count` field.
+- **Auth-free endpoint**: `/api/client-errors` is in `PUBLIC_PATHS` so
+  a client whose auth token expired can still report its crash.
+- **Tested**: `src/lib/errorReporter.test.ts` (24 tests) covers every
+  export + the install + end-to-end round-trip.
+
+---
+
 *End of ARCHITECTURE.md.*
