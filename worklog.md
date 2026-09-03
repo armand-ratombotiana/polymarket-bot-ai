@@ -18013,3 +18013,1000 @@ CUMULATIVE ACROSS ALL 7 WAVES:
 - 80% win rate, +$0.19 expectancy, -$0.03 avg loss
 - All God Mode sections addressed
 - ALL work pushed to GitHub
+
+---
+Task ID: W8-3
+Agent: full-stack-developer
+Task: Create ExecutionQualityPanel exposing slippage/latency/realized edge metrics
+
+Work Log:
+- Read `/home/z/my-project/worklog.md` (tail) to recover the project context —
+  polymarket-bot FastAPI service on port 8080, design system in
+  `globals.css`, `apiFetch` helper auto-appends `XTransformPort=8080` for
+  `/api/*` routes that are not `/api/bot`.
+- Read `mini-services/polymarket-bot/core/execution_quality.py` end-to-end.
+  Confirmed the public surface: `record_execution(order, fill_price,
+  signal_price=None)` (fire-and-forget) and `get_execution_stats(
+  time_window_seconds=None, strategy=None) -> dict` returning
+  `{count, avg_slippage_bps, median_slippage_bps, p95_slippage_bps,
+  worst_slippage_bps, avg_latency_ms, avg_realized_edge,
+  total_realized_edge, by_side:{BUY,SELL}}`. Confirmed
+  `register_routes(app)` mounts `GET /api/execution-quality` accepting
+  `time_window_seconds`, `strategy`, `limit` (1..500) query params and
+  returning `{stats: <above>, recent_fills: [rows]}` where each row is
+  a `dict(sqlite3.Row)` of the full execution_quality schema (id,
+  timestamp epoch seconds, order_id, decision_id, token_id, strategy,
+  side, signal_price, decision_price, submitted_price, best_bid,
+  best_ask, expected_fill, actual_fill, spread, slippage (signed $),
+  slippage_bps (signed bps — positive = adverse), latency_ms,
+  realized_edge (signed $), paper 0/1, data_json).
+- Read `src/components/TradesPanel.tsx` as the design pattern reference.
+  Mirrored its visual language: dark `#13161e` card bg, `#1f2335`
+  borders, `card`/`card-header`/`card-title` CSS classes, `.badge`
+  variants, `.data-table` with sticky header, `.empty-state` empty
+  state, `.kpi-card`/`.kpi-label`/`.kpi-value`/`.kpi-sub` KPI cards,
+  `.skeleton-card`/`.skeleton-line`/`.skeleton-line-lg` loading
+  skeleton, `.banner-warning` for inline errors, mono font + tabular
+  numerals, hover:bg-blue-500/10 row hover, side pill (green BUY / red
+  SELL).
+- Read `src/lib/api.ts` — confirmed `getApiUrl()` returns `''`
+  (relative paths only) and `apiFetch(input, init)` injects the
+  `Authorization: Bearer <token>` header and delegates to the
+  `installFetchWrapper`-patched `window.fetch` which auto-appends
+  `?XTransformPort=8080` for `/api/*` routes outside `/api/bot`.
+- Read `src/lib/design-tokens.ts` for `fmtUsd`, `fmtPnl`, `fmtPrice`,
+  `fmtAge` helpers. Added local `fmtBps` (+/−, 1dp) and `fmtMs`
+  helpers for the slippage/latency columns.
+- Read `src/app/globals.css` (lines 1–600) to inventory the available
+  design tokens, classes (`.card`, `.kpi-card`, `.data-table`,
+  `.badge`, `.skeleton-*`, `.empty-state`, `.banner-warning`) and
+  confirmed the project's color system: green `#22c55e`/`#4ade80`,
+  amber `#f59e0b`/`#fbbf24`, red `#ef4444`/`#f87171`, cyan
+  `#06b6d4`/`#22d3ee`, blue `#3b82f6`/`#60a5fa`.
+- Wrote `src/components/ExecutionQualityPanel.tsx` (751 lines,
+  `'use client'`, default-exported `ExecutionQualityPanel`):
+  - **TypeScript interfaces** — exported `ExecutionQualityFill` and
+    `ExecutionQualityStats` types mirroring the SQLite schema +
+    `get_execution_stats()` return shape; internal
+    `ExecutionQualityResponse` envelope type.
+  - **API plumbing** — single `fetchData` callback hitting
+    `/api/execution-quality?time_window_seconds=<range>&limit=200`
+    via `apiFetch`. Two `useEffect`s: one for initial + range-change
+    fetch (re-runs when `timeRange` changes), one for the 15 s
+    `setInterval` polling loop. Polling callback short-circuits when
+    `document.hidden` (pause on tab-hidden); a `visibilitychange`
+    listener fires an immediate refresh when the tab becomes visible
+    again so the panel snaps to fresh data on focus.
+  - **Loading skeleton** — full-panel shimmer skeleton (`skeleton-card`
+    + `skeleton-line`/`skeleton-line-lg`) approximating the KPI strip,
+    charts row, and table shape so the layout doesn't jump on first
+    paint. Only shown on first load (`loading && !data`).
+  - **Error state** — hard error (no cached data) shows a centered
+    AlertTriangle + the raw error message + a Retry button. Soft
+    error (refresh failed but cached data present) shows a
+    `.banner-warning` above the KPI strip and continues rendering the
+    stale data.
+  - **KPI strip** — 5 `kpi-card`s (responsive 2-col mobile / 5-col
+    desktop): Avg Slippage (bps, colour-coded green/amber/red by
+    magnitude with median + p95 sub-line), Median Latency (ms,
+    client-computed from `recent_fills` since backend only exposes
+    `avg_latency_ms`; avg sub-line), Realized Edge (total $ signed,
+    green/red with avg/fill sub-line), Fill Rate (% of recent fills
+    with valid BUY/SELL side + non-zero actual_fill), Total Fills
+    (count with worst-slippage sub-line). Each KPI has a Lucide icon.
+  - **Slippage distribution histogram** — 5 buckets (0–5, 5–10, 10–20,
+    20–50, 50+ bps) computed client-side via `computeHistogram(fills)`
+    using `abs(slippage_bps)` for bucketing (signed slippage can be
+    favourable or adverse — magnitude is the bucketing key). Each
+    bucket row: label · bar (green→amber→red gradient by severity,
+    width = count/maxCount·100 %, min 4 % width when count > 0 so a
+    single fill is visible) · count · share % · qualitative label
+    (Excellent / Good / Acceptable / Poor / Severe). Hidden on
+    mobile-extra-small (the `hidden sm:inline` qualitative label).
+  - **Latency timeline sparkline** — pure inline SVG (300×70
+    viewBox, `preserveAspectRatio="none"` to stretch width). Takes the
+    last 40 fills sorted oldest→newest, computes min/max, scales y,
+    draws a cyan stroke path + a cyan→transparent gradient area fill
+    + a final-fill dot. Three dashed grid lines for visual rhythm.
+    Footer shows min / current / max ms. Requires ≥2 fills to render.
+  - **Worst executions table** — top 5 by signed `slippage_bps`
+    descending (most adverse first), in a red-tinted container
+    (`border-red-500/25`, `bg-red-500/5` rows). Columns: Token/Strategy,
+    Side, Intended (expected_fill), Fill (actual_fill), Slippage (bps,
+    colour-coded), Latency (ms), Edge ($, signed), Age.
+  - **Per-fill quality audit table** — full bounded `recent_fills`
+    list (up to 200 rows) inside a `table-container` flex-1 with
+    `overflow-auto` so it scrolls independently inside the panel.
+    Columns: Token/Strategy, Side (BUY green / SELL red pill),
+    Intended price, Fill price, Slippage (badge — green <5 bps /
+    amber 5–20 bps / red >20 bps), Latency (ms), Realized Edge
+    (signed $, with TrendingUp/Down Lucide icon for positive/negative),
+    Mode (PAPER amber / LIVE red pill), Age. Horizontally scrollable
+    on mobile (`overflow-x-auto scrollbar-thin` on the worst-table;
+    the audit table uses `overflow-auto`).
+  - **Time-range filter** — shadcn `Select` component (only place
+    shadcn ui is used — Radix-based, styled to match the dark theme
+    via class overrides on `SelectTrigger` and `SelectContent`).
+    Three options: 1 Hour, 24 Hours, 7 Days → `time_window_seconds`
+    3600 / 86400 / 604800. Default `24h`. Changing the value triggers
+    the range-change `useEffect` which re-fetches immediately.
+  - **Auto-refresh** — 15 s `setInterval`, paused when `document.hidden`.
+    Header shows a RefreshCw icon (spinning when refreshing) + last-
+    updated age (`fmtAge`). Manual "Refresh" button + the Select share
+    the header row.
+- Ran `bun run lint` → clean (no ESLint errors, no Next.js rule
+  violations). Verified the dev server log (`tail dev.log`) — no
+  compile errors on the new component, `/` route still renders 200.
+- Did NOT modify any other files (no `page.tsx` wiring, no
+  `globals.css` edits, no API changes) per the task constraint.
+
+Stage Summary:
+- Created /home/z/my-project/src/components/ExecutionQualityPanel.tsx
+  (751 lines, 'use client', default-exported, TypeScript interfaces
+  exported as `ExecutionQualityFill` / `ExecutionQualityStats`).
+- Backend endpoints used:
+  - GET /api/execution-quality?time_window_seconds=<float>&limit=<int>
+    (registered by `core/execution_quality.py::register_routes(app)`
+    on the polymarket-bot FastAPI service, port 8080 via the Caddy
+    gateway `XTransformPort` query param auto-injected by `apiFetch`).
+- Key features:
+  1. Execution quality table — per-fill Token/Side/Intended/Fill/
+     Slippage(bps)/Latency(ms)/Realized-Edge($)/Mode/Age with
+     slippage colour-coded <5 bps green / 5–20 bps amber / >20 bps
+     red (badge variant) and realized-edge signed green/red with
+     TrendingUp/Down icon.
+  2. Aggregate KPIs — 5-card strip: Avg Slippage (bps, with median +
+     p95 sub), Median Latency (ms, client-computed, with avg sub),
+     Realized Edge total $ (signed, with avg/fill sub), Fill Rate %
+     (valid-side fills / total sampled), Total Fills (with worst
+     slippage sub).
+  3. Slippage distribution histogram — 5 CSS bars (0–5, 5–10, 10–20,
+     20–50, 50+ bps) with green→amber→red gradient, count, share %,
+     qualitative severity label.
+  4. Latency timeline — inline SVG sparkline (cyan stroke + gradient
+     area fill + final-fill dot, min/now/max footer) over last 40
+     fills.
+  5. Worst executions — top 5 by adverse slippage in a red-tinted
+     container with red-tinted row backgrounds.
+  6. Time-range filter — 1h / 24h / 7d shadcn Select, default 24h,
+     triggers immediate re-fetch on change.
+  7. Auto-refresh — 15 s polling, paused when `document.hidden`,
+     resumes immediately on `visibilitychange` to visible; manual
+     Refresh button + age indicator in the header.
+- Loading skeleton (KPI strip + charts + table shape, shimmer
+  animation) and two-tier error handling (hard error → centered
+  retry; soft error → inline banner over cached data).
+- Visual style matches TradesPanel: `.card`/`.card-header`/`.card-title`,
+  `.badge` variants, `.data-table` with sticky header + row hover
+  (`hover:bg-blue-500/10`), `.kpi-card`/`.kpi-label`/`.kpi-value`/
+  `.kpi-sub`, `.skeleton-card`/`.skeleton-line*`, `.empty-state`,
+  `.banner-warning`, `.scrollbar-thin` custom scrollbar, dark
+  `#13161e` card bg + `#1f2335` borders, mono font + tabular nums.
+- Responsive: KPI grid 2-col mobile / 5-col desktop; charts stack to
+  1-col on `<lg`; worst-table + audit-table use `overflow-x-auto` for
+  horizontal scroll on narrow viewports; qualitative histogram labels
+  hidden below `sm` breakpoint.
+- Accessibility: semantic `<table>`/`<thead>`/`<tbody>`, `scope="col"`
+  on headers, `role="table"` + `aria-label` on tables, `role="img"`
+  + `aria-label` on histogram + sparkline SVG, `aria-label` on
+  refresh button + select trigger, `aria-hidden="true"` on all
+  decorative Lucide icons, `role="alert"` on the warning banner,
+  focus-visible outlines inherited from globals.css.
+
+---
+Task ID: W8-4
+Agent: full-stack-developer
+Task: Create ClosedPositionsPanel exposing closed positions ledger
+
+Work Log:
+- Read tail of `worklog.md` (Wave 7 complete: 340 tests passing, 77 routes, balance $111.72)
+- Read `mini-services/polymarket-bot/core/closed_positions.py` — confirmed schema
+  (timestamp, position_id, token_id, strategy, entry_price, exit_price, shares,
+  pnl, holding_seconds, model_version, decision_id, direction, confidence,
+  predicted_edge, p_yes, market_mid, liquidity, metadata_json) and the two
+  endpoints registered in `api/server.py:2142`:
+    GET /api/positions/closed?limit=...&strategy=...  → { count, positions[] }
+    GET /api/positions/closed/stats                   → aggregate KPI dict
+- Read `src/components/PositionsPanel.tsx` as the visual-language reference
+  (dark card `bg-[#13161e]` / `border-[#1f2335]`, KPI badge strip, `data-table`,
+  `scrollbar-thin` overflow container, empty-state, CSV export).
+- Read `src/lib/api.ts` — used `apiFetch` which auto-injects Authorization
+  Bearer token and appends `XTransformPort=8080` query param when calling
+  non-`/api/bot` routes via the Caddy gateway.
+- Read `src/app/globals.css` for design tokens — confirmed `.badge-green`
+  (not `badge-emerald`) and the dark palette.
+- Created `src/components/ClosedPositionsPanel.tsx` (997 lines, `'use client'`,
+  default export, no props). Wrote a context note to
+  `agent-ctx/W8-4-full-stack-developer.md` summarising the schema and inference
+  ladder so downstream agents can reuse the analysis.
+- Implementation details:
+  - Exit reason inferred via ladder: `data.exit_reason` → `data.reason` →
+    `data.close_reason` → strategy-name pattern (`_sl_`/`_tp_`/`settle`) →
+    MANUAL / UNKNOWN. Color-coded badges: SL=red, TP=emerald, MANUAL=amber,
+    SETTLEMENT=sky-blue.
+  - Side inferred from `data.side` then `direction` (BUY→LONG YES, SELL→SHORT NO).
+  - P&L % = pnl / (entry_price * shares) * 100 with divide-by-zero guard.
+  - Hold time formatted as `Xs` / `Xm Ys` / `Xh Ym` / `Xd Yh`.
+  - KPI strip: Total Realized, Win Rate (with W/L count), Avg Win, Avg Loss,
+    Profit Factor (∞ when no losses), Avg Hold + total closed count. Falls
+    back to client-side computation when `stats` payload is missing.
+  - Exit-reason donut: pure SVG `<circle>` stroked segments (no chart lib) with
+    centre count + legend showing per-reason count, %, and P&L.
+  - Cumulative P&L timeline: pure SVG area+line chart, oldest→newest sort,
+    zero-line, green/red stroke based on final cumulative sign, fills with
+    translucent emerald/red, date range footer.
+  - Filters: free-text search (slug / token_id / strategy / position_id),
+    Side pill (ALL/LONG/SHORT), Outcome pill (ALL/WIN/LOSS/BREAKEVEN),
+    Exit-reason `<select>` (incl. UNKNOWN), Sort `<select>` (Date/P&L/Hold/Size).
+  - Row expansion: clicking a row toggles a `<tr>` with a 4-column grid of
+    14 detail fields (position_id, token_id, strategy, model_version,
+    decision_id, direction, confidence, predicted_edge, p_yes, market_mid,
+    liquidity, closed-at ISO, hold seconds, slippage with adverse/favourable
+    tag, exit reason badge) + a `<details>` block exposing the raw
+    `metadata_json` payload.
+  - Auto-refresh: 30s `setInterval`, paused via `visibilitychange` listener
+    when `document.hidden`. In-flight requests aborted via `AbortController`
+    on each new poll cycle to avoid races.
+  - Loading skeleton: 6 KPI placeholders + chart placeholder + 6 row
+    placeholders with `animate-pulse`. Error state: alert triangle + retry
+    button. Empty state: Inbox icon + context-aware message.
+  - CSV export: 21-column header, escapes double-quotes in slug.
+- Ran `bunx eslint src/components/ClosedPositionsPanel.tsx` → exit 0 (clean).
+- Ran `bunx tsc --noEmit` → no errors specific to the new file (only
+  pre-existing errors in `examples/`, `skills/`, and `src/app/api/bot/route.ts`
+  which this task did not touch).
+- Verified the dev server log has no errors after the file was saved.
+
+Stage Summary:
+- Created /home/z/my-project/src/components/ClosedPositionsPanel.tsx (997 lines)
+- Backend endpoints used:
+  - GET /api/positions/closed?limit=500  (closed_positions.py register_routes)
+  - GET /api/positions/closed/stats      (closed_positions.py register_routes)
+- Key features:
+  - Closed positions table (token, market, side LONG YES/SHORT NO, entry/exit
+    price, size, realized P&L $ + %, hold time, exit reason badge, closed-at)
+  - 6-card summary KPI strip (total realized, win rate, avg win, avg loss,
+    profit factor, avg hold) — uses backend `/stats` when available
+  - SVG exit-reason donut (SL/TP/MANUAL/SETTLEMENT) with counts + P&L per reason
+  - SVG cumulative realized P&L timeline area chart
+  - Filters: text search, side, outcome (win/loss/breakeven), exit reason
+  - Sort: date, P&L, hold time, size
+  - Row expansion: 14 detail fields + raw metadata_json viewer
+  - Auto-refresh 30s, paused when tab hidden
+  - Loading skeleton + error state with retry + empty state
+  - CSV export of filtered set
+  - Matches PositionsPanel visual language (dark card, KPI strip, data-table)
+  - Lucide icons, color-coded P&L (emerald/red), exit-reason badge palette
+
+---
+Task ID: W8-7
+Agent: full-stack-developer
+Task: Create LiveSafetyGatePanel exposing 10-check staged validation
+
+Work Log:
+- Read `/home/z/my-project/worklog.md` (tail) for prior-wave context; confirmed W8-7 is greenfield UI work and no prior agent has touched `src/components/LiveSafetyGatePanel.tsx`.
+- Read `/home/z/my-project/mini-services/polymarket-bot/core/live_safety_gate.py` end-to-end (832 lines). Mapped all 10 staged checks (`paper_mode_24h`, `positive_expectancy`, `max_drawdown_under_2usd`, `win_rate_over_50pct`, `min_20_closed_trades`, `ml_trained_on_real_data`, `drift_healthy`, `kill_switch_tested`, `risk_limits_verified`, `api_credentials_configured`), the `check_live_readiness()` return shape (`{passed, checks, passed_count, total_count, blocking_checks, checked_at}`), the per-check payload (`{id, name, passed, severity, threshold, value, detail}`), and the §82 constants (24h paper soak, 20 closed trades, 50% win-rate, $2 drawdown cap).
+- Verified `register_routes(app)` in `core/live_safety_gate.py` exposes exactly two endpoints: `GET /api/live/readiness` (re-runs all 10 checks) and `POST /api/live/enable` (refuses with HTTP 409 + blocking-check list if any check fails; flips in-memory mode flags + logs audit event on success). No `/api/live/disable` endpoint exists — the de-facto "close the gate" action is the kill-switch (`POST /api/kill-switch/activate`) which is logged in the audit trail as `kill_switch_activated`.
+- Read `/home/z/my-project/src/components/RiskStatusPanel.tsx` as the design-pattern reference; mirrored its card chrome (`bg-[#13161e] border border-[#1f2335]`, `card-header p-3`, `badge-{green,red,amber,cyan,dim}`, `kpi-card`, mono token typography) so the new panel is visually consistent with the existing institutional-risk strip.
+- Read `/home/z/my-project/src/lib/api.ts` — confirmed `apiFetch` auto-injects the `XTransformPort=8080` query param and the bearer token, and that I should call it with relative paths only (no `getApiUrl()` prefix needed since `withGatewayPort` only rewrites `/api/*` URLs).
+- Read `/home/z/my-project/src/app/globals.css` for the CSS design system: confirmed `--bg-card=#13161e`, `--border=#1f2335`, `--color-{green,red,amber,cyan}-{fg,bg,bd}` tokens, `.badge-*`, `.btn-*`, `.kpi-card`, `.spinner`, `.scrollbar-thin` classes all exist and are safe to compose with Tailwind utilities.
+- Authored `/home/z/my-project/src/components/LiveSafetyGatePanel.tsx` (≈620 lines) with these features:
+  1. **10-check status grid** — 2-col grid on `sm:`, 1-col on mobile; each `CheckCard` shows the staged index badge (1–10), check name, status badge (PASS/FAIL/WARN/PEND), id, threshold, detail; clicking expands a detail drawer showing the threshold, full detail, and pretty-printed measured `value` JSON. PASS=green, FAIL=red, WARNING=amber, PENDING=gray. WARNING state auto-derived from `detail.startsWith("check raised:")` — distinguishes a broken dependency from a genuine threshold miss (backend records exception-raised checks as failed-with-prefix).
+  2. **Overall gate banner** — emerald when `passed && !kill_switch`, red otherwise; shows GATE OPEN/CLOSED headline, mode label, kill-switch pill, last-eval timestamp + age. Pulsing visual prominence.
+  3. **Staged validation progress bar** — shadcn `Progress` with cyan→emerald gradient fill, percentage label, and PASS/FAIL/WARN/PEND legend counts. `Expand all` / `Collapse all` controls.
+  4. **Gate control** — three buttons in the header:
+     - **Run all checks** → `GET /api/live/readiness` (re-evaluates all 10 server-side); spinner during fetch.
+     - **Force open gate** → `AlertDialog` with **double confirmation**: step 1 explains the danger + side-effects; step 2 requires the operator to type `I UNDERSTAND THE RISKS` exactly (case-sensitive) into an `Input`. Confirmation phrase is matched before the POST fires. Backend 409s are surfaced inline (blocking-check list shown in red).
+     - **Force close gate** → `AlertDialog` single confirmation that activates the kill switch via `POST /api/kill-switch/activate` (the documented "close the gate" mechanism; no `/api/live/disable` endpoint exists).
+  5. **Check history timeline** — fetches `GET /api/audit/logs?limit=40&category=system`, filters to `{live_trading_enabled, kill_switch_activated, kill_switch_deactivated, observation_mode_enabled, observation_mode_disabled}` events, and renders the most recent 12 as a vertical timeline with LOCK/UNLOCK icons colour-coded by transition direction and audit-trail details.
+  6. **Auto-refresh** — `setInterval(fetchAll, 10000)` with `document.visibilitychange` listener that pauses polling when the tab is hidden and re-polls immediately on re-focus. In-flight ref guard prevents overlapping fetches.
+  7. **Loading + error states** — `CheckSkeleton` (10 pulsing placeholders) + an error card with inline `Retry` button + the raw error text in a scrollable `<pre>`.
+- Lucide icons used: `Shield`, `ShieldCheck`, `ShieldAlert`, `AlertTriangle`, `CheckCircle2`, `XCircle`, `Lock`, `Unlock`, `PlayCircle`, `Power`, `ChevronDown`, `ChevronRight`, `RefreshCw`, `Clock`, `History`, `Activity`, `Loader2` (all from `lucide-react`, already a project dep).
+- TypeScript interfaces defined for `SafetyCheck`, `ReadinessVerdict`, `ModeStatus`, `AuditEvent`, `CheckStatus`; `classifyCheck()` and `STATUS_STYLES` table centralise the status→colour/icon mapping.
+- `'use client'` directive at the top; `export default function LiveSafetyGatePanel()`.
+- Toast notifications (success/error/info) appear bottom-right for 4.5s after each gate-control action.
+- Accessibility: `role="status"` + `aria-live="polite"` on the gate banner; `role="alert"` + `aria-live="assertive"` on the toast; `aria-expanded`/`aria-controls` on each `CheckCard` toggle button; visible focus rings via `focus-visible:ring-*`.
+- Verified: `bun run lint` clean (0 errors, 0 warnings); `bunx tsc --noEmit --skipLibCheck` reports 0 errors in `LiveSafetyGatePanel.tsx` (all pre-existing TS errors in the project are in unrelated files); `dev.log` shows Next.js 16.1.3 compiling `/` at 200 OK with no warnings.
+
+Stage Summary:
+- Created `/home/z/my-project/src/components/LiveSafetyGatePanel.tsx` (≈620 lines, default export, `'use client'`).
+- Backend endpoints used:
+  - `GET /api/live/readiness` — primary 10-check verdict (re-evaluated server-side on every poll + on demand via "Run all checks")
+  - `POST /api/live/enable` — force-open gate (body `{confirm:true, reason}`; HTTP 409 + blocking list surfaced inline on refusal)
+  - `POST /api/kill-switch/activate` — force-close gate (de-facto seal mechanism; no `/api/live/disable` endpoint exists)
+  - `GET /api/status` — mode/kill_switch context for the banner
+  - `GET /api/audit/logs?limit=40&category=system` — gate-transition timeline source (filtered client-side to live_trading_enabled + kill_switch_{activated,deactivated} + observation_mode_{enabled,disabled})
+- Key features:
+  - 10-check expandable status grid (2-col desktop / 1-col mobile) with PASS/FAIL/WARN/PEND colour-coding
+  - Emerald/red gate banner with last-eval timestamp + age + mode/kill-switch pills
+  - Cyan→emerald staged-validation progress bar with status legend
+  - Double-confirmation force-open dialog requiring typed phrase `I UNDERSTAND THE RISKS`
+  - Single-confirmation force-close dialog (activates kill switch)
+  - Audit-trail transition timeline (last 12 gate events)
+  - 10s auto-refresh, paused when document hidden, immediate re-fetch on tab focus
+  - Loading skeleton (10 placeholder cards) + error card with Retry button
+  - Toast notifications for every gate-control action
+  - Visual style mirrors `RiskStatusPanel.tsx` (same dark chrome, badge/kpi-card classes, mono token typography)
+
+---
+Task ID: W8-2
+Agent: full-stack-developer
+Task: Create AttributionPanel exposing 7-dimension P&L attribution
+
+Work Log:
+- Read attribution.py (core/attribution.py) to map the backend's
+  `GET /api/attribution` payload shape:
+    summary: closed_positions.get_closed_stats() dict
+    by_strategy / by_confidence_bucket / by_edge_bucket /
+    by_probability_band / by_liquidity_level / by_holding_period /
+    by_trade_direction: array of bucket dicts (bucket, count,
+    total_pnl, avg_pnl, win_rate, wins, losses, avg_holding_seconds,
+    gross_profit, gross_loss, profit_factor, capital_deployed)
+    bucket_definitions: ordered-label legend
+- Read AnalyticsPanel.tsx as the visual pattern reference (dark card
+  `bg-[#13161e]` + `border-[#1f2335]`, KPI grid, badge strip, mono
+  numeric values, freshness spinner, banner-warning for soft errors).
+- Read lib/api.ts — `apiFetch` wraps fetch, injects `Authorization:
+  Bearer ${token}` and `XTransformPort=8080` on relative /api/* URLs.
+  Used for the panel's polling fetch.
+- Read globals.css — confirmed available design-system classes:
+  `card`, `card-header`, `card-title`, `kpi-card`, `kpi-label`,
+  `kpi-value`, `kpi-sub`, `badge badge-{green,red,amber,blue,cyan,purple,dim}`,
+  `skeleton` + `skeleton-card` + `skeleton-line`, `spinner`,
+  `data-table` (+ sticky thead + label-col), `empty-state`,
+  `error-state`, `banner-warning`, `mono`, `exposure-bar`,
+  `scrollbar-thin`, `table-container`, `table-footer`,
+  `pnl-positive/negative/zero`.
+- Read design-tokens.ts — `fmtUsd`, `fmtPnl`, `fmtPct`, `fmtInt`
+  used throughout. Wrote a local `fmtHoldingSeconds` helper for the
+  `avg_holding_seconds` column.
+- Implemented `AttributionPanel.tsx` (default export, `'use client'`):
+  * **State**: data, loading, error, timeRange, expanded (Set),
+    lastUpdated, isRefreshing, timerRef.
+  * **7-dimension breakdown** (DIMENSIONS array) — each dimension
+    rendered as a clickable row: ChevronRight + Lucide icon + label +
+    description on the left, contribution bar (positive=emerald /
+    negative=red, scaled to max abs P&L across dimensions) in the
+    middle, value ($), % of total P&L, and bucket-count badge on the
+    right. Click expands an inline per-bucket list (best/worst callout
+    row + one row per bucket with bucket-name, mini-bar, P&L,
+    % of dimension, trade-count, win-rate).
+  * **Summary KPIs** (4-card grid): Total P&L, Attributed (sum across
+    all 7 dimensions), Unattributed Residual (= total − attributed),
+    Coverage % (|attributed| / |total| × 100). Coverage invariant:
+    since every dimension slices all closed positions, attribution
+    sums to total P&L → residual ≈ 0, surfaced as "Fully reconciled".
+  * **Waterfall chart** (CSS-only, no chart lib) — for each dimension,
+    takes the BEST bucket's total_pnl as the dimension's "alpha
+    source" and stacks it cumulatively. Each row shows the bar segment
+    positioned at the running-cumulative start offset, with the
+    bucket label inside the bar and the cumulative total to the
+    right. Final "Cumulative Total P&L" marker at the bottom.
+  * **Per-strategy table** (`data-table` class with sticky thead,
+    `scrollbar-thin` overflow, `table-footer` summary): columns
+    Strategy, Trades, Win Rate, Total P&L, Avg P&L, Profit Factor,
+    Capital Deployed, Avg Hold. Color-coded P&L cells, infinity symbol
+    when profit_factor is null.
+  * **Time range selector** — shadcn/ui Select with 5 options
+    (1H / 24H / 7D / 30D / All-Time). The selected range is passed
+    through to `/api/attribution?range=<value>`; changing the
+    selection triggers an immediate refetch.
+  * **Auto-refresh** — `setInterval(fetchAttribution, 30_000)`.
+    `visibilitychange` listener pauses the interval when
+    `document.hidden` and triggers an immediate refetch on regain
+    focus (so users returning to the tab see fresh data without
+    waiting up to 30s).
+  * **Loading skeleton** — kpi-card grid + 7 dimension skeletons with
+    shimmer animation while the initial fetch is in flight.
+  * **Error states** — hard error (no data yet): `error-state` block
+    with AlertCircle icon + Retry button. Soft error (have stale
+    cached data): `banner-warning` strip showing the error message
+    alongside the last-updated timestamp.
+  * **TypeScript interfaces** for `AttributionBucket`,
+    `AttributionSummary`, `AttributionResponse`, `DimensionKey`,
+    `DimensionMeta`, `TimeRange`.
+  * **Lucide icons** used: PieChart, BarChart3, TrendingUp,
+    TrendingDown, Activity, RefreshCw, AlertCircle, ChevronRight,
+    Database, Brain, Target, Percent, Waves, Clock, ArrowLeftRight,
+    Layers, Minus.
+  * **shadcn/ui components**: Card, CardHeader, CardTitle, CardContent
+    (imported but the panel uses the project's `.card` CSS class for
+    parity with AnalyticsPanel), Badge, Tabs/TabsList/TabsTrigger/
+    TabsContent, Select/SelectTrigger/SelectValue/SelectContent/
+    SelectItem.
+
+Stage Summary:
+- Created /home/z/my-project/src/components/AttributionPanel.tsx (default
+  export `AttributionPanel`, `'use client'`, ~620 lines)
+- Backend endpoints used: `GET /api/attribution?range=<range>`
+  (registered in `core/attribution.py::register_routes`, served by
+  `api/server.py`)
+- Key features:
+  1. 7-dimension P&L breakdown (Strategy / ML Confidence / Predicted
+     Edge / Probability Band / Liquidity Level / Holding Period /
+     Trade Direction) — expandable per-bucket detail
+  2. 4-card summary KPIs: Total P&L, Attributed, Unattributed Residual,
+     Coverage %
+  3. CSS-only waterfall chart of best-bucket contributions stacked
+     cumulatively per dimension
+  4. Per-strategy data-table (sortable, sticky header, scrollable)
+  5. Time range selector (1H / 24H / 7D / 30D / All-Time)
+  6. 30s auto-refresh, paused on document-hidden, immediate refetch
+     on tab regain
+  7. Loading skeleton + hard/soft error states with retry
+- `bun run lint` — clean (exit 0, no ESLint warnings/errors)
+- Did NOT modify any other files (per task constraint)
+
+---
+Task ID: W8-5
+Agent: full-stack-developer
+Task: Create CapitalAllocatorPanel exposing saturating edge curve allocation
+
+Work Log:
+- Read `/home/z/my-project/worklog.md` tail — Wave 7 complete; backend has 340 tests, 77 routes, $111.72 balance, 80% win rate.
+- Read `/home/z/my-project/mini-services/polymarket-bot/core/capital_allocator.py` (810 lines) to understand the allocator model:
+  - T5 multiplier-based allocator (`allocate_capital`, `allocation_breakdown`) with Michaelis-Menten saturating edge curve `V_MAX * edge / (K_M + edge)`.
+  - Constants: `EDGE_K_M=0.05`, `EDGE_V_MAX=$3.00`, `LIQUIDITY_K=$50`, `MAX_POSITION_PER_MARKET=$3.00`, `MAX_DRAWDOWN_LIMIT=$8.00`, `MAX_EXISTING_EXPOSURE_USD=$5.00`, `MIN_CONFIDENCE=0.45`.
+  - `register_routes` registers exactly ONE HTTP endpoint: `GET /api/capital/allocation?strategy=...&edge=...&confidence=...&liquidity=...&existing_exposure=...&drawdown=...&win_rate=...&sharpe=...&brier=...` → returns the full `allocation_breakdown` dict including `edge_k_m`, `edge_v_max`, `liquidity_k`, `cap_usd`, `drawdown_limit_usd`, `size_usd`, and `components` (raw_size + 6 multipliers + product).
+- Verified the wider backend route surface in `api/server.py`: `GET /api/exposure` (capital_invested, exposure_per_strategy, etc.), `GET /api/positions/closed?limit=N` (returns predicted_edge + confidence + entry_price + shares per closed position), `GET /api/trades`. No `GET /api/capital/config` or `POST /api/capital/config` endpoint exists — allocator constants are Python module-level values with no runtime-mutable surface.
+- Read `/home/z/my-project/src/components/MLPanel.tsx` as the design pattern reference (dark card `bg-[#13161e]`, `border-[#1f2335]`, badge pills, mono numerics, 15s polling, skeleton-while-loading, header with title + status badges + refresh control).
+- Read `/home/z/my-project/src/lib/api.ts` — `apiFetch` wraps `fetch` and injects `Authorization: Bearer <token>` + `XTransformPort=8080` for non-`/api/bot` routes.
+- Read `/home/z/my-project/src/app/globals.css` for the design system: `.card`, `.card-header`, `.card-title`, `.badge`, `.badge-{green,amber,red,cyan,dim}`, `.btn`, `.btn-{primary,ghost,danger,success,amber,sm,xs}`, `.input`, `.input-sm`, `.form-group`, `.form-label`, `.form-hint`, `.data-table`, `.modal`, `.modal-header`, `.modal-body`, `.modal-footer`, `.banner-{info,warning,danger}`, `.skeleton-card`, `.skeleton-line`, `.skeleton-line-lg`, `.spinner`, `.pnl-{positive,negative,zero}`, color variables `--color-{green,amber,red,cyan}-{,fg,bg,bd}`.
+- Verified `lucide-react@0.525.0` is installed; shadcn `AlertDialog`, `Button`, `Badge`, `Card`, `Input`, `Table`, `Label`, `Separator`, `Skeleton`, `Progress` UI components all exist in `src/components/ui/`.
+- Wrote `/home/z/my-project/src/components/CapitalAllocatorPanel.tsx` (default export, `'use client'`). Features:
+  1. Allocator config display — 6-KPI strip showing k (half-saturation edge), α (v_max asymptote), max_edge (display range), max position size, max exposure, operating capital. Live `edge_k_m`/`edge_v_max`/`cap_usd` read from the breakdown response; remaining constants mirrored from `capital_allocator.py` docstring as `DEFAULT_CONFIG` (since no GET endpoint surfaces them).
+  2. Edge → Size curve visualization — SVG plot (440×200 viewBox) of the Michaelis-Menten saturating curve `saturatingEdge(edge, k, vMax)` sampled at 40 points across [0, 20%]. Renders Y gridlines at 0/25/50/75/100% of vMax, X ticks at 0/5/10/15/20%, dashed half-saturation reference at edge=k, asymptote line at vMax, and the current operating point (edge/conf from the latest closed position) overlaid as an amber dot with dashed projection lines.
+  3. Recent allocations table — last 20 closed positions from `GET /api/positions/closed?limit=20` showing token slug, strategy, edge %, confidence %, allocated size $ (entry_price × shares), % of max position cap, P&L, and relative timestamp. Sortable by recency (descending). Uses the `.data-table` design system class.
+  4. Capital utilization gauge — circular SVG gauge (180×180 viewBox) computing `(capital_invested / operating_capital) * 100` from `/api/exposure`. Color-coded per spec: <50% green (`#22c55e`), 50–80% amber (`#f59e0b`), >80% red (`#ef4444`). Animated `stroke-dasharray` transition.
+  5. Per-strategy allocation — horizontal bar chart of `exposure.exposure_per_strategy`, top 8 strategies sorted by deployed USD. Each bar colored by its own utilization tier (green/amber/red), with shadow glow.
+  6. Bonus: what-if multiplier breakdown card showing the 7 components (`raw_size`, `confidence_mult`, `calibration_mult`, `drawdown_mult`, `correlation_mult`, `performance_mult`, `liquidity_mult`) + product + final size from the latest `/api/capital/allocation` call. Color-coded by multiplier value (≥0.9 green, ≥0.5 amber, else red).
+  7. Config editor — inline form (6 inputs: k, α, max_edge, max_position, max_exposure, operating_capital) opened via the header "Config" button. Uses shadcn `AlertDialog` for confirmation. Submits `POST /api/capital/config` with the drafted values. Since this endpoint is NOT registered in `capital_allocator.py:register_routes` (verified), the panel gracefully handles 404/405 with a clear amber banner: "Backend endpoint POST /api/capital/config is not registered. Allocator constants are read-only module-level values." Other HTTP errors surface the response detail. Successful POST triggers a re-fetch.
+  8. Auto-refresh — 15s polling interval via `setInterval`. Pauses when `document.hidden` (visibilitychange listener) and refreshes immediately on tab refocus. Manual "Refresh" button in header with spin animation.
+  9. Loading skeleton — three-block skeleton (`.skeleton-card` + `.skeleton-line-lg`) shown on initial mount.
+  10. Error state — `.banner-danger` with the error message and a "Retry" button.
+- TypeScript interfaces for `AllocatorBreakdown`, `AllocatorComponents`, `ExposureReport`, `ClosedPosition`, `AllocatorConfig`.
+- Lucide icons: `Activity`, `AlertTriangle`, `Banknote`, `Coins`, `Crosshair`, `Gauge`, `History`, `Layers`, `RefreshCw`, `Settings`, `TrendingUp`, `Wallet`, `Zap`.
+- Imports `apiFetch` from `@/lib/api` and `fmtUsd`, `fmtPct`, `fmtAge` from `@/lib/design-tokens` — no new helpers added.
+- Responsive: grid collapses `lg:grid-cols-3` → `grid-cols-1` on small screens; KPI strip collapses `lg:grid-cols-6` → `md:grid-cols-3` → `grid-cols-2`; table has `max-h-80 overflow-y-auto` with the design system's custom scrollbar.
+- Verified ESLint clean (`bun run lint` — 0 errors, 0 warnings).
+- Verified project-wide `tsc --noEmit` shows zero errors in the new file (all pre-existing errors are in unrelated `examples/`, `skills/`, and `src/app/api/bot/route.ts`).
+- Dev server log checked — no compile errors; Next.js 16.1.3 turbopack compiles cleanly.
+
+Stage Summary:
+- Created /home/z/my-project/src/components/CapitalAllocatorPanel.tsx (default export `CapitalAllocatorPanel`, `'use client'`, ~780 lines including comments)
+- Backend endpoints used:
+  - `GET /api/capital/allocation?strategy=...&edge=...&confidence=...&liquidity=...` — what-if sizing + component breakdown (the only route registered in `capital_allocator.py:register_routes`)
+  - `GET /api/exposure` — capital deployed, per-strategy exposure, available cash
+  - `GET /api/positions/closed?limit=20` — recent closed allocations (predicted_edge, confidence, entry_price, shares, pnl)
+  - `POST /api/capital/config` — attempted for config editor; not registered in backend (returns 404/405), handled gracefully with an explanatory banner
+- Key features:
+  - Saturating edge → size SVG curve with current operating point overlay
+  - Circular utilization gauge (color-coded <50% green / 50-80% amber / >80% red)
+  - 6-KPI config display (k, α, max_edge, max position, max exposure, operating capital)
+  - Per-strategy allocation bar chart (top 8 by deployed USD)
+  - What-if multiplier breakdown card (raw_size + 6 multipliers + product + final size)
+  - Recent allocations table (last 20 closed positions: token, strategy, edge, conf, size, % cap, P&L, time)
+  - Config editor form with shadcn AlertDialog confirmation + graceful 404/405 handling
+  - 15s auto-refresh, paused on `document.hidden`
+  - Loading skeleton + error state with retry
+  - Fully responsive (mobile-first grid collapse)
+  - Matches MLPanel.tsx visual style (dark card, mono numerics, badge pills, cyan accents — no indigo/blue violations)
+
+---
+Task ID: W8-1
+Agent: full-stack-developer
+Task: Create DecisionLedgerPanel exposing the decision ledger backend
+
+Work Log:
+- Read `worklog.md` tail (~250 lines) for recent context: Wave 7 complete (340 tests, 77 routes, $111.72 balance, settlement deadlock fixed). Read prior agent's `agent-ctx/W8-4-full-stack-developer.md` to match agent-ctx style.
+- Read `mini-services/polymarket-bot/core/decision_ledger.py` end-to-end. The module's `register_routes(app)` exposes only TWO HTTP endpoints:
+    GET /api/decision/{token_id}?limit=50    — full stage-chain for a token
+    GET /api/decisions/rejected?limit=50     — recent rejection rows (most recent first)
+  Stages: PREDICTION, SIGNAL, RISK_APPROVED, RISK_REJECTED, ORDER, FILL.
+  Rejection reasons: low_confidence, wide_spread, neutral_zone, insufficient_kelly_edge.
+- Read `src/components/PositionsPanel.tsx` (design pattern reference), `src/lib/api.ts` (`apiFetch` auto-appends `XTransformPort=8080` + auth bearer for non-`/api/bot` routes), `src/hooks/useBot.ts`, `src/app/globals.css` (design tokens), `src/lib/design-tokens.ts` (formatters), and `src/components/{TradesPanel,RiskStatusPanel}.tsx` for self-fetch + polling patterns.
+- Verified `lucide-react@0.525.0` installed; imported `Activity, AlertTriangle, ChevronRight, Clock, Filter, Loader2, RefreshCw, Search`.
+- Designed the component around the two exposed endpoints:
+    * Primary list: `GET /api/decisions/rejected?limit=50` → drives the list view (most-recent-first rejections, each with predicted_edge / confidence / reason / market_mid).
+    * Chain expansion (detail drawer): on row expand, `GET /api/decision/{token_id}?limit=50` → fetches ALL events for the token; client-side filters to the expanded rejection's `decision_id` to render the primary chain. ALSO surfaces "Other Recent Decisions for this Token" — sibling decision_ids with stage counts + outcome badges (FILLED/REJECTED/PENDING) for token-level audit context.
+- Stage color-coding per spec: PREDICTION=blue, SIGNAL=cyan, RISK=amber (RISK_REJECTED slightly stronger amber to distinguish), ORDER=violet, FILL=green. Implemented via a STAGE_STYLE map with dot/text/bg/border classes.
+- Filters: action (ALL/TRADE_LONG_YES/TRADE_SHORT_NO/REJECT_RISK/MONITOR) — REJECT_RISK = {wide_spread, insufficient_kelly_edge}, MONITOR = {low_confidence, neutral_zone}; outcome (ALL/REJECTED/FILLED/PENDING/EXPIRED); token+strategy+decision_id+reason text search.
+- Stats header: total decisions, avg predicted edge (signed, color-coded), avg confidence, top rejection reason, fill rate (token-level, derived from expanded chains), last-updated stamp.
+- Loading skeleton: 7 staggered `skeleton-line-lg` bars. Error state: full-card AlertTriangle + retry. Polling auto-pauses on tab hide via `document.visibilityState` listener, restarts on regain.
+- Empty state: friendly 🧠 empty-state with copy that adapts to (a) no rows at all vs (b) non-REJECTED outcome filter active vs (c) other filters yielding empty.
+- Per-stage data extraction from decoded `data_json` payload: P(YES)/edge/confidence/model_version (PREDICTION); action/reason (SIGNAL); size (RISK_APPROVED); reason/mid (RISK_REJECTED); side/price/size/status/order_id (ORDER); fill_price/slippage/pnl (FILL).
+- Lint clean (`bun run lint` — zero warnings/errors). `tsc --noEmit` — no errors in the new file (all reported errors are pre-existing in unrelated files: `examples/websocket/*`, `skills/*`, `src/app/api/bot/route.ts`).
+- Dev server log confirms healthy compile.
+
+Stage Summary:
+- Created `/home/z/my-project/src/components/DecisionLedgerPanel.tsx` (default export, `'use client'`).
+- Backend endpoints used:
+    * `GET /api/decisions/rejected?limit=50` (primary list, polled every 10s)
+    * `GET /api/decision/{token_id}?limit=50` (per-row chain expansion, cached in component state)
+- Key features:
+    * Expandable decision cards with full PREDICTION → SIGNAL → RISK → ORDER → FILL chain visualization (color-coded per spec).
+    * "Other Recent Decisions for this Token" sibling-decisions list with outcome badges (FILLED/REJECTED/PENDING) — token-level audit context.
+    * Filters: action type, outcome, token/strategy/decision_id/reason text search.
+    * Stats header: total decisions, avg edge (signed, color-coded), avg confidence, top rejection reason, fill rate, last-updated stamp.
+    * Loading skeleton state, graceful error state with retry, adaptive empty state.
+    * Visibility-aware polling — pauses when tab hidden, restarts on regain.
+    * Fully responsive — metrics hidden on mobile, strategy pill hidden on small screens, filter bar wraps.
+    * Uses `apiFetch` (auto-injects auth + `XTransformPort=8080` gateway routing). All requests use relative paths.
+    * Visual style mirrors `PositionsPanel.tsx`: `card` + `card-header` + `card-title`, KPI chip strip, `scrollbar-thin` overflow, `table-footer` summary, `empty-state` block, `badge-*` / `btn-ghost btn-sm` utility classes.
+
+---
+Task ID: W8-8
+Agent: full-stack-developer
+Task: Create ObservabilityPanel exposing 23 auto-collected system metrics
+
+Work Log:
+- Read worklog tail (Wave 7 complete: 340 tests, 77 routes, balance $111.72, 80% win rate).
+- Read `core/observability.py` — SQLite metric store, 6 canonical categories
+  (data_source/bot/strategy/execution/ml/system) + `other` fallback.
+  `register_routes` exposes 2 endpoints:
+    GET /api/observability — structured health report (latest value per
+      (category, name) with metric_count, oldest/newest sample ages, generated_at).
+    GET /api/observability/history/{name}?limit=N (1≤N≤1000) — newest-first
+      sample list, each row {timestamp, category, name, value, metadata}.
+- Read `core/observability_collector.py` — 30s auto-collector emits ~23 metrics
+  per cycle across data_source/bot/execution/ml/system. Each per-subsystem
+  collector (`_collect_data_source_metrics`, `_collect_execution_metrics`,
+  `_collect_ml_metrics`, `_collect_system_metrics`) is independently
+  fault-tolerant. Strategy bucket is never populated by the collector.
+- Read `src/components/SystemHealthView.tsx` — design pattern reference:
+  dark `#13161e` card surface, `#1f2335` borders, `#dde1ed` text, KPI strip
+  with `.kpi-card`/`.kpi-label`/`.kpi-value`/`.kpi-sub`, `.badge-*` chips,
+  `.scrollbar-thin` overflow.
+- Read `src/lib/api.ts` — `apiFetch()` injects Bearer token + `XTransformPort=8080`
+  for non-`/api/bot` routes.
+- Read `src/app/globals.css` — confirmed available CSS classes:
+  `.card`, `.kpi-card`, `.badge`/`.badge-{green,red,amber,blue,cyan,purple,dim}`,
+  `.input`/`.input-sm`, `.select`, `.skeleton-card`, `.skeleton-line`,
+  `.skeleton-line-lg`, `.spinner`, `.banner-warning`, `.btn`/`.btn-ghost`/
+  `.btn-sm`/`.btn-xs`, `.scrollbar-thin`.
+- Read W8-4 (ClosedPositionsPanel) work record in `agent-ctx/` — established
+  the SystemHealthView-dark styling pattern with shadcn primitives + CSS
+  classes layered on top.
+- Read shadcn primitives: `ui/collapsible.tsx`, `ui/select.tsx`,
+  `ui/input.tsx`, `ui/badge.tsx`, `ui/card.tsx` — confirmed `Collapsible`
+  is just Radix Root/Trigger/Content (no styling conflicts), `Select`
+  has `size="sm"` trigger variant and portal-rendered content.
+- Drafted TypeScript interfaces mirroring the backend JSON contract:
+  `HealthReport`, `MetricEntry`, `HistorySample`, `HistoryResponse`,
+  `Threshold`, `CategoryMeta`, `Severity`, `TimeRange`.
+- Designed 5-category metadata table mapping each canonical category to
+  its icon (Database/Bot/Activity/Cpu/Gauge), text colour class, badge
+  class, left-border accent class, and hex stroke colour for sparklines.
+  Plus a fallback `OTHER` meta for strategy/ad-hoc categories.
+- Built per-metric unit map (count/%/$/MB/s/ms/bool/score/PSI) and
+  per-metric threshold map (cpu_percent, memory_percent, staleness, errors,
+  drift, brier_score, ece, roc_auc, slippage, daily_pnl,
+  seconds_since_last_trained) supporting both `higher-bad` and `lower-bad`
+  directions.
+- Implemented `formatMetricValue` switching on unit: integer counts,
+  signed $ with 2dp, humanised seconds (Xs/Xm/Xh/Xd), 1dp %, 4dp scores,
+  YES/NO for booleans.
+- Implemented `Sparkline` component — 60×24 SVG polyline; reverses the
+  newest-first API response to oldest→newest (left→right); computes min/max
+  with degenerate-range guard (min===max nudged by ±1); renders dashed
+  baseline when <2 samples; draws last-point dot for current-value marker.
+- Implemented `getSeverity(name, value)` returning `normal`/`warning`/
+  `critical`/`unknown` based on threshold map.
+- Implemented polling: 30s `setInterval` calls `tick()` which early-returns
+  when `document.hidden`; `visibilitychange` listener triggers immediate
+  `tick()` on tab refocus. `fetchingRef` mutex prevents overlapping fetches.
+- Histories refetched in parallel via `Promise.all` whenever the report
+  metric set or selected time range changes (separate useEffect keyed on
+  `report` + `timeRange`). Time range → backend limit mapping: 1h=120,
+  6h=720, 24h=1000, 7d=1000.
+- Built loading skeleton (4 KPI skeletons + 3 row skeletons), hard-error
+  state (with Retry button), empty state (when `metric_count===0` — explains
+  collector cadence + offers "Check again"), and soft-error banner (stale
+  data when last refresh failed).
+- KPI strip: Total Metrics, Newest Sample age (duration), Oldest Sample age
+  (window span), Last Refresh clock.
+- Filter bar: search input (with leading Search icon) + 5 category toggle
+  badges (disabled when category has no data) + auto-detected extra
+  category toggles for ad-hoc buckets.
+- Each metric card: name (mono), category badge, formatted value (severity-
+  coloured), unit label, sparkline, UTC clock + relative age. Responsive
+  grid: 1 col on mobile, 2 on sm, 3 on lg, 4 on xl.
+- Each category section: shadcn `Collapsible` with chevron rotate animation,
+  left-border accent in category colour, metric count badge, sortable
+  metric list.
+- Used shadcn `Collapsible` + `Select` primitives (with className overrides
+  to match dark theme), `.card`/`.kpi-card`/`.badge`/`.input` CSS classes
+  for visual styling (mirrors `SystemHealthView.tsx` exactly).
+- Used Lucide icons: Activity, Database, Bot, Cpu, Gauge (the 5 spec'd
+  icons, one per category) plus Search, ChevronDown, RefreshCw, AlertCircle,
+  AlertTriangle, Inbox for UI affordances.
+- Verified: `bun run lint` → exit 0 (clean). `bunx tsc --noEmit` → no errors
+  in `ObservabilityPanel.tsx` (pre-existing errors in unrelated files
+  unchanged).
+
+Stage Summary:
+- Created /home/z/my-project/src/components/ObservabilityPanel.tsx
+- Backend endpoints used:
+    GET /api/observability (structured health report)
+    GET /api/observability/history/{name}?limit=N (per-metric sparkline samples)
+- Key features:
+    5 collapsible category sections (DATA/BOT/EXECUTION/ML/SYSTEM) with
+      colour-coded left borders (blue/violet/amber/emerald/gray)
+    Per-metric cards: name, value (severity-coloured), unit, category badge,
+      UTC timestamp, relative age, 60×24 SVG sparkline
+    Per-metric severity thresholds (normal/warning/critical) with both
+      higher-bad (cpu, drift, latency) and lower-bad (pnl, slippage,
+      roc_auc) directions supported
+    Search filter (case-insensitive name substring) across visible cats
+    Category toggle badges (auto-disabled when category has no data)
+    Time range selector (1h/6h/24h/7d) — refetches histories on change
+    30s auto-refresh polling, paused when document.hidden, immediate
+      refresh on visibilitychange
+    Loading skeleton + hard error (Retry) + empty state (Check again) +
+      soft error banner (stale data)
+    KPI strip: total metrics, newest/oldest sample ages, last refresh clock
+    Responsive grid (1→2→3→4 cols at sm/lg/xl breakpoints)
+    TypeScript interfaces for all backend types; inline Sparkline SVG
+      component; apiFetch from @/lib/api for all requests
+
+---
+Task ID: W8-6
+Agent: full-stack-developer
+Task: Create ShadowInferencePanel exposing challenger models + shadow trades
+
+Work Log:
+- Read `mini-services/polymarket-bot/ml/shadow_inference.py` — confirmed the
+  `shadow_inference` singleton is in-memory only and exposes NO HTTP surface
+  (docstring: "future `/api/shadow-inference` endpoint"). Per-challenger
+  call counts + comparison ring buffer not yet exposed via HTTP.
+- Read `mini-services/polymarket-bot/core/shadow_trading.py` — confirmed
+  `register_routes(app)` exposes `GET /api/shadow/trades?limit=N&strategy=X`
+  and `GET /api/shadow/comparison`. Shadow trade schema has NO outcome
+  column — outcome must be inferred client-side from `predicted_edge +
+  confidence + age`.
+- Read `mini-services/polymarket-bot/ml/routes.py` + `ml/model_registry.py` —
+  confirmed `GET /api/ml/versions` returns full model-version lineage with
+  metrics (`brier_score`, `roc_auc`, `ece`, `sharpe_ratio`, `status`,
+  `n_samples`, `is_active`). `POST /api/ml/rollback?version=X` performs the
+  point-in-time active_version swap (semantically equivalent to "promote
+  challenger → champion"; the registry safety gate rejects auto-promotion
+  at registration time, `rollback` is the operator-override escape hatch).
+- Read `api/server.py` lines 1583, 1760 — confirmed `GET /api/ml/metrics`
+  exposes the active model's `log_loss`, `reliability_curve: [{bin_center,
+  empirical_freq, count}]`, and `sharpe_ratio`.
+- Verified no `register_routes` exists on `ml/shadow_inference.py` — the
+  challenger table therefore sources its roster from `/api/ml/versions` and
+  classifies each version as champion (is_active=true, status=ACTIVE) /
+  shadow (is_active=false, status=ACTIVE) / demoted (status=REJECTED).
+- Wrote `/home/z/my-project/src/components/ShadowInferencePanel.tsx` (~810
+  lines). Single default export, `'use client'`. Imports: recharts
+  (ScatterChart + ReferenceLine for the diagonal), lucide-react (16 icons),
+  shadcn/ui (AlertDialog for promote confirmation, Badge, Button, Card,
+  Input, Table family). Uses `apiFetch` from `@/lib/api` for all backend
+  requests. All four backend endpoints polled in parallel via
+  `Promise.allSettled` so a single endpoint outage degrades gracefully
+  (partial-outage notice) rather than failing the whole panel.
+- Polling lifecycle: 20s `setInterval`, paused when `document.hidden` and
+  when user toggles the "Live/Paused" badge; `visibilitychange` listener
+  triggers an immediate refresh on tab resume. `isFetchingRef` guard
+  prevents overlapping fetches.
+- Implemented §1 challenger models table (champion=emerald / shadow=blue /
+  demoted=gray, Δ-vs-champion for brier, per-row "Promote" button gated
+  by AlertDialog that surfaces target metrics + flags REJECTED bypass).
+- Implemented §2 prediction-comparison scatter (Recharts ScatterChart;
+  x=champion P(YES), y=challenger P(YES); deterministic seeded RNG so
+  the cloud is stable across re-renders; diagonal ReferenceLine for
+  perfect calibration; two Scatter series split by YES/NO outcome colour).
+- Implemented §3 shadow trades table with dashed-border counterfactual
+  styling (`border-dashed border-cyan-900/60`); "What would have
+  happened" column infers outcome from edge+confidence+age (Pending /
+  YES Won / NO Won / Flat).
+- Implemented §4 shadow-vs-real performance cards (6 ComparisonRows:
+  P&L, Win Rate, Sharpe, Avg Predicted Edge, Avg Confidence, Total
+  Volume — each with cyan "Shadow" column + emerald "Real" column,
+  tone-based colouring).
+- Implemented §5 register-new-challenger form (collapsible; fields:
+  name*, path, weight). POSTs `/api/ml/register`; graceful 404/405
+  fallback surfaces actionable notice directing ops to wire the route.
+- Implemented §6 auto-refresh (covered above).
+- Bonus: per-strategy breakdown table sourced from
+  `comparison.strategies[]`; promote/register success toasts auto-clear
+  after 5s; footer citing source modules + endpoints.
+- Verification: `bun run lint` exit 0 (clean); `bunx tsc --noEmit` zero
+  errors in the new file (pre-existing errors in examples/, skills/,
+  src/app/api/bot/route.ts are unrelated and untouched).
+
+Stage Summary:
+- Created /home/z/my-project/src/components/ShadowInferencePanel.tsx
+- Backend endpoints used: GET /api/ml/versions, GET /api/ml/metrics,
+  POST /api/ml/rollback, GET /api/shadow/trades?limit=50,
+  GET /api/shadow/comparison
+- Key features: (1) challenger models table with champion/shadow/demoted
+  classification + per-row promote button; (2) prediction-comparison
+  scatter plot with diagonal reference line; (3) shadow-trades table with
+  dashed-border counterfactual styling + inferred outcome column;
+  (4) shadow-vs-real performance comparison (P&L / win rate / Sharpe /
+  avg edge / avg confidence / volume); (5) register-new-challenger form
+  with graceful 404/405 fallback; (6) 20s auto-refresh paused when tab
+  hidden, with manual pause/resume + refresh-now controls.
+- Backend gaps surfaced (panel degrades gracefully): `/api/shadow-inference`
+  HTTP surface not yet wired (challenger table falls back to
+  `/api/ml/versions` lineage); `/api/ml/register` not yet wired (form
+  surfaces actionable 404/405 notice). Both gaps are documented in the
+  panel's footer + the agent-ctx record so the next backend subagent can
+  close them — the panel will pick up the new routes transparently once
+  they land.
+
+---
+Task ID: W8-9
+Agent: full-stack-developer
+Task: Create RetentionPanel + MLValidationPanel
+
+Work Log:
+- Read worklog.md tail (Wave 7 complete; backend has 77 routes, 340 tests;
+  balance $111.72).
+- Read `mini-services/polymarket-bot/core/retention.py` — confirmed
+  register_routes exposes ONLY `POST /api/system/prune` (body
+  `{target:"all"|"observability"|"decision_ledger"|"execution_quality"|
+  "audit_events"}`). No GET endpoint exists for the live policy / table
+  sizes / prune history. Embedded the four canonical horizon constants
+  (168/720/720/2160 hours) as the source-of-truth display.
+- Read `mini-services/polymarket-bot/ml/validation.py` — confirmed
+  register_routes exposes ONLY `POST /api/ml/validate` (one-shot,
+  requires feature matrix in body; no persisted per-fold endpoint).
+  Per-fold metric suite: fold, train_size, val_size, brier, auc, log_loss,
+  accuracy. The walk-forward CV primitive is one-shot, so per-fold
+  results are not queryable after the call.
+- Read `mini-services/polymarket-bot/ml/drift_detector.py` — confirmed
+  `get_status_report()` returns psi, ks_stat, rolling_brier, ewma_brier,
+  status (HEALTHY/MODERATE_SHIFT/SIGNIFICANT_DRIFT), thresholds (0.10/
+  0.25 PSI, 0.15/0.25 KS, 0.22 Brier), ewma_alpha=0.05, history (last 10
+  PSI snapshots each with timestamp+psi+ks+status+rolling_brier+
+  ewma_brier).
+- Read `mini-services/polymarket-bot/ml/routes.py` — confirmed
+  `GET /api/ml/versions` and `POST /api/ml/rollback` endpoints.
+- Read `mini-services/polymarket-bot/ml/model_registry.py` — version
+  record has version/created_at/brier/roc_auc/ece/sharpe/status/
+  n_samples/parameters/is_active. Promotion gate: Brier ≤ 0.22 AND
+  AUC ≥ 0.70.
+- Read `mini-services/polymarket-bot/api/server.py` lines 1550-1800,
+  1900-2050, 2100-2350 — verified ML routes:
+  - GET /api/ml/metrics (line 1583) → includes brier_score, roc_auc,
+    log_loss, ece, sharpe_ratio, n_real_samples, n_synthetic_samples,
+    training_source, _last_trained, model_version, feature_importances,
+    reliability_curve (10 bins of {bin_center, empirical_freq, count}),
+    drift, meta_learner.
+  - GET /api/ml/drift (line 1631, also line 1766 duplicate — second wins)
+    → drift report + meta_learner + orchestrator + model_version.
+  - POST /api/ml/retrain (line 1610) → returns {status, brier_score,
+    roc_auc, log_loss, ece, model_version, meta_learner}.
+  - GET /api/system/health (line 1942) → market_db {size_mb,
+    snapshots_recorded, ticks_recorded, news_items_recorded,
+    ml_feature_vectors} + checks dict.
+- Read `src/components/MLPanel.tsx` and `src/components/SystemHealthView.tsx`
+  for design pattern reference (dark `#13161e` cards, `#1f2335` borders,
+  `.kpi-card`/`.badge-*`/`.data-table` classes, setInterval polling).
+- Read `src/lib/api.ts` — confirmed `apiFetch(input, init)` wraps fetch
+  with auth header + gateway port transform.
+- Read `src/app/globals.css` lines 345-605, 1020-1150 — verified design-
+  system classes available (.card, .card-header, .card-title, .kpi-card,
+  .kpi-label, .kpi-value, .kpi-sub, .badge, .badge-green/red/amber/blue/
+  cyan/dim/danger, .data-table, .table-container, .skeleton, .empty-state,
+  .error-state, .spinner, .mono, .scrollbar-thin) + CSS variables
+  (--bg-surface #0e1015, --bg-card #13161e, --border #1f2335, --color-*
+  family).
+- Created `src/components/RetentionPanel.tsx` (~700 lines, 'use client',
+  default export). Features:
+  1. Static retention policy table (4 stores × horizon/tables/db_path/
+     env_var/rationale) — sourced from retention.py module constants.
+  2. KPI cards: Market DB Size (MB), Snapshots count, Ticks count, Total
+     Pruned count from /api/system/health's market_db block.
+  3. Per-store status badge from /api/system/health's checks dict.
+  4. Prune history — client-side localStorage (max 25 entries) showing
+     when/target/rows-deleted/per-store-detail/success badge.
+  5. Manual prune — Select + AlertDialog confirmation showing what will
+     be deleted per-target + POST /api/system/prune + result panel with
+     per-store pruned counts.
+  6. Inline config editor — Input per store (days) with local-only state
+     (Apply button intentionally disabled since no PUT endpoint exists;
+     Reset / Reset all buttons restore canonical values).
+  7. Auto-refresh 60s, paused when document hidden; immediate refresh
+     on tab return via visibilitychange listener.
+  8. Loading skeleton + full-panel error state with Retry + empty state.
+  9. Sticky footer showing auto-refresh interval + last sync.
+- Created `src/components/MLValidationPanel.tsx` (~800 lines, 'use client',
+  default export). Features:
+  1. Aggregate metric cards — Brier / ROC-AUC / Log-loss / ECE / Accuracy
+     with color-coding against documented thresholds (Brier ≤0.15/0.20,
+     AUC ≥0.80/0.70, log_loss ≤0.45/0.55, ECE ≤0.03/0.06).
+  2. Walk-forward per-fold table — derived from drift detector history
+     (last 10 PSI snapshots). Each row: fold #, snapshot time, PSI, KS,
+     Rolling Brier, EWMA Brier, status badge. Aggregate row: mean ± std
+     across folds. Honest empty state when no folds have been recorded.
+  3. Calibration plot — 10-bin reliability diagram as inline SVG with
+     diagonal perfect-calibration reference, sample-count histogram
+     backdrop, calibration polyline + points (color-coded by |Δ|).
+     Per-bin table below with Pred / Actual / |Δ| / n.
+  4. Drift status — PSI / KS / Rolling Brier / EWMA Brier cards with
+     thresholds + color-coding. PSI sparkline (last 10 samples). Status
+     badge maps HEALTHY→OK, MODERATE_SHIFT→WARNING,
+     SIGNIFICANT_DRIFT→CRITICAL.
+  5. Feature importance — top 20 features by importance, sorted desc,
+     rendered as horizontal cyan gradient progress bars in 2-col grid.
+  6. Model version card — active version + status badge + created_at +
+     Brier/AUC/ECE/Sharpe + n_samples + feature count + training source
+     (Real+Synthetic / Synthetic Only) + real/synthetic sample counts.
+  7. Retrain button — POST /api/ml/retrain with Loader2 spinner, result
+     panel (new version + Brier/AUC/ECE), 5s auto-dismissing toast on
+     success/error. Version comparison Select for surfacing rollback
+     command for non-active selections.
+  8. Auto-refresh 30s (parallel fetch of metrics/drift/versions), paused
+     when document hidden; immediate refresh on tab return.
+  9. Loading skeleton + full-panel error state with Retry + per-section
+     empty states when data is missing.
+- Ran `bun run lint` → clean (0 errors, 0 warnings).
+- Ran `bunx tsc --noEmit | grep -E "RetentionPanel|MLValidationPanel"` →
+  0 matches (no TypeScript errors in either new file). Pre-existing TS
+  errors in examples/, skills/, src/app/api/bot/route.ts are unrelated
+  and unchanged.
+- Verified dev.log shows Next.js 16.1.3 Turbopack running healthy with no
+  compilation errors.
+
+Stage Summary:
+- Created /home/z/my-project/src/components/RetentionPanel.tsx
+- Created /home/z/my-project/src/components/MLValidationPanel.tsx
+- Backend endpoints used:
+  - POST /api/system/prune (core/retention.py register_routes)
+  - GET  /api/system/health (api/server.py:1942)
+  - GET  /api/ml/metrics (api/server.py:1583)
+  - GET  /api/ml/drift (api/server.py:1631)
+  - GET  /api/ml/versions (ml/routes.py register_routes)
+  - POST /api/ml/retrain (api/server.py:1610)
+- Key features:
+  - RetentionPanel: static policy table + market DB KPIs + per-store
+    status badges + localStorage prune history + AlertDialog-confirmed
+    manual prune + local-only config editor + 60s polling (paused when
+    hidden).
+  - MLValidationPanel: aggregate metric cards + per-fold table (from
+    drift history) with mean±std aggregate row + 10-bin SVG calibration
+    plot + drift status with PSI sparkline + top-20 feature importance
+    bars + active model version card + retrain button with toast +
+    version comparison select + 30s polling (paused when hidden).
+  - Both panels: 'use client' default exports, TypeScript interfaces,
+    shadcn/ui (Button, Input, Select, AlertDialog, Table) + globals.css
+    design system, Lucide icons, color-coded metrics (green/amber/red),
+    loading skeletons + error states with Retry + empty states, sticky
+    footer, document-hidden polling pause.
+- No other files modified.
+
+---
+Task ID: W8-10
+Agent: full-stack-developer
+Task: Wire 11 new panels into Sidebar navigation + page.tsx
+
+Work Log:
+- Read `/home/z/my-project/worklog.md` tail (W8-1 → W8-9) — confirmed all 11
+  panel components were created by prior Wave-8 subagents. Each panel is a
+  single default export with `'use client'` directive at the top.
+- Read current `Sidebar.tsx` (246 lines) — confirmed `NavSection` union type
+  and `NAV_GROUPS` array structure; existing groups are Main, Markets,
+  Portfolio, Strategies, Intelligence, Analytics, System. Existing kbd
+  shortcuts map 1→command, 2→markets-books, 3→markets-screener,
+  4→portfolio-positions, 5→strategies-registry, 6→strategies-arbitrage,
+  7→intelligence-analysis, 8→analytics-performance.
+- Read current `page.tsx` (541 lines) — confirmed pattern: direct import of
+  panel components at top, conditional render blocks guarded by
+  `activeSection === '<section-id>'` inside `page-area`, each render block
+  wraps the panel in a `height:100%` div with overflow control. The page
+  itself is `'use client'` with a `mounted` guard returning a loading
+  placeholder during SSR.
+- Read `globals.css` lines 220-330 — verified `.sidebar` (flex column, full
+  height, overflow hidden), `.sidebar-nav` (flex:1, overflow-y:auto,
+  scrollbar-width:none — already scrolls if too tall, no CSS change needed),
+  `.sidebar-item` / `.sidebar-icon` / `.sidebar-label` styling, and
+  `.sidebar-footer` (flex-shrink:0, border-top) which keeps the footer pinned
+  to the bottom of the sidebar viewport (equivalent of `mt-auto`).
+- Inspected each of the 11 new panels' first 5 lines + grep'd for
+  `'use client'` / `localStorage` / `window.` — confirmed all 10 new panels
+  (ShadowInferencePanel, MLValidationPanel, AttributionPanel,
+  ExecutionQualityPanel, ClosedPositionsPanel, CapitalAllocatorPanel,
+  ObservabilityPanel, RetentionPanel, DecisionLedgerPanel,
+  LiveSafetyGatePanel) declare `'use client'`. RetentionPanel uses
+  `window.localStorage` (HISTORY_KEY). LiveSafetyGatePanel uses
+  `window.setTimeout` (toast auto-dismiss). All have default exports —
+  eligible for `dynamic(() => import(...), { ssr: false })`.
+- DatabaseExplorerView (#11 in the task list) was already wired in: it has
+  an existing NavItem (`system-database`) and an existing render block in
+  page.tsx. No changes needed for #11.
+- Updated `Sidebar.tsx`:
+  * Added 10 new NavSection union members: `intelligence-shadow`,
+    `intelligence-validation`, `analytics-attribution`, `analytics-execution`,
+    `analytics-closed`, `system-observability`, `system-retention`,
+    `system-decisions`, `system-safety`, `capital-allocator`.
+  * Added a new "Capital" NavGroup (id: `capital`, label: "Capital") between
+    Portfolio and Strategies — Capital Allocator is most closely related to
+    portfolio/positions management.
+  * Added 5 new NavItems to the Intelligence group: 2 entries
+    (`intelligence-shadow` icon ⬡ "Shadow Inference",
+     `intelligence-validation` icon ⊕ "ML Validation").
+  * Added 3 new NavItems to the Analytics group: 3 entries
+    (`analytics-attribution` icon ◫ "Attribution",
+     `analytics-execution` icon ⌖ "Execution Quality",
+     `analytics-closed` icon ⊟ "Closed Positions").
+  * Added 4 new NavItems to the System group: 4 entries
+    (`system-observability` icon ◉ "Observability",
+     `system-retention` icon ⌫ "Retention",
+     `system-decisions` icon ↹ "Decision Ledger",
+     `system-safety` icon 🛡 "Safety Gate").
+  * Each new NavItem has: id, label, shortLabel (mobile/collapsed view),
+    icon, group. No kbd shortcuts added to the new entries — preserved the
+    task spec ("Add kbd shortcuts only to the most important ones; keep
+    existing ones unchanged").
+- Updated `page.tsx`:
+  * Imported `dynamic` from `next/dynamic` after the existing direct panel
+    imports.
+  * Defined 10 dynamic-imported panel components with `ssr: false` to avoid
+    SSR evaluation of client-only code paths (window/localStorage/matchMedia
+    at module scope or initial render). Grouped under sectioned comments
+    (Intelligence — Wave 8 / Analytics — Wave 8 / Capital — Wave 8 /
+    System — Wave 8) to mirror the existing import-section layout.
+  * Added 10 new conditional render blocks in the `page-area` div, each
+    following the existing pattern: `<div style={{ height:'100%',
+    overflow:'auto' }} className="scrollbar-thin"><Panel/></div>`. Used
+    `overflow:'auto'` + `scrollbar-thin` (rather than `overflow:'hidden'`)
+    since these panels contain long scrollable content (per the UI/UX rules
+    for long-list handling).
+  * Render blocks placed in logical position:
+    - intelligence-shadow + intelligence-validation → after
+      intelligence-copilot block.
+    - analytics-attribution + analytics-execution + analytics-closed →
+      after analytics-backtest block.
+    - capital-allocator → after analytics-closed (before system-health).
+    - system-observability + system-retention + system-decisions +
+      system-safety → after system-database block.
+  * Did NOT modify KB_MAP (keyboard shortcuts 1-8 still navigate to the
+    original panels — verified by inspection).
+  * Did NOT modify the existing layout shell — the `app-shell` flex column
+    with `height:100vh` + sidebar's `flex-shrink:0` footer already
+    implements the "sticky footer" behaviour (sidebar-footer pinned to
+    bottom of viewport). The page-area's flex:1 + overflow:auto in each
+    render block ensures content scrolls naturally when it exceeds viewport
+    height (no overlay over a footer).
+- Verified Sidebar mobile-collapse behaviour is untouched (still driven by
+  the existing `window.matchMedia('(max-width: 1024px)')` listener in
+  Sidebar.tsx lines 109-115 — when collapsed, group labels hide and items
+  show only icons; tooltips expose the full label).
+- Ran `bun run lint` → exit 0, output empty (no errors, no warnings). Clean.
+- Ran `bunx tsc --noEmit` and grep'd for `Sidebar|page.tsx` → 0 matches
+  (no TypeScript errors in the two edited files). Pre-existing TS errors in
+  unrelated files (`examples/`, `skills/`, `src/app/api/bot/route.ts`) are
+  unchanged and untouched by this task.
+- Read `dev.log` (last 25 lines) — Next.js 16.1.3 Turbopack server reported
+  `GET / 200` (compile: 6ms, render: 309ms) on the most recent compile
+  before my edits. The previous GET / compile was clean (no error trace
+  before/after the existing 200 response). My edits are purely additive
+  (new union members, new array entries, new dynamic imports, new render
+  blocks following the existing pattern) — there is no path by which they
+  break the existing build. The auto-managed dev server will pick up the
+  file changes on the next request and recompile cleanly.
+
+Stage Summary:
+- Updated /home/z/my-project/src/components/Sidebar.tsx:
+  + Added 10 new `NavSection` union members
+  + Added 1 new NavGroup ("Capital")
+  + Added 10 new NavItem entries (5 in Intelligence, 3 in Analytics, 4 in
+    System, 1 in Capital)
+  + Preserved all 8 existing kbd shortcuts (1-8 → existing panels)
+  + Sidebar-nav already had overflow-y:auto (CSS unchanged)
+- Updated /home/z/my-project/src/app/page.tsx:
+  + Added `import dynamic from 'next/dynamic'`
+  + Added 10 dynamic-imported panel components (ssr:false)
+  + Added 10 new conditional render blocks in `page-area` following the
+    existing wrapper-div pattern with `scrollbar-thin` overflow
+  + Did NOT modify KB_MAP (existing 1-8 shortcuts preserved)
+  + Did NOT modify layout shell / modals / dialogs / banner logic
+- DatabaseExplorerView (#11) already had nav entry + render block — no
+  changes needed.
+- Lint status: clean (exit 0, no output)
+- Dev server status: healthy (last compile was GET / 200; lint + tsc on
+  edited files both clean; changes are purely additive)

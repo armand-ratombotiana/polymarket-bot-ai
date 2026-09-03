@@ -15,10 +15,20 @@ export type NavSection =
   | 'intelligence-analysis'
   | 'intelligence-aiml'
   | 'intelligence-copilot'
+  | 'intelligence-shadow'
+  | 'intelligence-validation'
   | 'analytics-performance'
   | 'analytics-backtest'
+  | 'analytics-attribution'
+  | 'analytics-execution'
+  | 'analytics-closed'
+  | 'capital-allocator'
   | 'system-health'
   | 'system-database'
+  | 'system-observability'
+  | 'system-retention'
+  | 'system-decisions'
+  | 'system-safety'
 
 interface NavItem {
   id: NavSection
@@ -61,6 +71,13 @@ const NAV_GROUPS: NavGroup[] = [
     ],
   },
   {
+    id: 'capital',
+    label: 'Capital',
+    items: [
+      { id: 'capital-allocator', label: 'Capital Allocator', shortLabel: 'Allocator', icon: '$', group: 'capital' },
+    ],
+  },
+  {
     id: 'strategies',
     label: 'Strategies',
     items: [
@@ -75,6 +92,8 @@ const NAV_GROUPS: NavGroup[] = [
       { id: 'intelligence-analysis', label: 'Deep Analysis', shortLabel: 'Analysis', icon: '⊘', kbd: '7', group: 'intelligence' },
       { id: 'intelligence-aiml', label: 'AI / ML Engine', shortLabel: 'AI/ML', icon: '⊛', group: 'intelligence' },
       { id: 'intelligence-copilot', label: 'Copilot', shortLabel: 'Copilot', icon: '◈', group: 'intelligence' },
+      { id: 'intelligence-shadow', label: 'Shadow Inference', shortLabel: 'Shadow', icon: '⬡', group: 'intelligence' },
+      { id: 'intelligence-validation', label: 'ML Validation', shortLabel: 'ML Valid', icon: '⊕', group: 'intelligence' },
     ],
   },
   {
@@ -83,6 +102,9 @@ const NAV_GROUPS: NavGroup[] = [
     items: [
       { id: 'analytics-performance', label: 'Performance', shortLabel: 'Perf', icon: '◷', kbd: '8', group: 'analytics' },
       { id: 'analytics-backtest', label: 'Backtest Lab', shortLabel: 'Backtest', icon: '⊙', group: 'analytics' },
+      { id: 'analytics-attribution', label: 'Attribution', shortLabel: 'Attrib', icon: '◫', group: 'analytics' },
+      { id: 'analytics-execution', label: 'Execution Quality', shortLabel: 'Exec Q', icon: '⌖', group: 'analytics' },
+      { id: 'analytics-closed', label: 'Closed Positions', shortLabel: 'Closed', icon: '⊟', group: 'analytics' },
     ],
   },
   {
@@ -91,6 +113,10 @@ const NAV_GROUPS: NavGroup[] = [
     items: [
       { id: 'system-health', label: 'System Health', shortLabel: 'Health', icon: '⊜', group: 'system' },
       { id: 'system-database', label: 'Data Explorer', shortLabel: 'Data', icon: '⊞', group: 'system' },
+      { id: 'system-observability', label: 'Observability', shortLabel: 'Observ', icon: '◉', group: 'system' },
+      { id: 'system-retention', label: 'Retention', shortLabel: 'Retain', icon: '⌫', group: 'system' },
+      { id: 'system-decisions', label: 'Decision Ledger', shortLabel: 'Ledger', icon: '↹', group: 'system' },
+      { id: 'system-safety', label: 'Safety Gate', shortLabel: 'Safety', icon: '🛡', group: 'system' },
     ],
   },
 ]

@@ -41,6 +41,32 @@ import BacktestLabView from '@/components/BacktestLabView'
 import SystemHealthView from '@/components/SystemHealthView'
 import DatabaseExplorerView from '@/components/DatabaseExplorerView'
 
+// W8-10 — Wave-8 intelligence / analytics / system / capital panels.
+// Loaded with `next/dynamic` + `ssr: false` so the client-only panels
+// (which touch `window`, `localStorage`, `matchMedia` at module scope or
+// during initial render) are never evaluated on the server. The parent
+// page is `'use client'` with a `mounted` guard, so dynamic chunks hydrate
+// cleanly without SSR mismatch warnings.
+import dynamic from 'next/dynamic'
+
+// Intelligence — Wave 8
+const ShadowInferencePanel = dynamic(() => import('@/components/ShadowInferencePanel'), { ssr: false })
+const MLValidationPanel = dynamic(() => import('@/components/MLValidationPanel'), { ssr: false })
+
+// Analytics — Wave 8
+const AttributionPanel = dynamic(() => import('@/components/AttributionPanel'), { ssr: false })
+const ExecutionQualityPanel = dynamic(() => import('@/components/ExecutionQualityPanel'), { ssr: false })
+const ClosedPositionsPanel = dynamic(() => import('@/components/ClosedPositionsPanel'), { ssr: false })
+
+// Capital — Wave 8
+const CapitalAllocatorPanel = dynamic(() => import('@/components/CapitalAllocatorPanel'), { ssr: false })
+
+// System — Wave 8
+const ObservabilityPanel = dynamic(() => import('@/components/ObservabilityPanel'), { ssr: false })
+const RetentionPanel = dynamic(() => import('@/components/RetentionPanel'), { ssr: false })
+const DecisionLedgerPanel = dynamic(() => import('@/components/DecisionLedgerPanel'), { ssr: false })
+const LiveSafetyGatePanel = dynamic(() => import('@/components/LiveSafetyGatePanel'), { ssr: false })
+
 // Modals
 import DepthChartModal from '@/components/DepthChartModal'
 import MarketChartModal from '@/components/MarketChartModal'
@@ -417,6 +443,20 @@ export default function Dashboard() {
               </div>
             )}
 
+            {/* ── Intelligence — Shadow Inference (W8-10) ───────────── */}
+            {activeSection === 'intelligence-shadow' && (
+              <div style={{ height: '100%', overflow: 'auto' }} className="scrollbar-thin">
+                <ShadowInferencePanel />
+              </div>
+            )}
+
+            {/* ── Intelligence — ML Validation (W8-10) ───────────────── */}
+            {activeSection === 'intelligence-validation' && (
+              <div style={{ height: '100%', overflow: 'auto' }} className="scrollbar-thin">
+                <MLValidationPanel />
+              </div>
+            )}
+
             {/* ── 8. Analytics — Performance ────────────────────────── */}
             {activeSection === 'analytics-performance' && (
               <div className="workstation-split-layout">
@@ -437,6 +477,34 @@ export default function Dashboard() {
               </div>
             )}
 
+            {/* ── Analytics — Attribution (W8-10) ─────────────────────── */}
+            {activeSection === 'analytics-attribution' && (
+              <div style={{ height: '100%', overflow: 'auto' }} className="scrollbar-thin">
+                <AttributionPanel />
+              </div>
+            )}
+
+            {/* ── Analytics — Execution Quality (W8-10) ──────────────── */}
+            {activeSection === 'analytics-execution' && (
+              <div style={{ height: '100%', overflow: 'auto' }} className="scrollbar-thin">
+                <ExecutionQualityPanel />
+              </div>
+            )}
+
+            {/* ── Analytics — Closed Positions (W8-10) ───────────────── */}
+            {activeSection === 'analytics-closed' && (
+              <div style={{ height: '100%', overflow: 'auto' }} className="scrollbar-thin">
+                <ClosedPositionsPanel />
+              </div>
+            )}
+
+            {/* ── Capital — Allocator (W8-10) ────────────────────────── */}
+            {activeSection === 'capital-allocator' && (
+              <div style={{ height: '100%', overflow: 'auto' }} className="scrollbar-thin">
+                <CapitalAllocatorPanel />
+              </div>
+            )}
+
             {/* ── System — Health ────────────────────────────────────── */}
             {activeSection === 'system-health' && (
               <div style={{ height: '100%', overflow: 'auto' }} className="scrollbar-thin">
@@ -448,6 +516,34 @@ export default function Dashboard() {
             {activeSection === 'system-database' && (
               <div style={{ height: '100%', overflow: 'hidden' }}>
                 <DatabaseExplorerView />
+              </div>
+            )}
+
+            {/* ── System — Observability (W8-10) ─────────────────────── */}
+            {activeSection === 'system-observability' && (
+              <div style={{ height: '100%', overflow: 'auto' }} className="scrollbar-thin">
+                <ObservabilityPanel />
+              </div>
+            )}
+
+            {/* ── System — Retention (W8-10) ────────────────────────── */}
+            {activeSection === 'system-retention' && (
+              <div style={{ height: '100%', overflow: 'auto' }} className="scrollbar-thin">
+                <RetentionPanel />
+              </div>
+            )}
+
+            {/* ── System — Decision Ledger (W8-10) ──────────────────── */}
+            {activeSection === 'system-decisions' && (
+              <div style={{ height: '100%', overflow: 'auto' }} className="scrollbar-thin">
+                <DecisionLedgerPanel />
+              </div>
+            )}
+
+            {/* ── System — Live Safety Gate (W8-10) ─────────────────── */}
+            {activeSection === 'system-safety' && (
+              <div style={{ height: '100%', overflow: 'auto' }} className="scrollbar-thin">
+                <LiveSafetyGatePanel />
               </div>
             )}
           </div>
