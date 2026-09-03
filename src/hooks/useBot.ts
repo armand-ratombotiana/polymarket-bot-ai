@@ -36,6 +36,10 @@ export interface Position {
   avg_entry_price: number
   total_invested: number
   realised_pnl: number
+  // S1 — live mark-to-market fields (optional, additive).
+  // Populated by snapshot when the backend exposes current_price + unrealized_pnl.
+  current_price?: number
+  unrealized_pnl?: number
 }
 
 export interface Trade {
@@ -268,6 +272,15 @@ export function useBot() {
     fetchRestSnapshot()
   }
 
+  // S1 — Close a single position by token_id. POSTs to the backend close
+  // endpoint and refreshes the snapshot. Failures are swallowed so the UI
+  // remains responsive; the next REST poll will reconcile state.
+  const closePosition = async (tokenId: string) => {
+    const apiUrl = getApiUrl()
+    await fetch(`${apiUrl}/api/positions/${tokenId}/close`, { method: 'POST', headers: authHeaders() }).catch(() => {})
+    fetchRestSnapshot()
+  }
+
   return {
     snapshot,
     status,
@@ -275,5 +288,6 @@ export function useBot() {
     deactivateKillSwitch,
     cancelAllOrders,
     cancelOrder,
+    closePosition,
   }
 }

@@ -1395,3 +1395,112 @@ html { overflow-x: hidden; }
 .page-area { min-width: 0; }
 .command-center-layout > *, .workstation-split-layout > * { min-width: 0; }
 
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   S4 — TYPOGRAPHY + DESIGN SYSTEM (additive layer)
+   All additions below are NEW rules / tokens appended at end of file.
+   No existing rule block was edited; component refinements layer on top
+   of the cascade (later, equal-specificity declarations win per-property).
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* ── (1) Modular type scale + (2) Font role stacks + (3) Shadow system ──── */
+:root {
+  /* Modular type scale — pixel steps, consumable via --text-* tokens. */
+  --text-2xs:  10px;
+  --text-xs:   11px;
+  --text-sm:   12px;
+  --text-base: 13px;
+  --text-md:   14px;
+  --text-lg:   16px;
+  --text-xl:   18px;
+  --text-2xl:  22px;
+
+  /* Font role stacks. Body currently inlines 'Plus Jakarta Sans' → 'Inter';
+     these tokens formalise the three roles for future components. */
+  --font-sans:    'Inter', system-ui, sans-serif;
+  --font-display: 'Plus Jakarta Sans', 'Inter', sans-serif;
+  --font-mono:    'JetBrains Mono', monospace;
+
+  /* Elevation system. Five steps tuned for a dark surface (#0e1015 → #13161e). */
+  --shadow-xs: 0 1px 2px  rgba(0, 0, 0, 0.30);
+  --shadow-sm: 0 2px 4px  rgba(0, 0, 0, 0.35);
+  --shadow-md: 0 4px 10px rgba(0, 0, 0, 0.40);
+  --shadow-lg: 0 10px 24px rgba(0, 0, 0, 0.45);
+  --shadow-xl: 0 20px 48px rgba(0, 0, 0, 0.55);
+}
+
+/* ── Type-scale utility classes (consume the tokens; no existing clashes) ── */
+.text-2xs  { font-size: var(--text-2xs); }
+.text-xs   { font-size: var(--text-xs); }
+.text-sm   { font-size: var(--text-sm); }
+.text-base { font-size: var(--text-base); }
+.text-md   { font-size: var(--text-md); }
+.text-lg   { font-size: var(--text-lg); }
+.text-xl   { font-size: var(--text-xl); }
+.text-2xl  { font-size: var(--text-2xl); }
+
+/* ── Elevation utility classes ───────────────────────────────────────────── */
+.shadow-xs { box-shadow: var(--shadow-xs); }
+.shadow-sm { box-shadow: var(--shadow-sm); }
+.shadow-md { box-shadow: var(--shadow-md); }
+.shadow-lg { box-shadow: var(--shadow-lg); }
+.shadow-xl { box-shadow: var(--shadow-xl); }
+
+/* ── (4) Selection highlight (blue) ───────────────────────────────────────── */
+::selection {
+  background: rgba(59, 130, 246, 0.35);
+  color: #ffffff;
+  text-shadow: none;
+}
+::-moz-selection {
+  background: rgba(59, 130, 246, 0.35);
+  color: #ffffff;
+  text-shadow: none;
+}
+
+/* ── (5) Card depth: gradient surface + elevation ──────────────────────────
+   Existing `.card` block (border / radius / solid bg) is untouched. This
+   later rule adds a subtle top-down blue accent gradient layered over the
+   existing solid background-color, plus a medium elevation shadow. */
+.card {
+  background-image: linear-gradient(180deg, rgba(59, 130, 246, 0.035) 0%, transparent 55%);
+  box-shadow: var(--shadow-md);
+}
+
+/* ── (6) Button lift on hover ──────────────────────────────────────────────
+   Re-declares the `.btn` transition with `transform` appended (all four
+   existing transitioned properties preserved verbatim) so the hover lift
+   animates smoothly. `.btn-primary:active` press-scale is re-affirmed
+   below so the existing press feedback is preserved (later source wins at
+   equal specificity). */
+.btn {
+  transition:
+    background var(--duration-fast) var(--easing-std),
+    border-color var(--duration-fast) var(--easing-std),
+    color var(--duration-fast) var(--easing-std),
+    box-shadow var(--duration-fast) var(--easing-std),
+    transform var(--duration-fast) var(--easing-std);
+}
+.btn:hover                { transform: translateY(-1px); }
+.btn-primary:active       { transform: scale(0.98); }   /* re-affirm, additive */
+
+/* ── (7) Themed scrollbar (global, with hover state) ───────────────────────
+   Complements the existing `.scrollbar-thin` variant (which retains higher
+   specificity for thin-scroll regions) and the existing Firefox
+   `* { scrollbar-width: thin; scrollbar-color: ... }` rule. Bare
+   `::-webkit-scrollbar` (equivalent to `*::-webkit-scrollbar`) themes every
+   WebKit/Blink scroll region; thumb brightens to --color-blue on hover. */
+::-webkit-scrollbar              { width: 8px; height: 8px; }
+::-webkit-scrollbar-track        { background: transparent; }
+::-webkit-scrollbar-thumb        {
+  background: var(--border);
+  border-radius: 9999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover  {
+  background: var(--color-blue);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-corner       { background: transparent; }

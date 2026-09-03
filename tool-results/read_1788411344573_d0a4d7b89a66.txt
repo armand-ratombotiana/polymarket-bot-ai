@@ -1,0 +1,536 @@
+     1→     1→     1→# Worklog
+     2→     2→     2→
+     3→     3→     3→## R11+R12 — Unified Decision Ledger (SQLite) + pipeline wiring
+     4→     4→     4→- **Date:** 2026-09-03
+     5→     5→     5→- **Scope:** NEW `core/decision_ledger.py` + additive `decision_id` field on
+     6→     6→     6→  `core/data_store.Order` + additive wiring into `strategies/signal_trader.py`,
+     7→     7→     7→  `strategies/base.py`, `paper/simulator.py`, and `api/server.py` (no existing
+     8→     8→     8→  code removed; all changes are append-only or new helper methods / kwargs).
+     9→     9→     9→
+    10→    10→    10→### Background / investigation
+    11→    11→    11→- The trading pipeline already existed as discrete stages — ML predict →
+    12→    12→    12→  signal generation → risk gate → order submission → fill — but each stage
+    13→    13→    13→  logged to a different store (`audit_trail.db`, `store_state.json`,
+    14→    14→    14→  in-memory `event_log`). Tracing the lifecycle of a single decision
+    15→    15→    15→  required correlating timestamps across three data sources, with no
+    16→    16→    16→  canonical id linking them.
+    17→    17→    17→- `core/audit_logger.py` already establishes the SQLite + `asyncio.to_thread`
+    18→    18→    18→  pattern used here; the new ledger mirrors that convention so the two
+    19→    19→    19→  databases coexist without schema contention.
+    20→    20→    20→- `strategies/signal_trader._ml_signal` is **synchronous** (returns
+    21→    21→    21→  `MarketSignal | None` directly). The decision-ledger writes are async, so
+    22→    22→    22→  the strategy uses a fire-and-forget pattern (`asyncio.ensure_future` on the
+    23→    23→    23→  running loop) — this is critical because awaiting each ledger write inline
+    24→    24→    24→  would block the 15 s scan cadence on SQLite I/O.
+    25→    25→    25→- The four rejection paths in `_ml_signal` are:
+    26→    26→    26→  1. `confidence < self._min_confidence` → `low_confidence`
+    27→    27→    27→  2. `spread >= 0.04` → `wide_spread`
+    28→    28→    28→  3. `0.45 < p_yes < 0.55` → `neutral_zone`
+    29→    29→    29→  4. `kelly_numerator <= MIN_KELLY_NUMERATOR` → `insufficient_kelly_edge`
+    30→    30→    30→  Each path now calls `record_rejection()` with `decision_id`, `predicted_edge`,
+    31→    31→    31→  `confidence`, `reason`, and `market_mid` before returning `None`.
+    32→    32→    32→- `OrderArgs` (in `core/clob_client.py`) is the canonical order-shape passed
+    33→    33→    33→  to `paper_sim.create_order` and `clob_client.create_order`. The
+    34→    34→    34→  `decision_id` is passed as a separate kwarg through `submit_order` →
+    35→    35→    35→  `create_order` (NOT added to `OrderArgs` itself, keeping that dataclass
+    36→    36→    36→  untouched per "additive only — do NOT remove existing code").
+    37→    37→    37→
+    38→    38→    38→### R11 — New `core/decision_ledger.py`
+    39→    39→    39→
+    40→    40→    40→#### Schema (SQLite, separate db at `DECISION_LEDGER_DB_PATH`
+    41→    41→    41→defaulting to `/app/data/decision_ledger.db`)
+    42→    42→    42→- **`decision_events`** — `(id, timestamp, decision_id, stage, token_id,
+    43→    43→    43→  strategy, pnl, data_json)` — the main chronological chain.
+    44→    44→    44→  Indexes: `(decision_id, timestamp ASC)` for chain reconstruction,
+    45→    45→    45→  `(token_id, timestamp DESC)` for the token-level feed, `(stage)` for
+    46→    46→    46→  per-stage aggregate queries.
+    47→    47→    47→- **`decision_rejections`** — `(id, timestamp, decision_id, token_id,
+    48→    48→    48→  strategy, predicted_edge, confidence, reason, market_mid)` — a fast
+    49→    49→    49→  filtered rejection view. Each rejection is also written to
+    50→    50→    50→  `decision_events` with `stage='RISK_REJECTED'` so the originating
+    51→    51→    51→  `decision_id`'s chain has a complete end-to-end trail.
+    52→    52→    52→- WAL-friendly `CREATE TABLE IF NOT EXISTS` + `CREATE INDEX IF NOT EXISTS`
+    53→    53→    53→  idempotent init — safe to call on every boot.
+    54→    54→    54→
+    55→    55→    55→#### Public API
+    56→    56→    56→- `decision_ledger.new_decision_id() -> str` — returns a fresh
+    57→    57→    57→  `dec-{uuid4.hex}` (32 hex chars after prefix; globally unique, sortable
+    58→    58→    58→  prefix for log grepping).
+    59→    59→    59→- `decision_ledger.record(decision_id, stage, token_id=None,
+    60→    60→    60→  strategy=None, pnl=0.0, **data)` — async write. `**data` is JSON-serialised
+    61→    61→    61→  (with `default=str` for Decimals / enums / dataclasses) and stored in
+    62→    62→    62→  `data_json`. Empty `decision_id` is skipped silently (legacy / manual
+    63→    63→    63→  orders don't break the ledger).
+    64→    64→    64→- `decision_ledger.record_rejection(token_id, strategy, predicted_edge,
+    65→    65→    65→  confidence, reason, market_mid=None, decision_id="")` — async write.
+    66→    66→    66→  Records BOTH a `RISK_REJECTED` chain event (if `decision_id` provided)
+    67→    67→    67→  AND a row in the `decision_rejections` table.
+    68→    68→    68→- `decision_ledger.get_chain(decision_id) -> list[dict]` — chronological
+    69→    69→    69→  (oldest-first) stage chain. Each row includes both raw `data_json` and a
+    70→    70→    70→  decoded `data` key for caller convenience.
+    71→    71→    71→- `decision_ledger.get_chain_by_token(token_id, limit=50) -> list[dict]` —
+    72→    72→    72→  most-recent-first stage events for a token.
+    73→    73→    73→- `decision_ledger.get_rejections(limit=50) -> list[dict]` — most-recent-
+    74→    74→    74→  first rejection feed.
+    75→    75→    75→- `register_routes(app)` — appends two FastAPI routes:
+    76→    76→    76→  - `GET /api/decision/{token_id}?limit=N` — recent decision events for a
+    77→    77→    77→    token (404 if none recorded). Returns `{token_id, count, events[]}`.
+    78→    78→    78→  - `GET /api/decisions/rejected?limit=N` — recent rejections. Returns
+    79→    79→    79→    `{count, rejections[]}`.
+    80→    80→    80→
+    81→    81→    81→#### Module-level constants
+    82→    82→    82→Stage vocabulary (single source of truth across the pipeline):
+    83→    83→    83→- `STAGE_PREDICTION = "PREDICTION"`
+    84→    84→    84→- `STAGE_SIGNAL = "SIGNAL"`
+    85→    85→    85→- `STAGE_RISK_APPROVED = "RISK_APPROVED"`
+    86→    86→    86→- `STAGE_RISK_REJECTED = "RISK_REJECTED"`
+    87→    87→    87→- `STAGE_ORDER = "ORDER"`
+    88→    88→    88→- `STAGE_FILL = "FILL"`
+    89→    89→    89→
+    90→    90→    90→Rejection reason vocabulary:
+    91→    91→    91→- `REASON_LOW_CONFIDENCE = "low_confidence"`
+    92→    92→    92→- `REASON_WIDE_SPREAD = "wide_spread"`
+    93→    93→    93→- `REASON_NEUTRAL_ZONE = "neutral_zone"`
+    94→    94→    94→- `REASON_INSUFFICIENT_KELLY_EDGE = "insufficient_kelly_edge"`
+    95→    95→    95→
+    96→    96→    96→### R11 — `core/data_store.py` (additive)
+    97→    97→    97→- Appended `decision_id: str = ""` to the `Order` dataclass after the existing
+    98→    98→    98→  `paper: bool = False` field. Default empty string means all existing
+    99→    99→    99→  `Order(...)` constructors (10 sites across `position_manager.py`,
+   100→   100→   100→  `api/server.py`, `strategies/base.py`, `paper/simulator.py`) continue to
+   101→   101→   101→  work unchanged. The field is populated only by the
+   102→   102→   102→  signal-trader → submit-order → create-order chain.
+   103→   103→   103→
+   104→   104→   104→### R12 — Pipeline wiring (additive only)
+   105→   105→   105→
+   106→   106→   106→#### (1) `strategies/signal_trader.py`
+   107→   107→   107→- Added `decision_id: str = ""` to the `MarketSignal` dataclass (after
+   108→   108→   108→  `source: str`).
+   109→   109→   109→- Added two helper methods:
+   110→   110→   110→  - `_emit_ledger(coro)` (static) — schedules an async ledger write on the
+   111→   111→   111→    running loop via `asyncio.ensure_future`. Swallows errors and
+   112→   112→   112→    no-op's if the loop isn't running (e.g. unit-test context).
+   113→   113→   113→  - `_emit_rejection(token_id, decision_id, predicted_edge, confidence,
+   114→   114→   114→    reason, market_mid)` — wraps `decision_ledger.record_rejection()` and
+   115→   115→   115→    schedules it via `_emit_ledger`.
+   116→   116→   116→- `_ml_signal()` is now structured as:
+   117→   117→   117→  1. Generate `dec_id = decision_ledger.new_decision_id()` (with try/except
+   118→   118→   118→     fallback to `""` if the ledger module fails to import — strategy never
+   119→   119→   119→     crashes on ledger plumbing).
+   120→   120→   120→  2. Compute `p_yes`, `confidence`, `mid`, `spread`, `predicted_edge`.
+   121→   121→   121→  3. Emit **PREDICTION** stage (always — even rejected predictions leave a
+   122→   122→   122→     traceable chain).
+   123→   123→   123→  4. Each of the four rejection paths calls `_emit_rejection(...)` BEFORE
+   124→   124→   124→     returning `None`. The existing `return None` statements are preserved.
+   125→   125→   125→  5. After all gates pass, emit **SIGNAL** stage with full kelly context
+   126→   126→   126→     (`direction`, `target_price`, `size_usdc`, `kelly_f`, `kelly_numerator`,
+   127→   127→   127→     `win_prob`, `payout_ratio`, `p_yes`, `confidence`, `market_mid`, `reason`).
+   128→   128→   128→  6. Return `MarketSignal(..., decision_id=dec_id)`.
+   129→   129→   129→- `_act_on_signal()` now passes `decision_id=sig.decision_id` to
+   130→   130→   130→  `self.submit_order(args, decision_id=...)`.
+   131→   131→   131→
+   132→   132→   132→#### (2) `strategies/base.py`
+   133→   133→   133→- `submit_order(self, args, decision_id: str = "") -> Order | None` — new
+   134→   134→   134→  keyword arg (default empty for legacy callers).
+   135→   135→   135→- `provisional` Order now includes `decision_id=decision_id`.
+   136→   136→   136→- On risk rejection: emits **RISK_REJECTED** stage with `reason`,
+   137→   137→   137→  `side`, `price`, `size`. (The existing `await store.log_event(...)` is
+   138→   138→   138→  preserved.)
+   139→   139→   139→- On risk approval: emits **RISK_APPROVED** stage before paper/live dispatch.
+   140→   140→   140→- Paper path: `paper_sim.create_order(args, strategy=self.name,
+   141→   141→   141→  decision_id=decision_id)`.
+   142→   142→   142→- Live path: the resulting `Order(...)` is constructed with
+   143→   143→   143→  `decision_id=decision_id` so it propagates through to `store.add_order`.
+   144→   144→   144→- All ledger writes are wrapped in `try/except` and logged at DEBUG on
+   145→   145→   145→  failure — the order path never blocks on ledger I/O.
+   146→   146→   146→
+   147→   147→   147→#### (3) `paper/simulator.py`
+   148→   148→   148→- `create_order(self, args, strategy="", decision_id="")` — new keyword arg.
+   149→   149→   149→- The resulting `Order(...)` carries `decision_id=decision_id`.
+   150→   150→   150→- After `store.add_order(order)`, emits **ORDER** stage with `order_id`,
+   151→   151→   151→  `side`, `price`, `size`, `paper=True`. (Existing `store.log_event` and
+   152→   152→   152→  `log.info` calls are preserved.)
+   153→   153→   153→- `_execute_fill(order, fill_price)` — after `store.update_order(...)` (and
+   154→   154→   154→  before the existing `store.log_event(...)` for the fill), emits **FILL**
+   155→   155→   155→  stage with `pnl`, `fill_price`, `fill_size`, `side`, `order_id`,
+   156→   156→   156→  `trade_id`, `paper=True`. A missing `decision_id` (legacy / manual
+   157→   157→   157→  order) is skipped silently.
+   158→   158→   158→
+   159→   159→   159→#### (4) `api/server.py`
+   160→   160→   160→- Appended at end of file (after the WebSocket `/ws` route):
+   161→   161→   161→  ```python
+   162→   162→   162→  from core.decision_ledger import register_routes as _register_decision_routes
+   163→   163→   163→  _register_decision_routes(app)
+   164→   164→   164→  ```
+   165→   165→   165→- This registers the two new endpoints:
+   166→   166→   166→  - `GET /api/decision/{token_id}`
+   167→   167→   167→  - `GET /api/decisions/rejected`
+   168→   168→   168→- Both inherit the existing fail-closed bearer-token auth middleware (no
+   169→   169→   169→  new public paths added).
+   170→   170→   170→
+   171→   171→   171→### Verification
+   172→   172→   172→
+   173→   173→   173→#### py_compile (clean)
+   174→   174→   174→- `core/decision_ledger.py` ✓
+   175→   175→   175→- `core/data_store.py` ✓
+   176→   176→   176→- `strategies/signal_trader.py` ✓
+   177→   177→   177→- `strategies/base.py` ✓
+   178→   178→   178→- `paper/simulator.py` ✓
+   179→   179→   179→- `api/server.py` ✓
+   180→   180→   180→
+   181→   181→   181→#### Decision-ledger unit smoke test (PASS)
+   182→   182→   182→- `new_decision_id()` returns `dec-{32-hex}` (globally unique).
+   183→   183→   183→- `record()` writes 5 stages (PREDICTION → SIGNAL → RISK_APPROVED →
+   184→   184→   184→  ORDER → FILL) for a single `decision_id`.
+   185→   185→   185→- `get_chain(decision_id)` returns them in chronological order.
+   186→   186→   186→- FILL stage's `pnl` column carries the realised P&L.
+   187→   187→   187→- `get_chain_by_token(token_id)` returns events newest-first.
+   188→   188→   188→- `record_rejection()` writes BOTH a `RISK_REJECTED` chain event AND a
+   189→   189→   189→  `decision_rejections` row.
+   190→   190→   190→- `get_rejections()` returns newest-first.
+   191→   191→   191→- Empty `decision_id` is a no-op for `record()` and returns `[]` for
+   192→   192→   192→  `get_chain()` / `get_chain_by_token()`.
+   193→   193→   193→
+   194→   194→   194→#### FastAPI route registration smoke test (PASS)
+   195→   195→   195→- Both routes registered on `app`:
+   196→   196→   196→  - `GET /api/decision/{token_id}`
+   197→   197→   197→  - `GET /api/decisions/rejected`
+   198→   198→   198→- `GET /api/decision/TOK_DEMO` → 200, 5 stages, `data_json` decoded into
+   199→   199→   199→  `data` key, `pnl` column populated on FILL.
+   200→   200→   200→- `GET /api/decision/NOPE` → 404.
+   201→   201→   201→- `GET /api/decisions/rejected` → 200, 1 rejection with `predicted_edge`,
+   202→   202→   202→  `confidence`, `reason`, `market_mid` columns.
+   203→   203→   203→- `GET /api/decisions/rejected` (no auth header) → 401 (fail-closed
+   204→   204→   204→  middleware preserved).
+   205→   205→   205→- `?limit=N` query param respected.
+   206→   206→   206→
+   207→   207→   207→#### End-to-end integration test (PASS)
+   208→   208→   208→- Patched `ml_model.predict` and `extract_features` for deterministic
+   209→   209→   209→  outcomes; bypassed `risk_manager.check_order` (test scope = ledger
+   210→   210→   210→  plumbing, not the risk engine itself).
+   211→   211→   211→- **Happy path**: `_ml_signal(...)` returns a `MarketSignal` with
+   212→   212→   212→  `decision_id` populated. Chain contains `[PREDICTION, SIGNAL]` after
+   213→   213→   213→  the call. P&L on FILL = 0.0 for an opening BUY (correct — P&L is
+   214→   214→   214→  computed only for closing SELLs).
+   215→   215→   215→- **All 4 rejection paths** verified — each emits a `record_rejection()`
+   216→   216→   216→  with the correct `reason` code (`low_confidence`, `wide_spread`,
+   217→   217→   217→  `neutral_zone`, `insufficient_kelly_edge`). All 4 appear in
+   218→   218→   218→  `get_rejections()`.
+   219→   219→   219→- **End-to-end paper trade**: `_act_on_signal` → `submit_order` →
+   220→   220→   220→  `paper_sim.create_order` → `_execute_fill`. The complete chain for the
+   221→   221→   221→  originating `decision_id` is
+   222→   222→   222→  `[PREDICTION, SIGNAL, RISK_APPROVED, ORDER, FILL]` (chronological).
+   223→   223→   223→- The `Order` returned from `paper_sim.create_order` carries
+   224→   224→   224→  `decision_id=did2` (verified via `store.open_orders`).
+   225→   225→   225→- `get_chain_by_token(token_id)` returns ≥5 rows for the token.
+   226→   226→   226→
+   227→   227→   227→### Notes / known behaviour
+   228→   228→   228→- The `_emit_ledger` fire-and-forget pattern means ledger writes happen
+   229→   229→   229→  *after* `_ml_signal` returns. Callers that need to verify the chain
+   230→   230→   230→  synchronously must `await asyncio.sleep(...)` (typically 100-150 ms is
+   231→   231→   231→  enough for SQLite WAL writes to flush on a non-loaded system). Production
+   232→   232→   232→  callers (the strategy scan loop) don't need to wait — the writes
+   233→   233→   233→  eventually land.
+   234→   234→   234→- The `record()` and `record_rejection()` methods both use
+   235→   235→   235→  `asyncio.to_thread(_insert)` for SQLite I/O, so they don't block the
+   236→   236→   236→  event loop. Combined with `_emit_ledger`'s `ensure_future`, the strategy
+   237→   237→   237→  scan cadence is unaffected.
+   238→   238→   238→- A missing / empty `decision_id` is silently skipped on writes (and
+   239→   239→   239→  returns `[]` on `get_chain`). This preserves backward compatibility for
+   240→   240→   240→  manual / legacy order paths (`/api/trade`, `position_manager.exit_order`,
+   241→   241→   241→  etc.) that don't yet participate in the unified ledger.
+   242→   242→   242→- The `decision_rejections` table duplicates the rejection info that's
+   243→   243→   243→  also in `decision_events` (as a `RISK_REJECTED` stage row). This is
+   244→   244→   244→  intentional — the rejections table is indexed for fast filtered listing
+   245→   245→   245→  on the dashboard, while the chain row keeps the originating
+   246→   246→   246→  `decision_id`'s audit trail complete.
+   247→   247→   247→- The FILL stage records `pnl=0.0` for opening BUY orders (no P&L
+   248→   248→   248→  realised until the position is closed). This mirrors the existing
+   249→   249→   249→  `_execute_fill` P&L logic in `paper/simulator.py` (P&L is only computed
+   250→   250→   250→  for SELL orders closing a long position).
+   251→   251→   251→- Live-mode orders (`paper=False`) currently flow through `clob_client`
+   252→   252→   252→  without a ledger ORDER stage record (only PREDICTION → SIGNAL →
+   253→   253→   253→  RISK_APPROVED is recorded for live orders). Adding an ORDER stage for
+   254→   254→   254→  live orders would require either extending `clob_client.create_order`'s
+   255→   255→   255→  return shape or wrapping it in `strategies/base.py`; out of scope for
+   256→   256→   256→  R11+R12 (the task spec only mentions paper `create_order`).
+   257→   257→   257→
+   258→   258→   258→### Open items / follow-ups
+   259→   259→   259→- (Optional) Add a `GET /api/decision/{token_id}/chain/{decision_id}`
+   260→   260→   260→  endpoint that calls `get_chain(decision_id)` directly for tracing a
+   261→   261→   261→  single decision chain end-to-end (vs. the current token-level feed).
+   262→   262→   262→- (Optional) Surface decision-ledger stats (count of rejections per
+   263→   263→   263→  reason, top rejected tokens) on the dashboard.
+   264→   264→   264→- (Optional) Extend `position_manager.py` exit orders to populate
+   265→   265→   265→  `decision_id` so close-trade P&L is attributable to the originating
+   266→   266→   266→  signal.
+   267→   267→   267→- (Optional) Wire a `STAGE_CANCEL` event when an open paper order is
+   268→   268→   268→  cancelled (via `paper_sim.cancel_order`) so cancelled chains don't
+   269→   269→   269→  appear as "missing FILL" silently.
+   270→   270→   270→
+   271→   271→   271→---
+   272→   272→   272→
+   273→   273→   273→## R10 — Fix ML predict endpoint + add one-click position close
+   274→   274→   274→- **Date:** 2025-09-03
+   275→   275→   275→- **Scope:** `mini-services/polymarket-bot/api/server.py` (additive only; no existing code removed)
+   276→   276→   276→
+   277→   277→   277→### Background / investigation
+   278→   278→   278→- `core/market_discovery.py` exposes a singleton `market_discovery` whose
+   279→   279→   279→  `catalog: dict[str, dict]` (token_id → market metadata) is the canonical
+   280→   280→   280→  in-memory market index. The task explicitly requires reading market
+   281→   281→   281→  metadata from `market_discovery.catalog` — the `store.market_info`
+   282→   282→   282→  attribute referenced in earlier draft specs **does not exist** on
+   283→   283→   283→  `core/data_store.DataStore` (verified by grep + runtime import).
+   284→   284→   284→- `ml/model.py::MarketMLModel.predict(features, token_id)` returns
+   285→   285→   285→  `(p_yes, confidence)`; `confidence = |p_yes − 0.5| × 2`.
+   286→   286→   286→- `ml/features.py::extract_features(market, book)` expects a Gamma-style
+   287→   287→   287→  market dict (`volume24hr`, `volume`, `liquidity|liquidityNum`,
+   288→   288→   288→  `endDate|end_date_iso|endDateIso`). The catalog record uses normalized
+   289→   289→   289→  snake_case keys (`volume_24h`, `total_volume`, `liquidity`, `end_date`),
+   290→   290→   290→  so the predict endpoint bridges both shapes before feature extraction.
+   291→   291→   291→- `core/data_store.Position` carries `yes_shares` (long YES) and
+   292→   292→   292→  `no_shares` (long NO). Closing a long YES → SELL at best_bid; closing a
+   293→   293→   293→  long NO → BUY at best_ask (symmetric synthetic-short cover).
+   294→   294→   294→- Risk gate (`risk.manager.RiskManager.check_order`) is applied on every
+   295→   295→   295→  order — close orders are not exempt (consistent with `/api/trade`).
+   296→   296→   296→- `paper/simulator.PaperSimulator._can_fill` fills a SELL at price=best_bid
+   297→   297→   297→  whenever `best_bid ≥ price` (true by construction), so a marketable
+   298→   298→   298→  close order settles in the ~1s paper fill-loop.
+   299→   299→   299→
+   300→   300→   300→### Changes (all additive — no existing endpoints modified)
+   301→   301→   301→
+   302→   302→   302→#### 1. `GET /api/ai/predict/{token_id}` (tag: `ai`)
+   303→   303→   303→- Reads metadata from `market_discovery.catalog[token_id]`; 404 if absent
+   304→   304→   304→  (hint: retry after next catalog sync, or check `/api/markets/coverage`).
+   305→   305→   305→- Fetches live `OrderBook` via `store.get_order_book`; 502 + poller hint
+   306→   306→   306→  if absent.
+   307→   307→   307→- Builds a feature-compatible market dict (snake_case → Gamma-style aliases)
+   308→   308→   308→  and calls `ml.features.extract_features` + `ml_model.predict`.
+   309→   309→   309→- Returns:
+   310→   310→   310→  - `p_yes`, `confidence`, `market_mid`, `best_bid`, `best_ask`, `spread`
+   311→   311→   311→  - `edge = p_yes − market_mid` and `edge_bps` (basis points)
+   312→   312→   312→  - `recommended_action`: `BUY` / `SELL` / `HOLD`
+   313→   313→   313→    - **BUY**: `edge ≥ +2 ct (200 bps)` AND `confidence ≥ 0.10`
+   314→   314→   314→    - **SELL**: `edge ≤ −2 ct (−200 bps)` AND `confidence ≥ 0.10`
+   315→   315→   315→    - **HOLD**: otherwise (insufficient edge OR insufficient model conviction)
+   316→   316→   316→    - Edge-based (not absolute p_yes) so a model that sees a 50/50 coin
+   317→   317→   317→      priced at 0.20 surfaces BUY rather than HOLD merely because
+   318→   318→   318→      `|p_yes − 0.5|` is small.
+   319→   319→   319→  - `action_reason`: human-readable string explaining the decision
+   320→   320→   320→  - `thresholds`: the gates used (auditable)
+   321→   321→   321→  - `model_status`: model_ready, version, brier, roc_auc, ece, n_updates
+   322→   322→   322→  - `market`: compact catalog payload (token_id, event_id, question,
+   323→   323→   323→    slug, outcome, category, end_date, status, volume_24h, total_volume,
+   324→   324→   324→    liquidity, last_synced)
+   325→   325→   325→  - `book_updated_at`, `timestamp`
+   326→   326→   326→
+   327→   327→   327→#### 2. `POST /api/positions/{token_id}/close` (tag: `trading`)
+   328→   328→   328→- Optional JSON body (`PositionCloseRequest`):
+   329→   329→   329→  - `max_size_shares: float | None` — cap for partial scale-outs
+   330→   330→   330→  - `dry_run: bool` — preview without submitting
+   331→   331→   331→- Looks up position under `store._lock` (snapshots values before release).
+   332→   332→   332→- 404 if no open position (`yes_shares ≤ 0 AND no_shares ≤ 0`).
+   333→   333→   333→- Determines side from position direction:
+   334→   334→   334→  - Long YES → `SELL` at `best_bid` (marketable limit; any bid ≥ best_bid
+   335→   335→   335→    matches immediately)
+   336→   336→   336→  - Long NO → `BUY` at `best_ask` (symmetric synthetic-short cover)
+   337→   337→   337→- 502 + poller hint if book missing or both sides empty; specific 502 if
+   338→   338→   338→  the relevant side (bid for YES close, ask for NO close) is empty.
+   339→   339→   339→- Computes `estimated_pnl` for YES-close using cost basis
+   340→   340→   340→  (`(close_price − avg_entry_price) × size_shares`).
+   341→   341→   341→- `dry_run=true` returns the preview without submitting (includes
+   342→   342→   342→  `remaining_position` projection).
+   343→   343→   343→- Applies `risk_manager.check_order` (same gate as `/api/trade`);
+   344→   344→   344→  400 with reason on rejection.
+   345→   345→   345→- Submits `OrderArgs(order_type="FOK")` through `paper_sim` (paper mode)
+   346→   346→   346→  or `clob_client` (live mode); for live mode constructs and stores the
+   347→   347→   347→  resulting `Order`.
+   348→   348→   348→- Writes an immutable `audit_logger.log_event` row
+   349→   349→   349→  (`category=trading`, `event_type=position_close`).
+   350→   350→   350→- Emits a `store.log_event` user-visible event line.
+   351→   351→   351→- Returns: `status`, `order_id`, `side`, `price`, `size_shares`,
+   352→   352→   352→  `notional_usdc`, `estimated_pnl`, `best_bid`, `best_ask`,
+   353→   353→   353→  `book_updated_at`, `paper_trade`, `remaining_position` (post-close
+   354→   354→   354→  projection), `note`.
+   355→   355→   355→
+   356→   356→   356→### Verification (in-process TestClient smoke tests)
+   357→   357→   357→- `python3 -c "import ast; ast.parse(open('api/server.py').read())"` → clean.
+   358→   358→   358→- Full module import succeeds (after redirecting data paths to /tmp for
+   359→   359→   359→  the sandbox); both new routes registered:
+   360→   360→   360→  - `GET  /api/ai/predict/{token_id}`
+   361→   361→   361→  - `POST /api/positions/{token_id}/close`
+   362→   362→   362→- End-to-end TestClient run with a seeded catalog record + fake order book:
+   363→   363→   363→  - `GET /api/ai/predict/TEST_TOKEN_YES` → 200, `p_yes=0.932`,
+   364→   364→   364→    `market_mid=0.81`, `edge=+0.122`, `recommended_action=BUY`,
+   365→   365→   365→    `action_reason="edge=+12.20ct ≥ +2ct AND confidence=0.864 ≥ 0.10"`.
+   366→   366→   366→  - `POST /api/positions/.../close` (`dry_run=true`) → 200, `side=SELL`,
+   367→   367→   367→    `price=0.80` (best_bid), `size_shares=50.0`, `estimated_pnl=15.0`,
+   368→   368→   368→    `remaining_position.yes_shares=0.0`.
+   369→   369→   369→  - Partial close (`max_size_shares=10, dry_run=true`) → 200, sized to 10.
+   370→   370→   370→  - Live submit (paper mode, small position under the $3/mkt cap):
+   371→   371→   371→    200 with `order_id=paper-…`, fill-loop settled in ~1s,
+   372→   372→   372→    position reduced to 0, `realised_pnl=0.56`, trade recorded.
+   373→   373→   373→  - Large live submit (>$3 cap): 400 risk-rejection (expected — same
+   374→   374→   374→    gate as `/api/trade`).
+   375→   375→   375→  - 404 paths: `predict` on unknown token (catalog miss); `close` on
+   376→   376→   376→    token without a position.
+   377→   377→   377→  - Auth: missing `Authorization` header → 401 (fail-closed).
+   378→   378→   378→
+   379→   379→   379→### Open items / follow-ups
+   380→   380→   380→- `clob_client.create_order` currently ignores `OrderArgs.order_type`
+   381→   381→   381→  (signs a vanilla limit order); the `FOK` flag is metadata only. If the
+   382→   382→   382→  exchange is expected to honor fill-or-kill semantics, `clob_client`
+   383→   383→   383→  must be extended separately (out of scope for R10).
+   384→   384→   384→- The recommend-action thresholds (`MIN_EDGE_CT=0.02`, `MIN_CONFIDENCE=0.10`)
+   385→   385→   385→  are hard-coded constants mirroring the conviction gates in
+   386→   386→   386→  `strategies/signal_trader.py`; a future task could expose them via
+   387→   387→   387→  `/api/config` for live tuning.
+   388→   388→   388→
+   389→   389→   389→---
+   390→   390→   390→
+   391→   391→   391→## R5 — ML label backfill service
+   392→   392→   392→- **Date:** 2026-09-03
+   393→   393→   393→- **Scope:** New `core/label_backfill.py` service + additive `core/timescale_db.py`
+   394→   394→   394→  methods + minimal `api/server.py` lifespan wiring (no existing endpoints modified).
+   395→   395→   395→
+   396→   396→   396→### Summary
+   397→   397→   397→Added a resolved-market label backfill service that pages through Gamma API
+   398→   398→   398→resolved markets, builds 38-dim feature vectors from market metadata + a
+   399→   399→   399→synthetic order book, persists `(features, resolved_label)` rows into the
+   400→   400→   400→SQLite `ml_feature_store`, and triggers a model retrain once ≥50 real labels
+   401→   401→   401→have accumulated. Runs on a 45 s startup grace, then on a 24 h daily cycle.
+   402→   402→   402→
+   403→   403→   403→### Files
+   404→   404→   404→- **NEW** `mini-services/polymarket-bot/core/label_backfill.py`
+   405→   405→   405→  - `LabelBackfillEngine` singleton (`label_backfill_engine`) with
+   406→   406→   406→    `start()` / `stop()` / `run_backfill_once()` / `stats`.
+   407→   407→   407→  - 45 s startup grace → first backfill pass → daily 86 400 s loop.
+   408→   408→   408→  - Pages Gamma `get_markets(active=False, closed=True, order="updatedAt")`
+   409→   409→   409→    up to `MAX_PAGES=25` × `PAGE_SIZE=100` (≤ 2 500 markets/cycle).
+   410→   410→   410→  - For each market: parses `outcomePrices` for `resolved_yes` (mirrors
+   411→   411→   411→    `core/settlement.py`'s `p0 >= 0.9` convention), extracts YES/NO token
+   412→   412→   412→    IDs via `gamma_client.extract_token_ids`, builds a 5-level synthetic
+   413→   413→   413→    order book from `outcomePrices` + `volume24hr` + `liquidity` (mid
+   414→   414→   414→    clipped into `[0.02, 0.98]` so `extract_features()` doesn't reject the
+   415→   415→   415→    sample), and calls `ml.features.extract_features()` to get the 38-dim
+   416→   416→   416→    vector.
+   417→   417→   417→  - Persists via `timescale_db.record_feature_vector(..., outcome_resolved=…)`
+   418→   418→   418→    which writes to SQLite `ml_feature_store` (and PG when pool is up).
+   419→   419→   419→  - Idempotent per token: `timescale_db.has_labeled_sample(token_id)` gates
+   420→   420→   420→    every write so a token is never re-labeled across cycles.
+   421→   421→   421→  - Retrain trigger: after each cycle, if
+   422→   422→   422→    `fetch_labeled_feature_vectors(limit=10_000)` returns ≥
+   423→   423→   423→    `MIN_LABELS_FOR_RETRAIN=50` samples, calls `ml_model.fit_initial()`
+   424→   424→   424→    (off the event loop via `asyncio.to_thread`) then `ml_model.save()`.
+   425→   425→   425→    Logging includes resulting `brier_score`/`roc_auc`/`ece`/`training_source`.
+   426→   426→   426→
+   427→   427→   427→- **MODIFIED** `mini-services/polymarket-bot/core/timescale_db.py`
+   428→   428→   428→  (additive only — no existing methods touched, no duplicates introduced)
+   429→   429→   429→  - **NEW** `has_labeled_sample(token_id) -> bool`: returns True iff any
+   430→   430→   430→    row in `ml_feature_store` for `token_id` has `outcome_resolved IS NOT
+   431→   431→   431→    NULL`. Used by the backfill service for idempotent dedup.
+   432→   432→   432→  - **REUSED (pre-existing)** `fetch_labeled_feature_vectors(limit=200)
+   433→   433→   433→    -> list[tuple[np.ndarray, int]]`: returns up to `limit` labeled
+   434→   434→   434→    `(features, label)` tuples from `ml_feature_store` (most-recent
+   435→   435→   435→    first), padded/trimmed to `N_FEATURES`. This method was already in
+   436→   436→   436→    the file (consumed by `EnsembleMetaLearner.warm_from_labeled_samples()`);
+   437→   437→   437→    R5 simply re-uses it as the count + sample source for the ≥50-label
+   438→   438→   438→    retrain threshold check. No duplicate definition was added — the
+   439→   439→   439→    meta-learner contract is preserved verbatim (verified by AST scan:
+   440→   440→   440→    exactly one `fetch_labeled_feature_vectors` and one
+   441→   441→   441→    `has_labeled_sample` method on `TimescaleDBEngine`).
+   442→   442→   442→  - Both methods follow the existing sync + sqlite3-only convention used
+   443→   443→   443→    by `fetch_recent_feature_vector` / `fetch_training_samples`.
+   444→   444→   444→
+   445→   445→   445→- **MODIFIED** `mini-services/polymarket-bot/api/server.py` (additive)
+   446→   446→   446→  - Registered `"label_backfill"` with the watchdog subsystem list.
+   447→   447→   447→  - Lifespan startup: after `training_orchestrator.start()`, calls
+   448→   448→   448→    `await label_backfill_engine.start()` + `watchdog.beat("label_backfill")`
+   449→   449→   449→    + a `store.log_event` for UI visibility.
+   450→   450→   450→  - Lifespan shutdown: `await label_backfill_engine.stop()` before
+   451→   451→   451→    `settlement_engine.stop()`.
+   452→   452→   452→  - `/api/ml` endpoint now exposes `label_backfill: stats` alongside
+   453→   453→   453→    `training_orchestrator` stats for observability.
+   454→   454→   454→
+   455→   455→   455→### Verification
+   456→   456→   456→- `python -m py_compile` clean on `core/label_backfill.py`,
+   457→   457→   457→  `core/timescale_db.py`, `api/server.py`.
+   458→   458→   458→- AST scan confirms `TimescaleDBEngine` has exactly 1
+   459→   459→   459→  `fetch_labeled_feature_vectors` (pre-existing) and 1
+   460→   460→   460→  `has_labeled_sample` (new R5) — no duplicate definitions, no existing
+   461→   461→   461→  methods removed/renamed (additive-only constraint honored).
+   462→   462→   462→- Targeted functional test passes:
+   463→   463→   463→  - Engine constructs in non-running state; stats snapshot well-formed.
+   464→   464→   464→  - `_resolve_outcome` parses YES / NO / unresolvable markets correctly.
+   465→   465→   465→  - `_build_synthetic_book` produces a 5-level book with clipped mid in
+   466→   466→   466→    `[0.02, 0.98]`, sized from `volume24hr`.
+   467→   467→   467→  - `ml.features.extract_features(synthetic_book)` returns a valid
+   468→   468→   468→    `(38,)` float32 vector (no None).
+   469→   469→   469→  - End-to-end: `record_feature_vector(outcome_resolved=1)` →
+   470→   470→   470→    `has_labeled_sample(token_id)=True` (and False for other tokens) →
+   471→   471→   471→    `fetch_labeled_feature_vectors` returns the same row as a
+   472→   472→   472→    `list[tuple[np.ndarray, int]]` (1 sample, label=1).
+   473→   473→   473→  - Retrain-deferred: with <50 labeled samples, `_maybe_trigger_retrain`
+   474→   474→   474→    correctly returns False (does NOT call `fit_initial`).
+   475→   475→   475→  - Idempotency: second `_persist_token_label` call for the same token
+   476→   476→   476→    returns `(added=0, skipped=1)` — no duplicate writes.
+   477→   477→   477→  - Meta-learner contract preserved: simulated
+   478→   478→   478→    `for features, label in fetch_labeled_feature_vectors(...)` iteration
+   479→   479→   479→    (exactly how `EnsembleMetaLearner.warm_from_labeled_samples` consumes
+   480→   480→   480→    the result) works correctly.
+   481→   481→   481→
+   482→   482→   482→### Notes / known behaviour
+   483→   483→   483→- The model's `fit_initial()` blends real+synthetic training data only when
+   484→   484→   484→  `timescale_db.fetch_training_samples(min_samples=200)` returns ≥200
+   485→   485→   485→  labeled rows (existing system threshold, untouched per "additive only"
+   486→   486→   486→  constraint). At 50–199 labeled rows the retrain fires but falls back
+   487→   487→   487→  to synth-only training — this is pre-existing `fit_initial()` semantics,
+   488→   488→   488→  not a bug introduced by R5. Once settlement-engine live labels +
+   489→   489→   489→  backfill labels together cross 200, real data is blended in automatically.
+   490→   490→   490→- Pagination caps at 25 pages × 100 markets = 2 500 markets/cycle to bound
+   491→   491→   491→  worst-case Gamma API load. Tunable via `MAX_PAGES` / `PAGE_SIZE`.
+   492→   492→   492→- The synthetic order book is a best-effort reconstruction from Gamma
+   493→   493→   493→  metadata (resolved markets no longer have a live CLOB book). Cluster
+   494→   494→   494→  correlation defaults to 0.5 and fundamental sentiment defaults to 0.0
+   495→   495→   495→  for backfilled samples — both are graceful fallbacks already in
+   496→   496→   496→  `ml.features.extract_features`.
+   497→   497→   497→
+   498→   498→   498→### Next actions
+   499→   499→   499→- (Optional) Lower `fetch_training_samples`'s `min_samples=200` to align
+   500→   500→   500→  with the backfill's 50-label threshold if we want the retrain at 50
+   501→   501→   501→  labels to actually blend real data — would be a separate, non-additive
+   502→   502→   502→  change to `ml/model.py`.
+   503→   503→   503→- (Optional) Add a `/api/ml/label-backfill/run` POST endpoint that calls
+   504→   504→   504→  `await label_backfill_engine.run_backfill_once()` for on-demand cycles
+   505→   505→   505→  outside the daily schedule.
+   506→   506→   506→- (Optional) Surface `label_backfill` stats on the dashboard.
+   507→   507→   507→
+   508→   508→   508→---
+   509→   509→   509→Task ID: GM-REBUILD (Wave 1 — 15 subagents R1-R15: execution fixes, ML fixes, decision ledger, analytics, smart router)
+   510→   510→   510→Agent: orchestrator + 15 subagents
+   511→   511→   511→Task: Rebuild all critical improvements from scratch after sandbox reset (4 prior waves lost).
+   512→   512→   512→
+   513→   513→   513→Work Log:
+   514→   514→   514→- R1: position_manager.py — marketable SL/TP exits at best_bid (was mid), SL tightened 15%→5%, cancel stale exits
+   515→   515→   515→- R2: market_maker.py — dropped 0.01 A-S damping, bounded ask_size to inventory, inventory flush >60s
+   516→   516→   516→- R3: risk/manager.py — MDD baseline OPERATING_CAPITAL fix, per-trade circuit breaker (PER_TRADE_MAX_LOSS=$0.50, cooldown=300s)
+   517→   517→   517→- R4: paper/simulator.py — slippage model (crossing+size+queue), wired report_trade_pnl into fills
+   518→   518→   518→- R5: core/label_backfill.py (NEW) — pages resolved markets from Gamma, writes labeled features, triggers retrain
+   519→   519→   519→- R6: ml/drift_detector.py — reset() clears all state, PSI uses model's own distribution, threshold 0.25
+   520→   520→   520→- R7: ml/model.py — time-ordered split (arange vs random permutation), Sharpe from real equity history
+   521→   521→   521→- R8: ml/ensemble_meta_learner.py — warm_from_labeled_samples(), NaN/Inf dropping in refit, WARNING-level logging
+   522→   522→   522→- R9: strategies/signal_trader.py — catalog.items() instead of values(), confidence floor 0.55→0.45
+   523→   523→   523→- R10: api/server.py — GET /api/ai/predict/{token_id}, POST /api/positions/{token_id}/close
+   524→   524→   524→- R11+R12: core/decision_ledger.py (NEW) + wired through signal_trader→base→paper_sim→server
+   525→   525→   525→- R13: execution/smart_router.py copied from source
+   526→   526→   526→- R14: ml/features.py — competitiveness derived from spread (was constant 0.9)
+   527→   527→   527→- R15: api/server.py — unrealized_pnl+current_price in snapshot, expectancy+avg_win+avg_loss+sharpe in analytics
+   528→   528→   528→
+   529→   529→   529→Stage Summary:
+   530→   530→   530→- Backend healthy, 61 API routes, lint clean, zero overflow
+   531→   531→   531→- Win rate 80%, expectancy +$0.19, avg_win $0.25, avg_loss -$0.03
+   532→   532→   532→- Balance $111.83 (up from $100 — profitable!)
+   533→   533→   533→- Decision ledger operational (PREDICTION→SIGNAL→RISK→ORDER→FILL chain)
+   534→   534→   534→- ML predictions returning real values, drift HEALTHY
+   535→   535→   535→- All 15 execution+ML+decision fixes rebuilt from scratch
+   536→   536→   536→

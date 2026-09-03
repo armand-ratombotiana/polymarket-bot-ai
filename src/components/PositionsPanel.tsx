@@ -10,9 +10,12 @@ interface Props {
   positions: Position[]
   dailyPnl: number
   onSelectMarket?: (market: { tokenId: string; slug: string }) => void
+  // S1 — optional close handler. When provided, renders a "✕ Close" button
+  // next to the existing Trade button for each position row.
+  onClosePosition?: (tokenId: string) => void
 }
 
-export default function PositionsPanel({ positions, dailyPnl, onSelectMarket }: Props) {
+export default function PositionsPanel({ positions, dailyPnl, onSelectMarket, onClosePosition }: Props) {
   const [filterQuery, setFilterQuery] = useState('')
   const [outcomeFilter, setOutcomeFilter] = useState<'ALL' | 'YES' | 'NO'>('ALL')
   const [sortBy, setSortBy] = useState<'size' | 'pnl' | 'market'>('size')
@@ -183,9 +186,13 @@ export default function PositionsPanel({ positions, dailyPnl, onSelectMarket }: 
                 <th scope="col" className="text-center">Outcome</th>
                 <th scope="col" className="text-right">Shares</th>
                 <th scope="col" className="text-right">Avg Entry</th>
+                {/* S1 — live mark price column */}
+                <th scope="col" className="text-right">Mark</th>
                 <th scope="col" className="text-right">Cost Basis</th>
                 <th scope="col" className="text-center min-w-[110px]">Cap Limit ($3 Max)</th>
                 <th scope="col" className="text-right">Realized P&amp;L</th>
+                {/* S1 — unrealized mark-to-market P&amp;L column */}
+                <th scope="col" className="text-right">Unrealized</th>
                 <th scope="col" className="text-center">Action</th>
               </tr>
             </thead>
@@ -244,6 +251,14 @@ export default function PositionsPanel({ positions, dailyPnl, onSelectMarket }: 
                       ${p.avg_entry_price.toFixed(3)}
                     </td>
 
+                    {/* S1 — Mark (current price). Falls back to "—" when the
+                        backend hasn't populated current_price yet. */}
+                    <td className="mono text-right text-[#dde1ed] text-xs">
+                      {typeof p.current_price === 'number'
+                        ? `$${p.current_price.toFixed(3)}`
+                        : <span className="text-[#3e4560]">—</span>}
+                    </td>
+
                     {/* Cost Basis */}
                     <td className="mono text-right font-semibold text-cyan-300">
                       {fmtUsd(p.total_invested)}
@@ -275,15 +290,44 @@ export default function PositionsPanel({ positions, dailyPnl, onSelectMarket }: 
                       {fmtPnl(p.realised_pnl)}
                     </td>
 
+                    {/* S1 — Unrealized P&amp;L (mark-to-market). Color-coded
+                        green/red. Falls back to "—" when unrealized_pnl is
+                        not provided by the backend. */}
+                    <td
+                      className={`mono text-right font-bold text-xs ${
+                        typeof p.unrealized_pnl === 'number'
+                          ? p.unrealized_pnl >= 0
+                            ? 'text-green-400'
+                            : 'text-red-400'
+                          : 'text-[#3e4560]'
+                      }`
+                    }
+                    >
+                      {typeof p.unrealized_pnl === 'number'
+                        ? fmtPnl(p.unrealized_pnl)
+                        : '—'}
+                    </td>
+
                     {/* Action Button */}
                     <td className="text-center">
-                      <button
-                        onClick={() => onSelectMarket?.({ tokenId: p.token_id, slug: p.slug })}
-                        className="btn btn-ghost btn-sm text-[10px] px-2 py-0.5 border border-[#1f2335] text-cyan-400 hover:text-white hover:border-cyan-500/50"
-                        title="Open Depth & Trade Modal"
-                      >
-                        Trade
-                      </button>
+                      <div className="flex items-center justify-center gap-1">
+                        <button
+                          onClick={() => onSelectMarket?.({ tokenId: p.token_id, slug: p.slug })}
+                          className="btn btn-ghost btn-sm text-[10px] px-2 py-0.5 border border-[#1f2335] text-cyan-400 hover:text-white hover:border-cyan-500/50"
+                          title="Open Depth & Trade Modal"
+                        >
+                          Trade
+                        </button>
+                        {/* S1 — Close position button. Only invokes the handler
+                            when onClosePosition is provided (additive prop). */}
+                        <button
+                          onClick={() => onClosePosition?.(p.token_id)}
+                          className="btn btn-ghost btn-sm text-[10px] px-2 py-0.5 border border-[#1f2335] text-red-400 hover:text-white hover:border-red-500/50"
+                          title="Close position at market"
+                        >
+                          ✕ Close
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 )

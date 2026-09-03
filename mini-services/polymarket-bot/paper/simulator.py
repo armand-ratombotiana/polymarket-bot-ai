@@ -283,6 +283,17 @@ class PaperSimulator:
             f"✅ Paper fill: {order.side.value} {fill_size:.2f} @ {fill_price:.4f} "
             f"[P&L: ${pnl:+.2f}] [{order.token_id[:8]}…]"
         )
+        # S14 — record execution-quality metrics (signal_price vs fill_price,
+        # best_bid/best_ask at fill, slippage in bps, latency, realized_edge).
+        # Additive only: the existing fill logic above is untouched. The
+        # try/except means a quality-recording failure can never break a
+        # paper fill. signal_price defaults to order.price when the caller
+        # doesn't track the signal-time price separately.
+        try:
+            from core.execution_quality import record_execution
+            record_execution(order, fill_price, signal_price=order.price)
+        except Exception:
+            pass
 
 
 # Module-level singleton

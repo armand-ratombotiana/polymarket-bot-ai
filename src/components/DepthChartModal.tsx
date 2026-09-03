@@ -22,6 +22,33 @@ interface DepthData {
   best_ask: number | null
 }
 
+// S2: payload shape returned by GET /api/ai/predict/{token_id} (see api/server.py)
+interface MlPred {
+  p_yes: number
+  confidence: number
+  market_mid: number | null
+  best_bid?: number | null
+  best_ask?: number | null
+  spread?: number | null
+  edge: number | null
+  edge_bps: number | null
+  recommended_action: 'BUY' | 'SELL' | 'HOLD'
+  action_reason?: string
+  thresholds?: {
+    min_edge_cents: number
+    min_confidence: number
+  }
+  model_status?: {
+    model_ready?: boolean
+    model_version?: string | number | null
+    brier_score?: number | null
+    roc_auc?: number | null
+    ece?: number | null
+    n_online_updates?: number
+  }
+  timestamp?: number
+}
+
 interface Props {
   tokenId: string | null
   slug: string | null
@@ -31,6 +58,8 @@ interface Props {
 
 export default function DepthChartModal({ tokenId, slug, onClose, onOrderPlaced }: Props) {
   const [data, setData] = useState<DepthData | null>(null)
+  // S2: ML ensemble directional view (polled every 5s from /api/ai/predict/{token_id})
+  const [mlPred, setMlPred] = useState<MlPred | null>(null)
   const [side, setSide] = useState<'BUY' | 'SELL'>('BUY')
   const [price, setPrice] = useState<string>('0.50')
   const [sizeUsdc, setSizeUsdc] = useState<string>('1.5')
@@ -71,6 +100,31 @@ export default function DepthChartModal({ tokenId, slug, onClose, onOrderPlaced 
     fetchDepth()
     const timer = setInterval(fetchDepth, 2000)
     return () => clearInterval(timer)
+  }, [tokenId])
+
+  // S2: poll the ML ensemble prediction endpoint every 5s. `apiFetch`
+  // auto-injects the XTransformPort gateway header (see @/lib/api), so we
+  // can pass a clean `/api/...` path. We clear stale predictions on token
+  // switch so a new modal never shows the previous token's edge.
+  useEffect(() => {
+    if (!tokenId) return
+    setMlPred(null)
+    const fetchMlPred = async () => {
+      try {
+        const apiUrl = getApiUrl()
+        const res = await apiFetch(`${apiUrl}/api/ai/predict/${tokenId}`)
+        if (res.ok) {
+          const json: MlPred = await res.json()
+          setMlPred(json)
+        }
+      } catch {
+        // network/HTTP errors are silently ignored — the panel will keep
+        // the last known value or show placeholders until the next poll.
+      }
+    }
+    fetchMlPred()
+    const mlTimer = setInterval(fetchMlPred, 5000)
+    return () => clearInterval(mlTimer)
   }, [tokenId])
 
   if (!tokenId) return null
@@ -203,6 +257,117 @@ export default function DepthChartModal({ tokenId, slug, onClose, onOrderPlaced 
                 )}
               </div>
             </div>
+          </div>
+
+          {/* S2: ML Edge Panel — model P(YES) vs market mid, polled @5s */}
+          <div className="bg-[#0e1015] p-3 rounded border border-[#1f2335] space-y-2.5">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <span className="text-[11px] font-bold uppercase text-[#7e8aaa]">
+                  🧠 ML Edge
+                </span>
+                <span
+                  className={`badge text-[9px] ${
+                    mlPred?.model_status?.model_ready ? 'badge-green' : 'badge-amber'
+                  }`}
+                  title={
+                    mlPred?.model_status?.model_ready
+                      ? `model v${mlPred.model_status.model_version ?? '?'} · brier ${mlPred.model_status.brier_score ?? '—'} · AUC ${mlPred.model_status.roc_auc ?? '—'}`
+                      : 'ensemble not yet trained — predictions are uncalibrated'
+                  }
+                >
+                  {mlPred?.model_status?.model_ready ? 'Model Ready' : 'Booting'}
+                </span>
+              </div>
+              <span className="text-[9.5px] text-[#7e8aaa] mono">
+                {mlPred
+                  ? `updated ${new Date((mlPred.timestamp ?? 0) * 1000).toLocaleTimeString()}`
+                  : 'polling @5s'}
+              </span>
+            </div>
+
+            <div className="grid grid-cols-4 gap-2 text-[11px]">
+              {/* Model P(YES) */}
+              <div className="bg-[#13161e] border border-[#1f2335] rounded px-2 py-1.5">
+                <div className="text-[9px] uppercase text-[#7e8aaa]">Model P(YES)</div>
+                <div className="mono font-semibold text-[#dde1ed] leading-tight">
+                  {mlPred ? `${(mlPred.p_yes * 100).toFixed(1)}%` : '—'}
+                </div>
+                <div className="text-[9px] text-[#7e8aaa] mono">
+                  conf {mlPred ? `${(mlPred.confidence * 100).toFixed(0)}%` : '—'}
+                </div>
+              </div>
+
+              {/* Market Mid */}
+              <div className="bg-[#13161e] border border-[#1f2335] rounded px-2 py-1.5">
+                <div className="text-[9px] uppercase text-[#7e8aaa]">Market Mid</div>
+                <div className="mono font-semibold text-[#dde1ed] leading-tight">
+                  {mlPred?.market_mid != null
+                    ? `${(mlPred.market_mid * 100).toFixed(1)}¢`
+                    : '—'}
+                </div>
+                <div className="text-[9px] text-[#7e8aaa] mono">
+                  {mlPred?.market_mid != null
+                    ? `$${mlPred.market_mid.toFixed(3)}`
+                    : 'no book'}
+                </div>
+              </div>
+
+              {/* Edge (model P(YES) − market mid) */}
+              <div className="bg-[#13161e] border border-[#1f2335] rounded px-2 py-1.5">
+                <div className="text-[9px] uppercase text-[#7e8aaa]">Edge</div>
+                <div
+                  className={`mono font-semibold leading-tight ${
+                    mlPred?.edge == null
+                      ? 'text-[#3e4560]'
+                      : mlPred.edge > 0
+                        ? 'text-green-400'
+                        : mlPred.edge < 0
+                          ? 'text-red-400'
+                          : 'text-[#dde1ed]'
+                  }`}
+                >
+                  {mlPred?.edge == null
+                    ? '—'
+                    : `${mlPred.edge >= 0 ? '+' : ''}${(mlPred.edge * 100).toFixed(2)}%`}
+                </div>
+                <div className="text-[9px] text-[#7e8aaa] mono">
+                  {mlPred?.edge_bps != null
+                    ? `${mlPred.edge_bps >= 0 ? '+' : ''}${mlPred.edge_bps.toFixed(0)} bps`
+                    : '— bps'}
+                </div>
+              </div>
+
+              {/* Recommended Action badge */}
+              <div className="bg-[#13161e] border border-[#1f2335] rounded px-2 py-1.5">
+                <div className="text-[9px] uppercase text-[#7e8aaa]">Action</div>
+                {(() => {
+                  const action = mlPred?.recommended_action
+                  const badgeCls =
+                    action === 'BUY'
+                      ? 'badge-green'
+                      : action === 'SELL'
+                        ? 'badge-red'
+                        : action === 'HOLD'
+                          ? 'badge-amber'
+                          : 'badge-dim'
+                  return (
+                    <span
+                      className={`badge ${badgeCls} text-[10px] font-bold mt-0.5 inline-block`}
+                    >
+                      {action ?? '—'}
+                    </span>
+                  )
+                })()}
+                <div className="text-[9px] text-[#7e8aaa] mono mt-0.5">±2ct gate</div>
+              </div>
+            </div>
+
+            {mlPred?.action_reason && (
+              <div className="text-[10px] text-[#7e8aaa] mono leading-snug border-t border-[#1f2335] pt-1.5">
+                <span className="text-[#3e4560]">reason:</span> {mlPred.action_reason}
+              </div>
+            )}
           </div>
 
           {/* Quick Trade Form */}

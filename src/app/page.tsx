@@ -61,7 +61,7 @@ const KB_MAP: Record<string, NavSection> = {
 
 export default function Dashboard() {
   const [mounted, setMounted] = useState(false)
-  const { snapshot, status, activateKillSwitch, deactivateKillSwitch, cancelAllOrders, cancelOrder } = useBot()
+  const { snapshot, status, activateKillSwitch, deactivateKillSwitch, cancelAllOrders, cancelOrder, closePosition } = useBot()
   const audio = useAudio()
 
   const [uptime, setUptime] = useState(0)
@@ -235,6 +235,7 @@ export default function Dashboard() {
                     positions={snapshot.positions}
                     dailyPnl={snapshot.daily_pnl}
                     onSelectMarket={(m) => setChartMarket(m)}
+                    onClosePosition={closePosition}
                   />
                 </div>
                 <div style={{ gridArea: 'orders', minHeight: 0, overflow: 'hidden' }}>
@@ -292,6 +293,7 @@ export default function Dashboard() {
                   positions={snapshot.positions}
                   dailyPnl={snapshot.daily_pnl}
                   onSelectMarket={(m) => setChartMarket(m)}
+                  onClosePosition={closePosition}
                 />
               </div>
             )}

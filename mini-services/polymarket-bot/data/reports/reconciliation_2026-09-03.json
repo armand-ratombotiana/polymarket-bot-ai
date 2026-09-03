@@ -1,27 +1,27 @@
 {
-  "generated_at": "2026-09-03T04:46:08.979008+00:00",
+  "generated_at": "2026-09-03T05:19:18.922941+00:00",
   "backend": "SQLite3 WAL (Cold Standby)",
   "is_clean": true,
   "tables": {
     "market_snapshots": {
       "engine_accepted_writes": 0,
-      "storage_rows": 55248,
-      "drift": -55248
+      "storage_rows": 60432,
+      "drift": -60432
     },
     "orderbook_ticks": {
       "engine_accepted_writes": 0,
-      "storage_rows": 49929,
-      "drift": -49929
+      "storage_rows": 54632,
+      "drift": -54632
     },
     "fundamental_news": {
       "engine_accepted_writes": 0,
-      "storage_rows": 30,
-      "drift": -30
+      "storage_rows": 50,
+      "drift": -50
     },
     "ml_feature_store": {
       "engine_accepted_writes": 0,
-      "storage_rows": 13048,
-      "drift": -13048
+      "storage_rows": 15470,
+      "drift": -15470
     },
     "strategy_decisions": {
       "engine_accepted_writes": 0,

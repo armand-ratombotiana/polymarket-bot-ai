@@ -178,6 +178,33 @@ export default function TopStatusBar({
           <span>⏱</span>
           <span>{ageStr}</span>
         </div>
+
+        {/* S5: Mobile-only Balance + Daily P&L pill.
+            The center section below (BAL / TODAY P&L / ML health) is
+            `hidden lg:flex`, so traders on xs/sm/md breakpoints lose
+            sight of their position. This `lg:hidden` pill is the inverse
+            — visible below `lg`, hidden at `lg`+ — so the two never
+            co-render. Combines both values into a single compact pill
+            (two pills would overflow xs screens). Uses the exact same
+            design-system classes as the center-section pills. */}
+        <div
+          className="lg:hidden flex items-center gap-1.5 bg-[#13161e] border border-[#1f2335] px-2 py-1 rounded-md text-xs whitespace-nowrap"
+          title={`Paper balance ${paper_balance != null ? fmtUsd(paper_balance) : '—'} · Today P&L ${fmtPnl(daily_pnl)}`}
+        >
+          <span className="text-[10px] text-[#7e8aaa] uppercase font-bold">BAL:</span>
+          <span className="mono font-bold text-cyan-300">
+            {paper_balance != null ? fmtUsd(paper_balance) : '—'}
+          </span>
+          <span className="text-[#3e4560]" aria-hidden="true">|</span>
+          <span className="text-[10px] text-[#7e8aaa] uppercase font-bold">P&amp;L:</span>
+          <span
+            className={`mono font-bold ${
+              daily_pnl > 0 ? 'text-green-400' : daily_pnl < 0 ? 'text-red-400' : 'text-[#dde1ed]'
+            }`}
+          >
+            {fmtPnl(daily_pnl)}
+          </span>
+        </div>
       </div>
 
       {/* Center Section: ML Health, Capital, Uptime */}

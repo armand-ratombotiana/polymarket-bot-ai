@@ -52,6 +52,10 @@ log = logging.getLogger(__name__)
 # requires `Authorization: Bearer <API_TOKEN>` (fail-closed; 503 if unconfigured).
 
 PUBLIC_PATHS = {"/api/health", "/docs", "/redoc", "/openapi.json"}
+if settings.trading_mode == "live":
+    PUBLIC_PATHS.discard("/docs")
+    PUBLIC_PATHS.discard("/redoc")
+    PUBLIC_PATHS.discard("/openapi.json")
 
 
 def _valid_token(authorization: str | None) -> bool:
@@ -442,14 +446,15 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS: locked to configured origins (empty = same-origin only). Credentials
-# are only enabled when explicit origins are set — never with wildcard.
+# CORS: locked to configured explicit origins only (empty = same-origin only).
+# Wildcard fallback removed per S12 security hardening — when CORS_ORIGINS is
+# set, only those exact origins are allowed; credentials are always enabled
+# (safe, because no wildcard branch can match an arbitrary origin).
 _cors_origins = settings.cors_origin_list
-_has_wildcard = "*" in _cors_origins or not _cors_origins
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"] if _has_wildcard else _cors_origins,
-    allow_credentials=False if _has_wildcard else True,
+    allow_origins=_cors_origins,
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -2048,6 +2053,10 @@ async def websocket_endpoint(websocket: WebSocket):
         if not hmac.compare_digest(token or "", settings.api_token):
             await websocket.close(code=4401, reason="Unauthorized")
             return
+    else:
+        # Fail-closed: no API token configured → reject the WS upgrade.
+        await websocket.close(code=4401, reason="Unauthorized")
+        return
     await manager.connect(websocket)
     try:
         snap = await _build_snapshot()
@@ -2074,3 +2083,39 @@ async def websocket_endpoint(websocket: WebSocket):
 from core.decision_ledger import register_routes as _register_decision_routes
 
 _register_decision_routes(app)
+
+
+# S14 — Execution Quality inspection endpoint.
+# Additive: appends `GET /api/execution-quality` so the per-fill metrics
+# (signal_price, decision_price, submitted_price, best_bid, best_ask,
+# expected_fill, actual_fill, spread, slippage, slippage_bps, latency_ms,
+# realized_edge) recorded by ``core.execution_quality.record_execution`` —
+# wired into ``paper/simulator._execute_fill`` — are queryable from the API /
+# dashboard. Same pattern as the decision-ledger registration above.
+from core.execution_quality import register_routes as _register_execution_quality_routes
+
+_register_execution_quality_routes(app)
+
+# S13 — System Observability endpoints.
+# Appends `GET /api/observability` (latest value per (category, name),
+# bucketed under data_source / bot / strategy / execution / ml / system)
+# and `GET /api/observability/history/{name}` (most-recent-N samples for a
+# single metric). Mirrors the decision_ledger registration pattern — pure
+# addition, no existing endpoint touched.
+from core.observability import register_routes as _register_observability_routes
+
+_register_observability_routes(app)
+
+
+# S15 — Closed positions journal + performance attribution endpoints.
+# Registered last (additive — no existing routes touched). Appends:
+#   GET /api/positions/closed          recent closed positions (filterable)
+#   GET /api/positions/closed/stats    aggregate P&L / win-rate / profit-factor
+#   GET /api/attribution               seven-dimension P&L attribution roll-up
+# (strategy / confidence bucket / edge bucket / probability band / liquidity
+# level / holding period / trade direction).
+from core.closed_positions import register_routes as _register_closed_positions_routes
+from core.attribution import register_routes as _register_attribution_routes
+
+_register_closed_positions_routes(app)
+_register_attribution_routes(app)

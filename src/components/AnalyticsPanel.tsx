@@ -30,6 +30,11 @@ interface Analytics {
   data_freshness_seconds: number
   peak_equity: number
   active_strategies: string[]
+  // S3 — extended KPI metrics (additive)
+  avg_win: number | null
+  avg_loss: number | null
+  expectancy: number | null
+  sharpe_ratio: number | null
 }
 
 const STRATEGY_LABELS: Record<string, string> = {
@@ -188,6 +193,53 @@ export default function AnalyticsPanel() {
             {fmtPnl(data.unrealized_pnl)}
           </span>
           <span className="kpi-sub">Mark-to-mid open book</span>
+        </div>
+
+        {/* S3 — Expectancy / Trade */}
+        <div className="kpi-card">
+          <span className="kpi-label">Expectancy / Trade</span>
+          <span
+            className={`kpi-value ${
+              (data.expectancy ?? 0) >= 0 ? 'text-[#4ade80]' : 'text-[#f87171]'
+            }`}
+          >
+            {data.expectancy != null ? fmtPnl(data.expectancy) : '—'}
+          </span>
+          <span className="kpi-sub">Positive = profitable system</span>
+        </div>
+
+        {/* S3 — Avg Win / Avg Loss */}
+        <div className="kpi-card">
+          <span className="kpi-label">Avg Win / Avg Loss</span>
+          <span className="kpi-value flex items-baseline gap-1">
+            <span className="text-[#4ade80]">
+              {data.avg_win != null ? fmtUsd(data.avg_win) : '—'}
+            </span>
+            <span className="text-[#7e8aaa] text-[10px]">/</span>
+            <span className="text-[#f87171]">
+              {data.avg_loss != null ? fmtUsd(data.avg_loss) : '—'}
+            </span>
+          </span>
+          <span className="kpi-sub">Asymmetry check</span>
+        </div>
+
+        {/* S3 — Sharpe Ratio */}
+        <div className="kpi-card">
+          <span className="kpi-label">Sharpe Ratio</span>
+          <span
+            className={`kpi-value ${
+              data.sharpe_ratio == null
+                ? 'text-[#dde1ed]'
+                : data.sharpe_ratio >= 1
+                ? 'text-[#4ade80]'
+                : data.sharpe_ratio >= 0
+                ? 'text-[#60a5fa]'
+                : 'text-[#f87171]'
+            }`}
+          >
+            {data.sharpe_ratio != null ? data.sharpe_ratio.toFixed(2) : '—'}
+          </span>
+          <span className="kpi-sub">Risk-adjusted return</span>
         </div>
       </div>
     </div>
