@@ -210,6 +210,152 @@ class MarketMLModel:
         self._sgd_brier_window: deque[float] = deque(maxlen=self._BRIER_WINDOW)
         self._lgbm_brier_window: deque[float] = deque(maxlen=self._BRIER_WINDOW)
 
+    # ── W20-2 — Real-data training path ──────────────────────────────────────
+    #
+    # God Mode assessment (W17-3, C1) found the production model was trained on
+    # 3 000 synthetic samples with hand-coded log-odds labels; the reported
+    # Brier 0.10 / AUC 0.94 metrics were structurally inflated by the label-
+    # formula circularity (synthetic features → synthetic log-odds → synthetic
+    # labels → model "predicts" the labels → Brier / AUC look great).
+    #
+    # ``_load_real_training_data`` is the canonical real-data fetcher. It tries
+    # ``timescale_db.fetch_training_samples`` first (stratified class-balanced
+    # sample with verified ground-truth labels from resolved markets — written
+    # by ``core/label_backfill.py``'s backfill loop). If that returns too few
+    # rows it falls back to ``timescale_db.fetch_labeled_feature_vectors``
+    # (unstratified most-recent-first list — same data source, different
+    # retrieval shape used by ``EnsembleMetaLearner.warm_from_labeled_samples``).
+    # If neither source has ≥100 labeled rows, the method returns
+    # ``(None, None, None)`` so the caller (``fit_initial`` /
+    # ``get_training_data``) can decide its own fallback (synthetic vs. abort).
+    #
+    # The returned ``timestamps`` array is a placeholder monotonic sequence
+    # (rows are most-recent-first from the SQL ``ORDER BY timestamp DESC`` in
+    # both fetch APIs, so we emit a decreasing sequence to preserve
+    # chronological intent). The production ``fit_initial`` time-ordered 80/20
+    # split uses row position, NOT the timestamp values — so the placeholder
+    # is here only to satisfy the (features, labels, timestamps) return
+    # contract documented in the W20-2 task spec.
+    def _load_real_training_data(
+        self,
+    ) -> tuple[np.ndarray | None, np.ndarray | None, np.ndarray | None]:
+        """Load real labeled training samples from the database.
+
+        Tries ``timescale_db.fetch_training_samples`` first (class-balanced
+        stratified sample), then falls back to
+        ``timescale_db.fetch_labeled_feature_vectors`` (unstratified list).
+        Both sources return verified ground-truth labels from resolved
+        markets — written by ``core/label_backfill.py``'s daily backfill loop.
+
+        Returns:
+            ``(features, labels, timestamps)`` — three numpy arrays of equal
+            length, OR ``(None, None, None)`` when fewer than 100 real
+            labeled rows are available. The caller is responsible for the
+            synthetic-data fallback (see ``get_training_data`` / ``fit_initial``).
+        """
+        from core.timescale_db import timescale_db
+
+        # ── Primary: class-balanced stratified sample (≤ 5 000 rows) ──
+        try:
+            X_db, y_db = timescale_db.fetch_training_samples(min_samples=100)
+            if X_db is not None and y_db is not None and len(X_db) >= 100:
+                # Pad/trim to N_FEATURES in case the schema changed under us.
+                X_db = np.asarray(X_db, dtype=np.float32)
+                if X_db.ndim == 2 and X_db.shape[1] < N_FEATURES:
+                    pad = np.zeros(
+                        (len(X_db), N_FEATURES - X_db.shape[1]), dtype=np.float32,
+                    )
+                    X_db = np.hstack([X_db, pad])
+                elif X_db.ndim == 2 and X_db.shape[1] > N_FEATURES:
+                    X_db = X_db[:, :N_FEATURES]
+                y_db = np.asarray(y_db, dtype=int)
+                # Placeholder monotonic-decreasing timestamps (rows are
+                # ``ORDER BY timestamp DESC`` so position 0 == newest).
+                ts = np.arange(len(X_db), 0, -1, dtype=np.float64)
+                log.info(
+                    "[ml_model] Loaded %d real labeled samples from "
+                    "timescale_db.fetch_training_samples (class-balanced)",
+                    len(X_db),
+                )
+                return X_db, y_db, ts
+        except Exception as e:  # noqa: BLE001 — defensive: any DB hiccup falls through
+            log.warning(
+                "[ml_model] fetch_training_samples failed: %s — trying fallback",
+                e,
+            )
+
+        # ── Fallback: unstratified most-recent-first list ──
+        # ``fetch_labeled_feature_vectors`` returns
+        # ``list[tuple[np.ndarray, int]]`` (the same data the meta-learner
+        # warms from). Used here so a cold-start DB with <100 rows in the
+        # stratified query (e.g. only YES outcomes labeled so far) can still
+        # supply training data when the unstratified list crosses the
+        # threshold.
+        try:
+            samples = timescale_db.fetch_labeled_feature_vectors(limit=1000)
+            if samples and len(samples) >= 100:
+                X_list: list[np.ndarray] = []
+                y_list: list[int] = []
+                for feat, outcome in samples:
+                    arr = np.asarray(feat, dtype=np.float32)
+                    if len(arr) < N_FEATURES:
+                        arr = np.pad(arr, (0, N_FEATURES - len(arr)))
+                    elif len(arr) > N_FEATURES:
+                        arr = arr[:N_FEATURES]
+                    X_list.append(arr)
+                    y_list.append(int(outcome))
+                if len(X_list) >= 100:
+                    X_arr = np.array(X_list, dtype=np.float32)
+                    y_arr = np.array(y_list, dtype=int)
+                    ts_arr = np.arange(len(X_arr), 0, -1, dtype=np.float64)
+                    log.info(
+                        "[ml_model] Loaded %d real labeled samples from "
+                        "timescale_db.fetch_labeled_feature_vectors (unstratified)",
+                        len(X_arr),
+                    )
+                    return X_arr, y_arr, ts_arr
+        except Exception as e:  # noqa: BLE001 — defensive
+            log.warning(
+                "[ml_model] fetch_labeled_feature_vectors failed: %s — "
+                "no real training data available",
+                e,
+            )
+
+        # No real data available — caller decides the fallback.
+        return None, None, None
+
+    def get_training_data(
+        self,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Get training data — prefers real labeled samples, falls back to synthetic.
+
+        W20-2 contract: when ≥100 real labeled samples are available, return
+        them verbatim (with synthesized monotonic timestamps). When the
+        database has no real labels yet, fall back to the synthetic
+        generator (with a prominent warning) so the predict path stays
+        functional during cold-start.
+
+        Returns:
+            ``(features, labels, timestamps)`` — three numpy arrays of
+            equal length. ``features`` is 2-D ``(n_samples, N_FEATURES)``;
+            ``labels`` is 1-D int ``{0, 1}``; ``timestamps`` is 1-D float
+            (placeholder monotonic sequence — see ``_load_real_training_data``).
+        """
+        features, labels, timestamps = self._load_real_training_data()
+        if features is not None and len(features) >= 100:
+            return features, labels, timestamps
+
+        # Fallback to synthetic (with warning) — predict path must stay
+        # functional during cold-start (before the label-backfill daily
+        # loop has populated the SQLite store).
+        log.warning(
+            "[ml_model] Using synthetic training data — real labeled samples "
+            "are not yet available (need ≥100 resolved-market labels)",
+        )
+        X_synth, y_synth = _synthetic_training_data(3000)
+        ts_synth = np.arange(len(X_synth), 0, -1, dtype=np.float64)
+        return X_synth, y_synth, ts_synth
+
     def fit_initial(
         self,
         *,
@@ -218,40 +364,76 @@ class MarketMLModel:
         n_estimators_rf: int = 150,
         n_estimators_gb: int = 100,
     ) -> None:
-        """Train initial calibrated ensemble on TimescaleDB history + synthetic market dynamics.
+        """Train initial calibrated ensemble — prefers real labeled samples.
+
+        W20-2 — Replaces the prior real+synthetic BLEND with a strict
+        real-first policy. When ≥100 real labeled samples are available
+        (from ``timescale_db.fetch_training_samples`` /
+        ``timescale_db.fetch_labeled_feature_vectors``), the model trains
+        ONLY on real data — eliminating the label-formula circularity that
+        the God Mode assessment (W17-3, C1) identified as inflating the
+        Brier / AUC metrics. When real labels are unavailable (cold-start
+        before the backfill loop has populated the SQLite store), the model
+        falls back to synthetic-only training with a prominent warning so
+        the predict path stays functional.
 
         Hyperparameters are parameterised so the training orchestrator can inject
         diverse challenger configs for champion/challenger gating.
-        """
-        from core.timescale_db import timescale_db
-        X_db, y_db = timescale_db.fetch_training_samples(min_samples=200)
 
-        X_synth, y_synth = _synthetic_training_data(3000)
-        self.n_synthetic_samples = len(X_synth)
-        if X_db is not None and len(X_db) > 0:
-            # Pad/trim DB samples to N_FEATURES in case schema changed
-            if X_db.shape[1] < N_FEATURES:
-                pad = np.zeros((len(X_db), N_FEATURES - X_db.shape[1]), dtype=np.float32)
-                X_db = np.hstack([X_db, pad])
-            elif X_db.shape[1] > N_FEATURES:
-                X_db = X_db[:, :N_FEATURES]
-            X = np.vstack([X_db, X_synth])
-            y = np.concatenate([y_db, y_synth])
-            self.n_real_samples = len(X_db)
-            self.training_source = "real_and_synthetic"
-            log.info("[ml_model] Blended %d real DB samples with %d synthetic samples for training",
-                     len(X_db), len(X_synth))
+        Provenance fields set here:
+          * ``training_source`` — ``"real_only"`` (≥100 real samples),
+            ``"synthetic_only"`` (cold-start fallback).
+          * ``n_real_samples``    — count of real labeled rows used.
+          * ``n_synthetic_samples`` — count of synthetic rows used (0 in the
+            real-only branch, 3 000 in the synthetic-only branch).
+        """
+        # W20-2 — Real-first fetch. The returned ``timestamps`` are a
+        # placeholder monotonic sequence (rows are most-recent-first); the
+        # 80/20 time-ordered split below uses row POSITION, not timestamp
+        # values, so the placeholder is here only to satisfy the
+        # ``(features, labels, timestamps)`` return contract.
+        features, labels, _ = self._load_real_training_data()
+
+        if features is not None and len(features) >= 100:
+            # Pad/trim to N_FEATURES in case the schema changed under us.
+            X = np.asarray(features, dtype=np.float32)
+            if X.ndim == 2 and X.shape[1] < N_FEATURES:
+                pad = np.zeros(
+                    (len(X), N_FEATURES - X.shape[1]), dtype=np.float32,
+                )
+                X = np.hstack([X, pad])
+            elif X.ndim == 2 and X.shape[1] > N_FEATURES:
+                X = X[:, :N_FEATURES]
+            y = np.asarray(labels, dtype=int)
+            self.n_real_samples = len(X)
+            self.n_synthetic_samples = 0
+            self.training_source = "real_only"
+            log.info(
+                "[ml_model] Training on %d real labeled samples (no synthetic blend)",
+                len(X),
+            )
         else:
-            X, y = X_synth, y_synth
+            X_synth, y_synth = _synthetic_training_data(3000)
+            X = X_synth
+            y = y_synth
+            self.n_real_samples = 0
+            self.n_synthetic_samples = len(X_synth)
             self.training_source = "synthetic_only"
-            log.warning("[ml_model] No real DB samples found — training on synthetic data only")
+            log.warning(
+                "[ml_model] No real labeled samples available "
+                "(need ≥100) — falling back to synthetic-only training "
+                "(Brier / AUC will be structurally inflated per God Mode W17-3 C1)",
+            )
 
         # 80/20 train/calibration split for isotonic fitting.
         # Time-ordered split (NOT random permutation): first 80% = train, last 20% =
-        # calibration. Prevents future information leaking into the training fold —
-        # critical because the dataset is a chronological blend of real DB samples
-        # (oldest) and synthetic samples (newest). A random permutation would mix
-        # later samples into training and inflate calibration metrics.
+        # calibration. Prevents future information leaking into the training fold.
+        # W20-2 — the training set is now EITHER all-real OR all-synthetic (no
+        # blend); the rows are most-recent-first from the SQL ``ORDER BY
+        # timestamp DESC`` in ``fetch_training_samples`` /
+        # ``fetch_labeled_feature_vectors`` (real branch) or by generator
+        # construction order (synthetic branch). A random permutation would
+        # mix later samples into training and inflate calibration metrics.
         n_total = len(X)
         n_train = int(n_total * 0.80)
         idx = np.arange(n_total)

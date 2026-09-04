@@ -124,6 +124,14 @@ class PortfolioOptimizer:
         self.max_total_exposure = max_total_exposure
         self.min_edge = min_edge
         self.min_confidence = min_confidence
+        # W20-4 — cache of the most recent ``optimize()`` / ``suggest_rebalance``
+        # result. Surfaces on ``GET /api/portfolio/optimizer-status`` so an
+        # operator can see "what did the optimizer just propose" without re-
+        # running it. ``None`` until the first call. Cached BY REFERENCE —
+        # ``PortfolioOptimization`` is a frozen-ish dataclass (its fields are
+        # not mutated after construction), so the cached reference is a stable
+        # snapshot of the last optimization.
+        self._last_optimization: Optional[PortfolioOptimization] = None
 
     # ── Public config introspection ─────────────────────────────────────────
 
@@ -251,6 +259,10 @@ class PortfolioOptimizer:
     def optimize(self, opportunities: list[dict]) -> PortfolioOptimization:
         """Optimize portfolio allocation across multiple opportunities.
 
+        W20-4 — caches the result on ``self._last_optimization`` so the
+        ``GET /api/portfolio/optimizer-status`` endpoint can surface
+        "what did the optimizer just propose" without a re-run.
+
         Args:
             opportunities: List of dicts with keys:
                 - token_id, strategy, price, edge, confidence
@@ -258,6 +270,15 @@ class PortfolioOptimizer:
         Returns:
             PortfolioOptimization with suggested bets
         """
+        result = self._optimize_impl(opportunities)
+        self._last_optimization = result
+        return result
+
+    # ── Optimization core ────────────────────────────────────────────────────
+
+    def _optimize_impl(self, opportunities: list[dict]) -> PortfolioOptimization:
+        """Implementation of :meth:`optimize` — separated so :meth:`optimize`
+        can cache the result without re-running the optimisation loop."""
         bets: list[KellyBet] = []
         constraint_violations: list[str] = []
 
@@ -523,7 +544,7 @@ except ImportError:  # pragma: no cover — defensive: pydantic is required
 
 
 def register_routes(app: Any) -> None:
-    """Append the four portfolio-optimizer endpoints to a FastAPI app.
+    """Append the portfolio-optimizer endpoints to a FastAPI app.
 
     Endpoints (auth-protected by the caller's existing middleware):
 
@@ -533,10 +554,26 @@ def register_routes(app: Any) -> None:
       POST /api/portfolio/rebalance   suggest rebalancing actions
                                        (add / reduce / close / hold) given
                                        the current open positions and the
-                                       latest opportunity set
+                                       latest opportunity set (caller-supplied
+                                       body)
+      GET  /api/portfolio/rebalance/live
+                                       W20-4 — auto-fetch the live open
+                                       positions from ``core.data_store.store``
+                                       and the latest opportunity set from the
+                                       caller-supplied query (default empty),
+                                       then run ``suggest_rebalance``. Mirrors
+                                       the POST body endpoint but requires no
+                                       payload — pulls live state directly.
       GET  /api/portfolio/config       return the live optimizer config
       PUT  /api/portfolio/config       partial-update the optimizer config
                                        (mutates the singleton in place)
+      GET  /api/portfolio/optimizer-status
+                                       W20-4 — return the live optimizer
+                                       config PLUS the cached
+                                       ``_last_optimization`` summary so the
+                                       dashboard can render "what did the
+                                       optimizer just propose" alongside the
+                                       configured Kelly fraction / caps.
     """
     from fastapi import HTTPException  # local import — FastAPI is optional at module load
 
@@ -611,6 +648,112 @@ def register_routes(app: Any) -> None:
         except Exception:
             pass  # noqa: BLE001 — best-effort
         return {"ok": True, "config": new_config}
+
+    # ── W20-4 — live rebalance (no body; auto-fetches positions from store) ──
+    @app.get("/api/portfolio/rebalance/live", tags=["portfolio"])
+    async def _rebalance_live():
+        """Suggest rebalancing actions against the *live* open positions.
+
+        W20-4 — auto-fetches the current open positions from
+        ``core.data_store.store`` (rather than requiring the caller to POST
+        a ``current_positions`` body), then runs
+        :meth:`PortfolioOptimizer.suggest_rebalance` against an empty
+        opportunity set (the live ``signal_trader`` scan is the canonical
+        source of fresh opportunities; this endpoint is a *rebalancing
+        audit* of the current book against the optimizer's Kelly gates, not
+        a *new-opportunities* lookup).
+
+        Returns the same shape as the POST ``/api/portfolio/rebalance``
+        endpoint: ``{"add": [...], "reduce": [...], "close": [...],
+        "hold": [...]}``.
+
+        The endpoint is best-effort against ``store.get_positions()`` —
+        if the helper is missing (older ``data_store`` builds) or raises,
+        the endpoint returns a 200 with an empty ``positions`` list and a
+        ``warning`` field so the dashboard can surface "live positions
+        unavailable" without a 5xx.
+        """
+        from core.data_store import store
+
+        positions: list[dict] = []
+        warning: str | None = None
+        try:
+            if hasattr(store, "get_positions"):
+                # ``get_positions`` is async — supports being awaited.
+                raw = store.get_positions()
+                if hasattr(raw, "__await__"):
+                    raw = await raw  # type: ignore[assignment]
+                if isinstance(raw, list):
+                    positions = [
+                        {
+                            "token_id": str(p.get("token_id", "")),
+                            "size_usdc": float(p.get("size_usdc", 0.0)),
+                        }
+                        for p in raw
+                        if isinstance(p, dict) and p.get("token_id")
+                    ]
+        except Exception as e:  # noqa: BLE001 — best-effort; never 5xx
+            warning = f"live positions unavailable: {e!r}"
+            positions = []
+
+        actions = portfolio_optimizer.suggest_rebalance(positions, [])
+        if warning is not None:
+            actions["warning"] = warning
+        return actions
+
+    # ── W20-4 — optimizer status (config + last optimization) ────────────────
+    @app.get("/api/portfolio/optimizer-status", tags=["portfolio"])
+    async def _optimizer_status():
+        """Return the live optimizer config and the last optimization result.
+
+        W20-4 — surfaces the six scalars operators care about (operating
+        capital / Kelly fraction / max single bet / max total exposure /
+        min edge / min confidence) PLUS a summary of the most recent
+        :meth:`PortfolioOptimizer.optimize` call cached on the singleton
+        (number of bets, total allocated, total expected return / risk,
+        diversification ratio, constraint violations). The cache is
+        populated by every call to ``optimize`` — whether from the
+        ``POST /api/portfolio/optimize`` HTTP endpoint, the live
+        ``signal_trader._process_signals`` path, or a direct in-process
+        call — so the dashboard can render "what the optimizer just
+        proposed" without a re-run.
+
+        Returns::
+
+            {
+              "operating_capital": float,
+              "kelly_fraction":    float,
+              "max_single_bet":    float,
+              "max_total_exposure": float,
+              "min_edge":          float,
+              "min_confidence":    float,
+              "last_optimization": {
+                  "n_bets":                 int,
+                  "total_allocated_usdc":   float,
+                  "total_expected_return":  float,
+                  "total_expected_risk":    float,
+                  "diversification_ratio":  float,
+                  "constraint_violations":  list[str],
+              } | None
+            }
+
+        ``last_optimization`` is ``None`` until the first call to
+        :meth:`optimize`.
+        """
+        config = portfolio_optimizer.get_config()
+        last = portfolio_optimizer._last_optimization
+        if last is None:
+            last_summary: dict | None = None
+        else:
+            last_summary = {
+                "n_bets": len(last.bets),
+                "total_allocated_usdc": float(last.total_allocated_usdc),
+                "total_expected_return": float(last.total_expected_return),
+                "total_expected_risk": float(last.total_expected_risk),
+                "diversification_ratio": float(last.diversification_ratio),
+                "constraint_violations": list(last.constraint_violations),
+            }
+        return {**config, "last_optimization": last_summary}
 
 
 __all__ = [

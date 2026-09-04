@@ -120,6 +120,12 @@ _ENV_REDIRECTS: dict[str, str] = {
     # the sandbox) and crash the import — same defensive pattern as the
     # other *_DB env redirects above.
     "ML_VALUE_DB": str(_TMP_ROOT / "ml_economic_value.db"),
+    # W20-3 — backtest experiment registry SQLite db. Module-level
+    # singleton ``backtesting.experiment_store.experiment_store`` is
+    # constructed at import time and would otherwise try to mkdir
+    # ``/app/data`` (read-only in the sandbox) — same defensive pattern
+    # as the other *_DB env redirects above.
+    "EXPERIMENT_DB": str(_TMP_ROOT / "backtest_experiments.db"),
     # Force the canonical trading mode to paper + live disabled so risk-gate
     # tests don't short-circuit at the shadow / live-trading gates inside
     # ``InstitutionalRiskEngine.check_order``.

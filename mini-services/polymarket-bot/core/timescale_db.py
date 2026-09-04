@@ -41,6 +41,12 @@ _TABLES = (
     "orders",
     "fills",
     "raw_observations",
+    # W20-7 — public trade tape (CLOB ``/trades`` ingestion). Mirrors the
+    # ``market.market_trade`` hypertable declared in PG migration
+    # ``001_initial_enterprise_schemas.sql`` so the SQLite fallback path
+    # carries the same shape (without ``time TIMESTAMPTZ`` / hypertable
+    # wrapper that is PG-specific).
+    "market_trades",
 )
 
 
@@ -121,6 +127,37 @@ class TimescaleDBEngine:
                         outcome_resolved INTEGER DEFAULT NULL
                     )
                 """)
+
+                # W20-7 — Public trade tape (CLOB ``/trades`` ingestion).
+                # Mirrors the ``market.market_trade`` hypertable declared
+                # in ``core/db/migrations/001_initial_enterprise_schemas.sql``
+                # but on the SQLite fallback path. The ``trade_id`` column
+                # has a UNIQUE constraint so ``INSERT OR IGNORE`` dedupes
+                # a re-polled trade without raising — the dedup set the
+                # ingester maintains is an in-memory fast path; the
+                # ``UNIQUE`` index is the durable backstop for restarts.
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS market_trades (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        trade_id TEXT NOT NULL UNIQUE,
+                        token_id TEXT NOT NULL,
+                        price REAL NOT NULL,
+                        size REAL NOT NULL,
+                        side TEXT NOT NULL,
+                        timestamp REAL NOT NULL,
+                        ingestion_time REAL NOT NULL,
+                        maker_address TEXT,
+                        taker_order_id TEXT
+                    )
+                """)
+                cursor.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_mt_token_time "
+                    "ON market_trades(token_id, timestamp DESC)"
+                )
+                cursor.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_mt_time "
+                    "ON market_trades(timestamp DESC)"
+                )
                 conn.commit()
         except Exception as e:
             log.error("[timescale_db] SQLite fallback init notice: %s", e)
@@ -299,6 +336,142 @@ class TimescaleDBEngine:
             """,
             sqlite_params=(ts, token_id, best_bid_size, best_ask_size, ofi, micro_price),
         )
+
+    async def record_trade(
+        self,
+        token_id: str,
+        price: float,
+        size: float,
+        side: str,
+        timestamp: float,
+        trade_id: str = "",
+        maker_address: str = "",
+        taker_order_id: str = "",
+    ) -> bool:
+        """Record a single public trade in the trade tape.
+
+        W20-7 — the trade tape ingester polls the CLOB ``/trades``
+        endpoint and writes each unseen trade through this method. The
+        row lands in ``market.market_trade`` (PostgreSQL / TimescaleDB
+        hypertable, declared in migration
+        ``001_initial_enterprise_schemas.sql``) when the asyncpg pool is
+        connected; otherwise it lands in the SQLite ``market_trades``
+        fallback (declared in ``_init_sqlite_fallback``).
+
+        Deduplication is durable: both backends use ``ON CONFLICT DO
+        NOTHING`` / ``INSERT OR IGNORE`` keyed on ``trade_id``, so a
+        re-polled trade (or a duplicate after an ingester restart) is a
+        no-op rather than a duplicate row. The in-memory dedup set in
+        ``TradeTapeIngester._last_trade_ids`` is the fast path that
+        avoids the DB round-trip for the common case; this UNIQUE
+        constraint is the durable backstop for restarts / crashes.
+
+        Args:
+            token_id: CTF token id (``asset_id`` from the CLOB trade).
+            price: Fill price as a float in ``[0, 1]``.
+            size: Fill size in shares as a float.
+            side: ``"BUY"`` or ``"SELL"`` (raw CLOB value, no
+                normalisation here — the caller is responsible for
+                upper-casing if a canonical form is required).
+            timestamp: Unix epoch seconds (float) at which the trade
+                executed on-chain. Used as the hypertable partition key
+                in PG and as the ``timestamp`` index in SQLite.
+            trade_id: CLOB trade identifier. When empty the row is
+                inserted with ``NULL``-equivalent uniqueness semantics —
+                SQLite will treat every empty-string ``trade_id`` as
+                distinct (no UNIQUE collision), and PG ``ON CONFLICT``
+                needs a non-NULL key to dedup, so an empty ``trade_id``
+                effectively disables durable dedup for that row. The
+                ingester always supplies a non-empty ``trade_id`` when
+                the CLOB provides one.
+            maker_address: Maker wallet address (optional).
+            taker_order_id: Taker order id (optional — stored in
+                ``taker_address`` column on PG for schema compat with
+                the existing ``market.market_trade`` hypertable).
+
+        Returns:
+            ``True`` on a successful write to either backend;
+            ``False`` if both backends failed (the failure is logged
+            at ``error`` level and recorded in telemetry).
+        """
+        ts = float(timestamp) if timestamp else time.time()
+        dt = datetime.datetime.fromtimestamp(ts, datetime.timezone.utc)
+        ingestion_time = time.time()
+        return await self._write(
+            table="market_trades",
+            pg_sql="""
+                INSERT INTO market.market_trade
+                    (time, trade_id, token_id, side, price, size, maker_address, taker_address)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                ON CONFLICT (trade_id) DO NOTHING;
+            """,
+            pg_params=(
+                dt, trade_id or "", token_id, side,
+                float(price), float(size),
+                maker_address or None, taker_order_id or None,
+            ),
+            sqlite_sql="""
+                INSERT OR IGNORE INTO market_trades
+                    (trade_id, token_id, price, size, side, timestamp,
+                     ingestion_time, maker_address, taker_order_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
+            """,
+            sqlite_params=(
+                trade_id or "", token_id, float(price), float(size),
+                side, ts, ingestion_time,
+                maker_address or None, taker_order_id or None,
+            ),
+        )
+
+    def fetch_trades(
+        self,
+        token_id: str = "",
+        limit: int = 100,
+    ) -> list[dict]:
+        """Return up to ``limit`` recent trades from the SQLite tape.
+
+        Used by the ``GET /api/trades/tape`` endpoint (W20-7). Reads
+        from the SQLite fallback ``market_trades`` table — the canonical
+        read path on a stand-alone bot without a live TimescaleDB
+        connection. The PG path is exposed separately via the
+        ``fetch_records`` explorer (the asyncpg pool does not have a
+        sync ``fetchmany`` equivalent that this method could reuse
+        without an event loop).
+
+        Args:
+            token_id: Optional ``asset_id`` filter. When empty, every
+                token's trades are returned (most-recent-first).
+            limit: Maximum rows to return. Capped at 500 by the caller
+                (the API route's ``Query(le=500)``).
+
+        Returns:
+            A list of dicts (most-recent-first), each carrying the
+            columns of the ``market_trades`` table. Empty list on any
+            DB error (the failure is logged at ``error`` level — the
+            HTTP endpoint returns an empty tape rather than 500'ing).
+        """
+        try:
+            import sqlite3
+            capped = max(1, min(int(limit), 500))
+            with sqlite3.connect(self._sqlite_path) as conn:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.cursor()
+                if token_id:
+                    cursor.execute(
+                        "SELECT * FROM market_trades WHERE token_id = ? "
+                        "ORDER BY timestamp DESC LIMIT ?",
+                        (token_id, capped),
+                    )
+                else:
+                    cursor.execute(
+                        "SELECT * FROM market_trades "
+                        "ORDER BY timestamp DESC LIMIT ?",
+                        (capped,),
+                    )
+                return [dict(r) for r in cursor.fetchall()]
+        except Exception as e:
+            log.error("[timescale_db] fetch_trades failed: %s", e)
+            return []
 
     async def record_news(
         self,

@@ -369,6 +369,85 @@ class ClobClient:
         data = await self._get("/data/trades", params=params, auth=True)
         return data if isinstance(data, list) else data.get("data", [])
 
+    async def get_public_trades(
+        self,
+        token_id: str | None = None,
+        limit: int = 100,
+    ) -> list[dict]:
+        """Fetch public trade history from the CLOB ``/trades`` endpoint.
+
+        The endpoint is unauthenticated (public) and returns the recent
+        trade tape across every market (or filtered to a single
+        ``asset_id`` when ``token_id`` is supplied). The response shape
+        varies between CLOB versions — a bare ``list`` of trade dicts in
+        some releases and an envelope ``{"trades": [...]}`` in others —
+        so both shapes are normalised here into a flat list of dicts
+        carrying the fields the trade-tape ingester writes to
+        ``market_trades``.
+
+        Args:
+            token_id: Optional ``asset_id`` filter. When ``None`` the
+                endpoint returns the most recent trades across every
+                market (subject to ``limit``).
+            limit: Maximum number of trades to return. Capped by the
+                upstream CLOB at 500 per request.
+
+        Returns:
+            A list of normalised trade dicts (empty on any error —
+            errors are logged at ``error`` level and swallowed so the
+            ingester's poll loop never crashes on a transient API
+            failure). Each dict carries:
+
+              * ``trade_id``       — CLOB trade identifier (``id`` /
+                                      ``trade_id`` field)
+              * ``token_id``       — CTF token id (``asset_id`` /
+                                      ``token_id`` field)
+              * ``price``          — fill price as float
+              * ``size``           — fill size in shares as float
+              * ``side``          — ``"BUY"`` / ``"SELL"`` (raw CLOB
+                                      value, upper-cased by caller)
+              * ``timestamp``      — unix epoch seconds as float
+                                      (``timestamp`` / ``created_at``)
+              * ``maker_address`` — maker wallet (``maker`` field)
+              * ``taker_order_id`` — taker order id (``taker_order_id``
+                                      field) — absent on some CLOB
+                                      releases; defaults to ``""``
+        """
+        try:
+            params: dict[str, Any] = {"limit": limit}
+            if token_id:
+                params["asset_id"] = token_id
+
+            data = await self._get("/trades", params=params)
+
+            raw_trades: list[dict] = (
+                data if isinstance(data, list) else data.get("trades", [])
+            )
+
+            normalised: list[dict] = []
+            for t in raw_trades:
+                if not isinstance(t, dict):
+                    continue
+                try:
+                    normalised.append({
+                        "trade_id": t.get("id") or t.get("trade_id") or "",
+                        "token_id": t.get("asset_id") or t.get("token_id") or "",
+                        "price": float(t.get("price") or 0.0),
+                        "size": float(t.get("size") or 0.0),
+                        "side": str(t.get("side") or ""),
+                        "timestamp": float(t.get("timestamp") or t.get("created_at") or 0.0),
+                        "maker_address": t.get("maker") or "",
+                        "taker_order_id": t.get("taker_order_id") or "",
+                    })
+                except (TypeError, ValueError) as norm_err:
+                    log.warning("Skipping malformed public trade %r: %s", t, norm_err)
+                    continue
+
+            return normalised
+        except Exception as e:
+            log.error("Failed to fetch public trades: %s", e)
+            return []
+
 
 # Module-level singleton
 clob_client = ClobClient()

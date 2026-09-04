@@ -60,6 +60,17 @@ class MarketSignal:
     # downstream submit_order path can record RISK_APPROVED / RISK_REJECTED /
     # ORDER / FILL stages against the originating prediction chain.
     decision_id: str = ""
+    # W20-4 — portfolio-optimizer inputs. Populated by _ml_signal() so the
+    # portfolio optimizer (:mod:`core.portfolio_optimizer`) can size a batch
+    # of signals together without re-running the prediction. ``edge`` is the
+    # raw predicted edge ``p_yes - market_mid`` (the same figure passed to
+    # :func:`core.capital_allocator.allocate_capital`); ``price`` is the
+    # market mid at decision time. The optimizer treats ``price`` as the
+    # share cost (Kelly: ``f = edge / (1 - price)``), so we surface the
+    # *market* mid here, not the strategy's ``target_price`` (which is the
+    # aggressive pass-through price the order will actually post at).
+    edge: float = 0.0
+    price: float = 0.5
 
 
 class SignalTraderStrategy(BaseStrategy):
@@ -159,9 +170,23 @@ class SignalTraderStrategy(BaseStrategy):
             return
 
         signals.sort(key=lambda s: s.confidence, reverse=True)
-        # Execute top 3 highest-conviction signals per scan cycle
-        for sig in signals[:3]:
-            await self._act_on_signal(sig)
+        # W20-4 — Kelly-criterion portfolio optimization. Pass the top-N
+        # signals through :mod:`core.portfolio_optimizer` so the optimizer
+        # picks the best subset within the operator's max-total-exposure
+        # budget AND re-sizes each surviving signal against the live Kelly
+        # fraction / max-single-bet caps. The per-signal ``size_usdc``
+        # produced by ``_ml_signal`` (via :func:`allocate_capital`) is the
+        # pre-sizing proposal; the optimizer's ``suggested_size_usdc`` is
+        # the authoritative post-portfolio size (clamped to a $0.50 floor so
+        # the order is non-dust).
+        #
+        # The previous code ran ``_act_on_signal`` directly on the top 3
+        # signals by confidence; the new path is strictly more conservative
+        # (it can only shrink or drop bets, never grow them beyond the
+        # per-signal cap) and surfaces the optimizer in the live trade
+        # path — fixing the W17-8 God Mode finding that the optimizer was
+        # never called during actual trading.
+        await self._process_signals(signals[:10])
 
     async def _evaluate_market(self, mkt: dict, token_id: str | None = None) -> MarketSignal | None:
         # When called from the catalog scan path, `token_id` is supplied
@@ -560,9 +585,109 @@ class SignalTraderStrategy(BaseStrategy):
             ml_score=p_yes,
             source="ml",
             decision_id=dec_id,
+            # W20-4 — portfolio optimizer inputs. ``edge`` is the raw
+            # predicted_edge (``p_yes - market_mid``); ``price`` is the
+            # market mid (NOT target_price — the optimizer's Kelly formula
+            # treats ``price`` as the share cost, so we pass the market
+            # mid to avoid double-counting the aggressive pass-through tick
+            # already baked into ``target_price``).
+            edge=predicted_edge,
+            price=float(mid),
         )
 
     # ── Execution ─────────────────────────────────────────────────────────────
+
+    async def _process_signals(self, signals: list[MarketSignal]) -> None:
+        """Process a batch of signals through the Kelly portfolio optimizer.
+
+        W20-4 — wires :mod:`core.portfolio_optimizer` into the live trade
+        path. The optimizer receives the signals as ``opportunities`` and
+        returns the subset of bets that fit within the operator's
+        max-total-exposure budget, each with a Kelly-sized
+        ``suggested_size_usdc``. This method maps each selected bet back to
+        its source :class:`MarketSignal`, overrides the signal's per-signal
+        ``size_usdc`` (which was set by :func:`allocate_capital` in
+        ``_ml_signal``) with the optimizer's portfolio-aware size, then
+        dispatches through the existing ``_act_on_signal`` path so the
+        one-position-per-market guard, decision-ledger ORDER stage, and
+        order submission all flow unchanged.
+
+        Behaviour:
+
+          * Empty input → no-op.
+          * Optimizer raises → fall back to the legacy top-3 path so a
+            buggy optimizer never blocks a scan cycle.
+          * Optimizer returns zero bets → log + return (no orders placed;
+            this is the optimizer's "every signal failed the Kelly gate"
+            verdict, not an error).
+          * Otherwise → dispatch each selected bet through
+            ``_act_on_signal``, clamping ``size_usdc`` to a $0.50 floor so
+            the order is non-dust (matches the floor already applied by
+            :func:`allocate_capital`).
+        """
+        if not signals:
+            return
+
+        # Convert signals → opportunities for the optimizer. ``price`` is
+        # the market mid (NOT target_price — see MarketSignal.price docstring).
+        opportunities = [
+            {
+                "token_id": s.token_id,
+                "strategy": self.name,
+                "price": float(s.price) if s.price else 0.5,
+                "edge": float(s.edge),
+                "confidence": float(s.confidence),
+            }
+            for s in signals
+        ]
+
+        # Run the optimizer. Lazy import so a portfolio_optimizer import-time
+        # failure (e.g. numpy missing) never blocks the strategy module from
+        # loading.
+        try:
+            from core.portfolio_optimizer import portfolio_optimizer
+            optimization = portfolio_optimizer.optimize(opportunities)
+        except Exception as e:
+            log.warning(
+                "[signal_trader] portfolio optimizer failed (%s); falling back "
+                "to legacy top-3 path", e,
+            )
+            for sig in signals[:3]:
+                await self._act_on_signal(sig)
+            return
+
+        if not optimization.bets:
+            log.debug(
+                "[signal_trader] portfolio optimizer returned 0 bets "
+                "(input=%d, violations=%s)",
+                len(signals), optimization.constraint_violations,
+            )
+            return
+
+        # Map selected bets back to their source signals, override the
+        # per-signal size_usdc with the optimizer's Kelly-sized suggestion,
+        # and dispatch through _act_on_signal (which handles the one-
+        # position-per-market guard, decision-ledger ORDER stage, and order
+        # submission). $0.50 floor matches the legacy allocator floor.
+        sig_by_token: dict[str, MarketSignal] = {s.token_id: s for s in signals}
+        executed = 0
+        for bet in optimization.bets:
+            sig = sig_by_token.get(bet.token_id)
+            if sig is None:
+                continue
+            sig.size_usdc = max(0.50, float(bet.suggested_size_usdc))
+            await self._act_on_signal(sig)
+            executed += 1
+
+        log.info(
+            "[signal_trader] portfolio optimization: %d/%d signals executed, "
+            "$%.2f allocated (expected return $%.2f, risk $%.2f, "
+            "diversification %.2f, violations=%s)",
+            executed, len(signals), optimization.total_allocated_usdc,
+            optimization.total_expected_return, optimization.total_expected_risk,
+            optimization.diversification_ratio,
+            optimization.constraint_violations,
+        )
 
     async def _recycle_stale_orders(self) -> None:
         """Cancel unfilled orders after STALE_ORDER_SECONDS so tokens free up."""

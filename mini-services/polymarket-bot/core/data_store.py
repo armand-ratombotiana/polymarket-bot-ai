@@ -229,6 +229,39 @@ class DataStore:
             p = self.positions.get(token_id)
             return p.current_exposure if p else 0.0
 
+    # W20-4 — portfolio-optimizer helper. Returns the current open positions
+    # as a list of plain dicts (``{"token_id": str, "size_usdc": float}``) so
+    # the live rebalance endpoint (``GET /api/portfolio/rebalance/live``) and
+    # the in-process ``signal_trader._process_signals`` path can pass them
+    # straight to :meth:`PortfolioOptimizer.suggest_rebalance` /
+    # :meth:`PortfolioOptimizer.optimize` without re-shaping. ``size_usdc``
+    # uses the position's ``current_exposure`` (cost basis of remaining
+    # shares), which is the same figure the optimizer treats as the
+    # ``size_usdc`` field of its ``add`` / ``reduce`` / ``close`` /
+    # ``hold`` output.
+    async def get_positions(self) -> list[dict]:
+        """Return the live open positions as ``portfolio_optimizer``-shaped dicts.
+
+        Each entry is ``{"token_id": str, "size_usdc": float}``. The list is
+        a snapshot taken under the store lock so concurrent fills during the
+        iteration cannot mutate the underlying dict mid-loop. Empty when no
+        positions are open.
+        """
+        async with self._lock:
+            return [
+                {
+                    "token_id": tid,
+                    "size_usdc": float(p.current_exposure),
+                    "strategy": p.strategy,
+                    "avg_entry_price": float(p.avg_entry_price),
+                    "yes_shares": float(p.yes_shares),
+                    "no_shares": float(p.no_shares),
+                    "total_invested": float(p.total_invested),
+                    "realised_pnl": float(p.realised_pnl),
+                }
+                for tid, p in self.positions.items()
+            ]
+
     # ── Positions & Trades ───────────────────────────────────────────────
 
     async def record_fill(self, trade: Trade) -> None:

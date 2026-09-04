@@ -424,6 +424,24 @@ async def lifespan(app: FastAPI):
     # ws_client instance is retained for test-compat and future re-enablement.
     watchdog.beat("ws_client")  # mark as alive so watchdog doesn't flag it as stale
 
+    # 5b. W20-7 — Start the public trade-tape ingester. Polls the CLOB
+    # ``/trades`` endpoint (unauthenticated, public) every 5s and writes
+    # every unseen trade into ``market_trades`` (SQLite fallback) /
+    # ``market.market_trade`` (TimescaleDB hypertable declared in
+    # migration 001). Mirrors the book_poller pattern: same REST client,
+    # same defensive ``try/except`` wrap so a transient start failure
+    # can never block the rest of the lifespan startup. The ingester is
+    # the only consumer of ``clob_client.get_public_trades()``; without
+    # it the ``market_trades`` table stays empty and the
+    # ``GET /api/trades/tape`` endpoint returns an empty list.
+    try:
+        from core.trade_ingester import trade_tape_ingester
+        await trade_tape_ingester.start()
+        watchdog.beat("trade_tape_ingester")
+        await store.log_event("📜 Trade tape ingester active (5s poll interval)")
+    except Exception as e:  # pragma: no cover — defensive: must not kill startup
+        log.error("[trade_tape_ingester] startup failed: %s", e)
+
     # 6. Start Settlement Engine, Fundamental News Ingest & Position Risk Manager
     await settlement_engine.start()
     await fundamental_engine.start()
@@ -555,6 +573,13 @@ async def lifespan(app: FastAPI):
         await live_fill_monitor.stop()
     except Exception as e:  # pragma: no cover — defensive: must not kill shutdown
         log.error("[live_fill_monitor] shutdown failed: %s", e)
+    # W20-7 — stop the trade-tape ingester. Safe to call when not
+    # running (no-op); cancels the polling task if active.
+    try:
+        from core.trade_ingester import trade_tape_ingester
+        await trade_tape_ingester.stop()
+    except Exception as e:  # pragma: no cover — defensive: must not kill shutdown
+        log.error("[trade_tape_ingester] shutdown failed: %s", e)
     await gamma_client.close()
 
     # ── W16-7 — close the async SQLite connection pool ─────────────────────
@@ -3512,6 +3537,66 @@ async def get_model_drift():
     return result
 
 
+@app.get(
+    "/api/ml/training-data-status",
+    tags=["ml"],
+    summary="Real labeled training-data availability",
+    description=(
+        "Report whether the ML ensemble has access to real labeled training "
+        "samples (from resolved markets via the daily label-backfill loop) "
+        "or is currently running on the synthetic-only fallback. Returns "
+        "the sample count, class balance, and a ``has_real_data`` boolean "
+        "that the live safety gate (§82 check #6) and the W20-2 real-data "
+        "training path consult before allowing the model to be promoted "
+        "to production. The endpoint does NOT cache — it issues a fresh "
+        "SQLite query each call so the operator gets a live view after "
+        "triggering a backfill cycle."
+    ),
+)
+async def get_training_data_status():
+    """Check if real labeled training data is available (W20-2).
+
+    Calls ``ml_model._load_real_training_data()`` directly (the same
+    canonical fetcher ``fit_initial`` uses) so the payload reflects the
+    EXACT data the next retrain would consume. Defensive: a transient
+    SQLite hiccup surfaces as ``has_real_data=false`` with an ``error``
+    field rather than a 500 — the operator dashboard treats that the
+    same as "no real data yet" (yellow caution indicator).
+    """
+    try:
+        features, labels, _ = ml_model._load_real_training_data()
+    except Exception as e:  # noqa: BLE001 — defensive: route must not 500
+        return {
+            "has_real_data": False,
+            "n_samples": 0,
+            "n_positive": 0,
+            "n_negative": 0,
+            "error": str(e),
+        }
+    if features is None or labels is None or len(features) < 1:
+        return {
+            "has_real_data": False,
+            "n_samples": 0,
+            "n_positive": 0,
+            "n_negative": 0,
+        }
+    n = int(len(features))
+    n_pos = int(np.sum(np.asarray(labels, dtype=int)))
+    return {
+        "has_real_data": n >= 100,
+        "n_samples": n,
+        "n_positive": n_pos,
+        "n_negative": n - n_pos,
+        # Surface the live training_source provenance so the operator
+        # can confirm the next retrain will pick up the real data (i.e.
+        # the model isn't already real-only and just waiting for a
+        # retrain trigger).
+        "current_training_source": getattr(ml_model, "training_source", "unknown"),
+        "current_n_real_samples": int(getattr(ml_model, "n_real_samples", 0) or 0),
+        "current_n_synthetic_samples": int(getattr(ml_model, "n_synthetic_samples", 0) or 0),
+    }
+
+
 # ── Quantitative Backtesting Lab ──────────────────────────────────────────────
 
 class BacktestRequest(BaseModel):
@@ -3520,6 +3605,142 @@ class BacktestRequest(BaseModel):
     days: int = Field(default=30, ge=1, le=365)
     fee_bps: float = Field(default=0.0, ge=0.0, le=100.0)
     slippage_bps: float = Field(default=5.0, ge=0.0, le=50.0)
+
+
+# ── W20-3 — Backtest experiment persistence helper ───────────────────────────
+# Materialises a backtest result (from either the synthetic MC engine in
+# ``backtesting/engine.py`` OR the historical-replay engine in
+# ``backtesting/historical_replay.py``) into a ``BacktestExperiment`` row
+# and saves it via the ``experiment_store`` singleton. The two engines
+# report the headline risk metrics under DIFFERENT key names + units, so
+# the helper's ``engine_kind`` switch normalises both into the canonical
+# :class:`BacktestExperiment` field shape:
+#
+#   synthetic_mc  →  result_dict = BacktestResult.to_dict()
+#                   {roi_pct (percentage), sharpe_ratio, sortino_ratio,
+#                    calmar_ratio, max_drawdown_pct (percentage),
+#                    win_rate, profit_factor, total_trades,
+#                    final_equity, initial_capital, equity_curve (dicts),
+#                    monthly_returns, ...}
+#
+#   historical    →  result_dict = canonical shape
+#                   {total_return (fractional), sharpe, sortino, calmar,
+#                    max_drawdown (fractional), win_rate, profit_factor,
+#                    n_trades, final_equity, equity_curve (floats), trades}
+#
+# Persistence is best-effort: a SQLite write failure is logged at WARN
+# and the helper returns ``None`` so the calling route can still return
+# a successful 200 with the full backtest payload (just without the
+# ``experiment_id`` field). The God Mode assessment (W17-6 §33) found
+# no experiment registry; W20-3 closes that gap but does NOT make
+# persistence load-bearing for the backtest itself — a transient
+# ``/app/data`` write failure shouldn't 500 a backtest that already
+# completed successfully.
+
+def _persist_backtest_experiment(
+    *,
+    strategy: str,
+    strategy_version: str,
+    start_time: float,
+    end_time: float,
+    initial_capital: float,
+    config: dict,
+    result_dict: dict,
+    engine_kind: str,
+) -> str | None:
+    """Save a backtest result as a ``BacktestExperiment`` row.
+
+    Returns the new ``experiment_id`` on success, or ``None`` if the
+    store could not save the row (in which case the caller continues
+    without an ``experiment_id`` field in the response — best-effort
+    persistence).
+    """
+    from backtesting.experiment_store import (
+        BacktestExperiment,
+        experiment_store,
+    )
+
+    if experiment_store is None:
+        # Import-time construction failed (read-only parent dir, etc.).
+        log.warning(
+            "experiment_store singleton is None — cannot persist "
+            "backtest experiment (engine_kind=%s, strategy=%s).",
+            engine_kind, strategy,
+        )
+        return None
+
+    if engine_kind == "synthetic_mc":
+        # Synthetic MC engine: convert percentage fields to fractional
+        # + rename ``*_ratio`` / ``total_trades`` to the dataclass field
+        # names. ``equity_curve`` is a list of per-step dicts in this
+        # shape; pass it through verbatim (the store JSON-encodes
+        # whatever it gets and caps the blob at 10 KB).
+        total_return = float(result_dict.get("roi_pct", 0.0)) / 100.0
+        max_dd = float(result_dict.get("max_drawdown_pct", 0.0)) / 100.0
+        sharpe = float(result_dict.get("sharpe_ratio", 0.0))
+        sortino = float(result_dict.get("sortino_ratio", 0.0))
+        calmar = float(result_dict.get("calmar_ratio", 0.0))
+        win_rate = float(result_dict.get("win_rate", 0.0))
+        profit_factor = float(result_dict.get("profit_factor", 0.0))
+        n_trades = int(result_dict.get("total_trades", 0))
+        final_equity = float(result_dict.get("final_equity", initial_capital))
+        equity_curve = result_dict.get("equity_curve", [])
+        trades = []  # synthetic MC engine doesn't expose per-trade detail
+    elif engine_kind == "historical":
+        # Historical-replay engine: result_dict already in the canonical
+        # ``BacktestExperiment`` shape (fractional return / sharpe /
+        # max_drawdown / etc.) — pass through directly.
+        total_return = float(result_dict.get("total_return", 0.0))
+        max_dd = float(result_dict.get("max_drawdown", 0.0))
+        sharpe = float(result_dict.get("sharpe", 0.0))
+        sortino = float(result_dict.get("sortino", 0.0))
+        calmar = float(result_dict.get("calmar", 0.0))
+        win_rate = float(result_dict.get("win_rate", 0.0))
+        profit_factor = float(result_dict.get("profit_factor", 0.0))
+        n_trades = int(result_dict.get("n_trades", 0))
+        final_equity = float(
+            result_dict.get("final_equity", initial_capital)
+        )
+        equity_curve = result_dict.get("equity_curve", [])
+        trades = result_dict.get("trades", [])
+    else:  # pragma: no cover — defensive
+        log.warning(
+            "_persist_backtest_experiment: unknown engine_kind=%s; "
+            "skipping persistence.", engine_kind,
+        )
+        return None
+
+    experiment_id = str(uuid.uuid4())[:12]
+    exp = BacktestExperiment(
+        experiment_id=experiment_id,
+        strategy=strategy,
+        strategy_version=strategy_version,
+        start_time=float(start_time),
+        end_time=float(end_time),
+        initial_capital=float(initial_capital),
+        final_equity=final_equity,
+        total_return=total_return,
+        sharpe=sharpe,
+        sortino=sortino,
+        calmar=calmar,
+        max_drawdown=max_dd,
+        win_rate=win_rate,
+        profit_factor=profit_factor,
+        n_trades=n_trades,
+        config=config,
+        created_at=time.time(),
+        equity_curve=equity_curve,
+        trades=trades,
+    )
+    try:
+        experiment_store.save(exp)
+        return experiment_id
+    except Exception as exc:  # pragma: no cover — defensive
+        log.warning(
+            "Failed to persist backtest experiment (strategy=%s, "
+            "engine_kind=%s): %s", strategy, engine_kind, exc,
+        )
+        return None
 
 
 @app.post("/api/backtest/run", tags=["backtesting"])
@@ -3535,12 +3756,35 @@ async def run_backtest_simulation(request: Request, req: BacktestRequest):
         fee_bps=req.fee_bps,
         slippage_bps=req.slippage_bps,
     )
+    # W20-3 — persist every backtest run as a BacktestExperiment row so
+    # cross-run comparison (``/api/backtest/experiments`` / ``/compare``)
+    # is possible. Previously (W17-6 God Mode §33) every ``run_backtest``
+    # call returned an ephemeral dict that was lost. Persistence is
+    # best-effort: a SQLite write failure is logged + the experiment_id
+    # is omitted from the response (the backtest itself still succeeds
+    # and returns its full result payload).
+    experiment_id = _persist_backtest_experiment(
+        strategy=req.strategy_id,
+        strategy_version="1.0.0",
+        start_time=time.time() - req.days * 86400.0,
+        end_time=time.time(),
+        initial_capital=req.initial_capital,
+        config=req.model_dump(),
+        # Synthetic MC engine returns roi_pct (percentage) / sharpe_ratio
+        # / max_drawdown_pct (percentage) / total_trades. The
+        # ``BacktestExperiment`` dataclass expects fractional values +
+        # the ``sharpe`` / ``n_trades`` field names, so the helper
+        # performs the coercion.
+        result_dict=result.to_dict(),
+        engine_kind="synthetic_mc",
+    )
     return {
         "status": "completed",
         "synthetic": True,
         "synthetic_kind": "monte_carlo_archetype",
         "disclaimer": "Synthetic archetype simulation — not recorded market history (M8 pending)",
         "result": result.to_dict(),
+        "experiment_id": experiment_id,
     }
 
 
@@ -3754,6 +3998,42 @@ async def historical_replay(request: Request, req: HistoricalReplayRequest):
     if downsampled_curve and downsampled_curve[-1] != result.equity_curve[-1]:
         downsampled_curve.append(result.equity_curve[-1])
 
+    # W20-3 — persist the historical-replay backtest as a
+    # ``BacktestExperiment`` row so it shows up alongside the
+    # synthetic-MC runs in ``GET /api/backtest/experiments`` and
+    # ``POST /api/backtest/compare``. The replay engine's
+    # :class:`ReplayResult` already exposes the canonical
+    # ``total_return`` / ``sharpe`` / ``max_drawdown`` / ``win_rate`` /
+    # ``profit_factor`` / ``trades`` / ``equity_curve`` field names
+    # (no percentage → fractional coercion needed; only the synthetic
+    # MC engine reports percentages), so the ``engine_kind="historical"``
+    # branch of the helper just maps the keys 1:1.
+    experiment_id = _persist_backtest_experiment(
+        strategy=f"historical:{req.token_id}:{strategy_name}",
+        strategy_version="1.0.0",
+        start_time=req.start_time,
+        end_time=req.end_time,
+        initial_capital=req.initial_capital,
+        config=req.model_dump(),
+        result_dict={
+            "final_equity": (
+                float(downsampled_curve[-1]) if downsampled_curve
+                else req.initial_capital
+            ),
+            "total_return": result.total_return,
+            "sharpe": result.sharpe,
+            "sortino": 0.0,  # historical replay doesn't compute Sortino
+            "calmar": 0.0,   # historical replay doesn't compute Calmar
+            "max_drawdown": result.max_drawdown,
+            "win_rate": result.win_rate,
+            "profit_factor": result.profit_factor,
+            "n_trades": len(result.trades),
+            "equity_curve": downsampled_curve,
+            "trades": result.trades[:100],
+        },
+        engine_kind="historical",
+    )
+
     return {
         "status": "completed",
         "synthetic": False,
@@ -3774,6 +4054,423 @@ async def historical_replay(request: Request, req: HistoricalReplayRequest):
         "profit_factor": result.profit_factor,
         "trades": result.trades[:100],
         "equity_curve": downsampled_curve,
+        "experiment_id": experiment_id,
+    }
+
+
+# ── W20-3 — Backtest experiment registry endpoints ───────────────────────────
+# Three sibling routes that surface the persisted ``BacktestExperiment``
+# rows so cross-run comparison (the gap flagged in the God Mode
+# assessment W17-6 §33) is finally possible:
+#
+#   GET  /api/backtest/experiments               — list newest-first
+#   GET  /api/backtest/experiments/{exp_id}     — fetch one
+#   POST /api/backtest/compare                  — A/B/C compare
+#
+# All three delegate to the ``experiment_store`` singleton (constructed
+# against ``EXPERIMENT_DB`` at import time of
+# ``backtesting.experiment_store``). The store's SQLite I/O is
+# synchronous; we wrap each call in ``asyncio.to_thread`` so the FastAPI
+# event loop never blocks on disk I/O. The Pydantic
+# ``CompareExperimentsRequest`` body is just ``{"experiment_ids": [...]}``
+# — a list-of-str rather than a list-of-strings-passed-as-query-params
+# because passing N IDs in the URL would blow past the typical HTTP
+# client's 8 KB URL cap at ~ 200 IDs (12-char IDs × 2-char separator +
+# query-string overhead).
+
+class CompareExperimentsRequest(BaseModel):
+    """Request body for ``POST /api/backtest/compare``.
+
+    ``experiment_ids`` is a list of 12-char IDs (the format returned by
+    ``POST /api/backtest/run`` / ``/historical-replay`` in their
+    ``experiment_id`` field). Missing IDs are silently dropped (logged
+    at INFO) — the comparison still runs over whichever IDs were found.
+    """
+
+    experiment_ids: list[str] = Field(
+        ..., min_length=1, max_length=100,
+        description="Experiment IDs to compare (max 100 per request).",
+    )
+
+
+@app.get("/api/backtest/experiments", tags=["backtesting"])
+@limiter.limit(READ_LIMIT)
+async def list_backtest_experiments(
+    request: Request,
+    strategy: str | None = Query(
+        None, description="Filter by strategy name (exact match)."
+    ),
+    limit: int = Query(
+        50, ge=1, le=1000,
+        description="Max experiments to return (1..1000)."
+    ),
+):
+    """List backtest experiments newest-first.
+
+    Each row carries the headline risk metrics (``total_return``,
+    ``sharpe``, ``sortino``, ``calmar``, ``max_drawdown``,
+    ``win_rate``, ``profit_factor``, ``n_trades``) + the JSON-encoded
+    ``config`` / ``equity_curve`` / ``trades`` blobs (decoded back to
+    native Python types by the store). The ``equity_curve`` / ``trades``
+    blobs are capped at 10 KB per row on write, so the response stays
+    bounded.
+
+    The ``strategy`` query param does an EXACT match against the
+    ``strategy`` column — pass the same string you used as
+    ``strategy_id`` in the ``POST /api/backtest/run`` request, or the
+    ``"historical:{token_id}:simple"`` shape used by
+    ``POST /api/backtest/historical-replay``.
+    """
+    from backtesting.experiment_store import experiment_store
+
+    if experiment_store is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Experiment store is not available (init failed at import).",
+        )
+    rows = await asyncio.to_thread(
+        experiment_store.list_experiments, strategy, limit
+    )
+    return {
+        "status": "ok",
+        "count": len(rows),
+        "strategy_filter": strategy,
+        "experiments": rows,
+    }
+
+
+@app.get("/api/backtest/experiments/{experiment_id}", tags=["backtesting"])
+@limiter.limit(READ_LIMIT)
+async def get_backtest_experiment(
+    request: Request,
+    experiment_id: str,
+):
+    """Fetch one backtest experiment by ``experiment_id``.
+
+    Returns the full row with decoded ``config`` / ``equity_curve`` /
+    ``trades`` JSON blobs. ``404`` if the ID doesn't exist (or was
+    truncated by the 10 KB blob cap during write, in which case the
+    headline metrics are still readable via the list endpoint — only
+    the JSON-blob columns are corrupted).
+    """
+    from backtesting.experiment_store import experiment_store
+
+    if experiment_store is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Experiment store is not available (init failed at import).",
+        )
+    result = await asyncio.to_thread(experiment_store.get, experiment_id)
+    if not result:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Experiment {experiment_id!r} not found.",
+        )
+    return result
+
+
+@app.post("/api/backtest/compare", tags=["backtesting"])
+@limiter.limit(READ_LIMIT)
+async def compare_backtest_experiments(
+    request: Request, req: CompareExperimentsRequest,
+):
+    """A/B/C compare multiple backtest experiments.
+
+    Returns the headline metric winners across the requested set:
+
+      * ``best_return``      — max ``total_return``.
+      * ``best_sharpe``      — max ``sharpe``.
+      * ``lowest_drawdown``  — min ``max_drawdown`` (lower is better).
+      * ``experiments``      — per-experiment summary dict with
+        ``{id, strategy, return, sharpe, max_drawdown, win_rate}``.
+
+    Missing IDs are silently dropped (the response's ``count`` reflects
+    the number actually compared). If no IDs match, the response carries
+    ``{"error": "No experiments found", "count": 0}`` with HTTP 200 —
+    the request was syntactically valid (200), but no experiments were
+    found (``count == 0``).
+    """
+    from backtesting.experiment_store import experiment_store
+
+    if experiment_store is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Experiment store is not available (init failed at import).",
+        )
+    result = await asyncio.to_thread(
+        experiment_store.compare, req.experiment_ids
+    )
+    return result
+
+
+# ── W20-1 — Walk-forward CV + Monte Carlo simulation routes ─────────────────
+# Two advanced backtest routes that delegate to the pure-Python
+# ``walk_forward_analysis`` and ``monte_carlo_simulation`` helpers in
+# ``backtesting/advanced.py``. Until W20-1 those helpers existed with full
+# unit-test coverage (``tests/test_advanced_backtest.py``, 12 tests) but
+# had NO HTTP surface — the God Mode assessment (W17-6 / CF-7 in the
+# BACKTEST_ENGINE_REASSESSMENT) flagged the docstring in
+# ``backtesting/advanced.py`` that lied about the existence of these two
+# routes. This block makes the lies true.
+#
+# Both routes are rate-limited at ``HEAVY_LIMIT`` (5/min) — same ceiling
+# as every other ``/api/backtest/*`` route — and the CPU-bound numpy work
+# is wrapped in ``asyncio.to_thread`` so the FastAPI event loop never
+# blocks on the sklearn ``fit`` / numpy ``choice`` calls.
+#
+# Walk-forward training-data source: the route queries the SQLite
+# ``ml_feature_store`` table (the same table
+# ``timescale_db.fetch_training_samples`` reads) directly so it can pull
+# the ``timestamp`` column alongside ``features_json`` and
+# ``outcome_resolved`` in a single statement —
+# ``timescale_db.fetch_training_samples`` only returns ``(X, y)`` (no
+# timestamps), but ``walk_forward_analysis`` requires timestamps for its
+# strict time-ordered partition. If no labelled rows exist in the table
+# (or the table / DB is missing entirely), the route falls back to
+# ``ml.model._synthetic_training_data`` so the route still returns a
+# well-formed payload with ``n_windows >= 1`` rather than 500-ing.
+#
+# Monte-carlo trade-returns source: the route loads up to 500 of the
+# most-recent rows from the ``closed_positions`` SQLite table (via the
+# async ``closed_positions.get_closed_positions`` helper) and derives
+# each trade's ROI as ``pnl / (entry_price * shares)``. The ``pnl``
+# column is already signed by ``record_closed_position`` (positive for
+# wins, negative for losses), so no direction-sign manipulation is
+# needed (the spec's draft handler used ``size`` / ``side`` field names
+# that don't exist in the actual schema — the real columns are
+# ``shares`` / ``direction``).
+
+@app.post("/api/backtest/walk-forward", tags=["backtesting"])
+@limiter.limit(HEAVY_LIMIT)
+async def run_walk_forward(request: Request, params: dict | None = None):
+    """Run walk-forward backtest analysis.
+
+    Walks the time-ordered ``ml_feature_store`` dataset through
+    ``(train_window, test_window, step)`` rolling windows, fitting a
+    fresh ``RandomForestClassifier`` on each train fold and scoring AUC
+    / Brier on the immediately-following out-of-sample test fold.
+
+    Falls back to the synthetic market-dynamics dataset
+    (``ml.model._synthetic_training_data``) when no labelled rows exist
+    in the SQLite ``ml_feature_store`` table — so the route always
+    returns a well-formed payload (``n_windows >= 1``) rather than
+    500-ing on an empty feature store.
+
+    Returns the per-window AUC / Brier series (capped at 20 entries for
+    response-size discipline) plus the aggregate metrics (mean / std
+    AUC, mean Brier) and the equity-curve risk metrics (Sharpe,
+    Sortino, Calmar, max drawdown).
+    """
+    from backtesting.advanced import walk_forward_analysis
+    from core.timescale_db import SQLITE_FALLBACK_PATH as _market_db
+    from ml.features import N_FEATURES
+
+    params = params or {}
+    train_window = int(params.get("train_window", 1000))
+    test_window = int(params.get("test_window", 200))
+    step = int(params.get("step", 200))
+
+    # ── Load (features, labels, timestamps) directly from
+    # ``ml_feature_store`` so the walk-forward routine can keep its
+    # strict time-ordered partition (``timescale_db.fetch_training_samples``
+    # returns ``(X, y)`` only — no timestamps — which would force us to
+    # synthesise them from row order and lose the chronological signal).
+    features: np.ndarray
+    labels: np.ndarray
+    timestamps: np.ndarray
+    source = "real"
+    try:
+        import sqlite3
+
+        with sqlite3.connect(_market_db) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT features_json, outcome_resolved, timestamp
+                FROM ml_feature_store
+                WHERE outcome_resolved IS NOT NULL
+                  AND features_json IS NOT NULL
+                ORDER BY timestamp ASC
+                LIMIT 5000;
+                """
+            )
+            rows = cursor.fetchall()
+    except Exception as e:
+        logger.warning("[walk_forward] SQLite load failed (%s): %s", _market_db, e)
+        rows = []
+
+    if rows:
+        X_list: list[np.ndarray] = []
+        y_list: list[int] = []
+        ts_list: list[float] = []
+        for feat_str, outcome, ts in rows:
+            try:
+                arr = np.array(json.loads(feat_str), dtype=np.float32)
+                if len(arr) < N_FEATURES:
+                    arr = np.pad(arr, (0, N_FEATURES - len(arr)))
+                elif len(arr) > N_FEATURES:
+                    arr = arr[:N_FEATURES]
+                X_list.append(arr)
+                y_list.append(int(outcome))
+                ts_list.append(float(ts))
+            except Exception:
+                continue
+        if len(X_list) >= max(train_window + test_window, 50):
+            features = np.array(X_list, dtype=np.float32)
+            labels = np.array(y_list, dtype=np.int32)
+            timestamps = np.array(ts_list, dtype=np.float64)
+        else:
+            source = "synthetic_too_few_real"
+            features, labels, timestamps = _synthetic_walk_forward_data()
+    else:
+        # No labelled real samples — fall back to the same synthetic
+        # generator ``ml.model._synthetic_training_data`` uses so the
+        # route still returns a non-trivial walk-forward result rather
+        # than a zero-window payload.
+        source = "synthetic_no_real"
+        features, labels, timestamps = _synthetic_walk_forward_data()
+
+    # Fresh RandomForest per window — small + fast (matches the
+    # ``_rf_factory`` pattern in ``tests/test_advanced_backtest.py``).
+    def model_factory():
+        from sklearn.ensemble import RandomForestClassifier
+
+        return RandomForestClassifier(
+            n_estimators=20,
+            max_depth=6,
+            random_state=42,
+            n_jobs=-1,
+        )
+
+    result = await asyncio.to_thread(
+        walk_forward_analysis,
+        features=features,
+        labels=labels,
+        timestamps=timestamps,
+        model_factory=model_factory,
+        train_window=train_window,
+        test_window=test_window,
+        step=step,
+    )
+
+    return {
+        "source": source,
+        "n_samples": int(len(features)),
+        "n_windows": result.aggregate.get("n_windows", 0),
+        "mean_auc": result.aggregate.get("mean_auc", 0.0),
+        "std_auc": result.aggregate.get("std_auc", 0.0),
+        "mean_brier": result.aggregate.get("mean_brier", 0.0),
+        "sharpe_ratio": result.sharpe_ratio,
+        "sortino_ratio": result.sortino_ratio,
+        "calmar_ratio": result.calmar_ratio,
+        "max_drawdown": result.max_drawdown,
+        "windows": result.windows[:20],  # Cap for response size.
+    }
+
+
+def _synthetic_walk_forward_data() -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Build a (features, labels, timestamps) triple from the synthetic
+    market-dynamics generator in ``ml.model``.
+
+    Used as a fallback when the SQLite ``ml_feature_store`` table has no
+    labelled rows (or the table / DB is missing entirely). Imports
+    lazily so a broken ``ml.model`` import (e.g. a missing optional
+    LightGBM dep) doesn't break this route's module-load.
+
+    Timestamps are synthesised as a monotonically-increasing
+    ``np.arange(n)`` because the synthetic generator doesn't emit a
+    time axis — the walk-forward routine only requires that timestamps
+    be monotonically orderable so its internal ``argsort`` is stable.
+    """
+    from ml.model import _synthetic_training_data
+
+    X, y = _synthetic_training_data(3000)
+    ts = np.arange(len(X), dtype=np.float64)
+    return X, y, ts
+
+
+@app.post("/api/backtest/monte-carlo", tags=["backtesting"])
+@limiter.limit(HEAVY_LIMIT)
+async def run_monte_carlo(request: Request, params: dict | None = None):
+    """Run Monte Carlo simulation on trade history.
+
+    Loads the most-recent (up to 500) closed positions from the
+    ``closed_positions`` SQLite table and bootstrap-resamples their
+    per-trade ROI series into ``n_simulations`` equity curves. Reports
+    the distribution of final-equity returns as percentiles
+    (``p5`` / ``p25`` / ``p50`` / ``p75`` / ``p95``) plus the
+    probability-of-ruin (fraction of simulations whose final equity
+    fell below ``ruin_threshold * initial_capital``).
+
+    Trade ROI is derived from the table's signed ``pnl`` column as
+    ``pnl / (entry_price * shares)`` — ``pnl`` is already signed by
+    ``record_closed_position`` (positive for wins, negative for losses)
+    so no direction-sign manipulation is needed (the spec's draft used
+    ``side`` / ``size`` field names that don't exist on the schema — the
+    real columns are ``direction`` / ``shares``).
+    """
+    from backtesting.advanced import monte_carlo_simulation
+    from core.closed_positions import closed_positions
+
+    params = params or {}
+    n_simulations = int(params.get("n_simulations", 10000))
+    initial_capital = float(params.get("initial_capital", 100.0))
+    ruin_threshold = float(params.get("ruin_threshold", 0.5))
+
+    # ``closed_positions.get_closed_positions`` is async (its ``@timed_query``
+    # wrapper dispatches the SQLite read to ``asyncio.to_thread``) —
+    # await it directly rather than wrapping in another ``to_thread``.
+    positions = await closed_positions.get_closed_positions(limit=500)
+    if not positions:
+        return {
+            "error": "No closed positions for simulation",
+            "n_simulations": 0,
+        }
+
+    # Compute per-trade ROI from the signed ``pnl`` column. The ROI
+    # denominator (``entry_price * shares``) is the cost basis of the
+    # position; the resulting ratio is the fractional return on capital
+    # deployed for that trade (NOT a price-return ratio — Polymarket
+    # binary-outcome positions settle to 0 or 1, so ``exit_price`` is
+    # already either near-0 or near-1 and a naive
+    # ``(exit-entry)/entry`` would overstate magnitude).
+    returns: list[float] = []
+    for p in positions:
+        try:
+            entry = float(p.get("entry_price") or 0.0)
+            shares = float(p.get("shares") or 0.0)
+            pnl = float(p.get("pnl") or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if entry > 0 and shares > 0:
+            cost = entry * shares
+            if cost > 0:
+                returns.append(pnl / cost)
+
+    if not returns:
+        return {
+            "error": "No valid trade returns derivable from closed positions",
+            "n_simulations": 0,
+            "n_positions": len(positions),
+        }
+
+    result = await asyncio.to_thread(
+        monte_carlo_simulation,
+        trade_returns=np.array(returns, dtype=np.float64),
+        n_simulations=n_simulations,
+        initial_capital=initial_capital,
+        ruin_threshold=ruin_threshold,
+    )
+
+    return {
+        "n_simulations": result.n_simulations,
+        "n_positions": len(positions),
+        "n_returns": len(returns),
+        "expected_return": result.expected_return,
+        "worst_case": result.worst_case,
+        "best_case": result.best_case,
+        "probability_of_ruin": result.probability_of_ruin,
+        "percentiles": result.percentiles,
     }
 
 
@@ -5376,3 +6073,109 @@ _register_shadow_inference_routes(app)
 from ml.economic_value import register_routes as _register_ml_economic_value_routes
 
 _register_ml_economic_value_routes(app)
+
+
+# (W20-5) core.live_risk_metrics — Live portfolio VaR / CVaR / exposure /
+# concentration. Additive wiring appended at end of file per the W20-5 task
+# spec. Adds one endpoint under ``/api/portfolio`` so an operator can read
+# the live portfolio's quantified tail-risk numbers (VaR_95, VaR_99,
+# CVaR_95, CVaR_99) plus exposure / concentration aggregates, computed
+# directly against the live ``DataStore.positions`` snapshot:
+#
+#   GET /api/portfolio/risk-metrics   return the live portfolio risk
+#                                      metrics (VaR / CVaR / exposure /
+#                                      concentration) computed against the
+#                                      live ``DataStore`` positions
+#
+# Same registration pattern as the sibling ``register_routes`` blocks
+# above (alias imported under ``_register_*`` to avoid shadowing other
+# modules' ``register_routes`` symbol). Auth enforced by
+# ``enforce_api_auth`` (path not in ``PUBLIC_PATHS``).
+#
+# The live book poller doesn't yet persist a price history long enough to
+# compute historical VaR, so the route uses the parametric fallback
+# (5 % daily vol, normal approximation) — clearly labelled in the
+# response payload via ``var_method="parametric"`` so the operator doesn't
+# confuse it with an empirical VaR. When the caller supplies a price
+# history (via :meth:`LiveRiskMetrics.compute` directly — not yet wired
+# through the HTTP body), the historical VaR path is used instead.
+from core.live_risk_metrics import register_routes as _register_live_risk_metrics_routes
+
+_register_live_risk_metrics_routes(app)
+
+
+# (W20-6) core.data_quality — Data quality monitoring pipeline that checks
+# for stale, missing, or anomalous data in the canonical ``market_snapshots``
+# SQLite table. Additive wiring appended at end of file per the W20-6 task
+# spec. Adds one endpoint under ``/api/data-quality`` so an operator can read
+# the current data-quality report (overall status + per-check breakdown):
+#
+#   GET /api/data-quality   return the current data-quality report —
+#                           overall_status (healthy / degraded / critical),
+#                           summary counts (total / passed / warnings /
+#                           failed), and a list of QualityCheck entries
+#                           (name / category / status / value / threshold /
+#                           message / timestamp). Read-only, no caching.
+#
+# Auth enforced by ``enforce_api_auth`` (path not in ``PUBLIC_PATHS``).
+# The ``data_quality_monitor`` singleton is constructed at module-import
+# time against ``MARKET_DB_PATH`` (env-overridable, redirected to
+# ``/tmp/pmbot_conftest_isolation/market_intelligence.db`` by conftest) so
+# the production ``/app/data/market_intelligence.db`` sandbox path is never
+# touched by the test suite. The monitor performs no import-time DB init —
+# every check is wrapped in ``try/except`` so a missing table / unwritable
+# path surfaces as a single ``fail`` QualityCheck instead of crashing the
+# caller.
+@app.get("/api/data-quality", tags=["system"])
+async def get_data_quality():
+    """Get data quality report.
+
+    Runs every check in ``DataQualityMonitor.run_all_checks`` against the
+    canonical ``market_snapshots`` SQLite table and returns the structured
+    report (overall_status / summary / checks / timestamp). Read-only — no
+    mutations, no caching.
+    """
+    from core.data_quality import data_quality_monitor
+
+    report = data_quality_monitor.run_all_checks()
+    return {
+        "overall_status": report.overall_status,
+        "summary": report.summary,
+        "checks": [c.__dict__ for c in report.checks],
+        "timestamp": report.timestamp,
+    }
+
+
+# (W20-7) core.trade_ingester — Public trade tape ingestion from the
+# CLOB ``/trades`` endpoint. Additive wiring appended at end of file per
+# the W20-7 task spec. Adds two endpoints under ``/api/trades`` so an
+# operator can read the recent trade tape and inspect the ingester's
+# runtime stats:
+#
+#   GET /api/trades/tape               recent trades from the tape
+#                                      (most-recent-first), optional
+#                                      ``token_id`` filter + ``limit``
+#                                      cap; reads from the SQLite
+#                                      ``market_trades`` table (the PG
+#                                      hypertable is exposed via the
+#                                      ``fetch_records`` explorer).
+#   GET /api/trades/ingester-status    live ingester stats (running
+#                                      flag, poll interval, seen-trade-id
+#                                      set size, cumulative ingested /
+#                                      error counts, last poll timestamp)
+#
+# Same registration pattern as the sibling ``register_routes`` blocks
+# above (alias imported under ``_register_*`` to avoid shadowing other
+# modules' ``register_routes`` symbol). Auth enforced by
+# ``enforce_api_auth`` (neither path is in ``PUBLIC_PATHS``).
+#
+# The ingester singleton ``trade_tape_ingester`` is started by the
+# FastAPI lifespan startup handler (see the W20-7 block above the
+# ``yield`` in ``async def lifespan``) and stopped by the shutdown
+# handler. The routes are read-only and never block on the ingester's
+# poll loop — ``fetch_trades`` reads directly from the SQLite table, so
+# the endpoint works even when the ingester is stopped (it just returns
+# whatever's already in the tape).
+from core.trade_ingester import register_routes as _register_trade_tape_routes
+
+_register_trade_tape_routes(app)
