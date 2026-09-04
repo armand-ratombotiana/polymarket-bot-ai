@@ -377,6 +377,27 @@ async def lifespan(app: FastAPI):
     from core.timescale_db import timescale_db
     await timescale_db.init_postgres_pool()
 
+    # ── W21-1 — Unified database manager (PG primary, SQLite fallback) ──
+    # Initialises AFTER ``timescale_db.init_postgres_pool`` so the PG
+    # asyncpg pool / migrations have already run. The manager's
+    # ``initialize()`` (extended in W21-2) starts the PG health monitor
+    # background task (``pg_health_monitor``) and the manager's own
+    # ``_pg_retry_loop`` — the loop consumes the monitor's verdict every
+    # 5 s and flips ``_status.backend`` between POSTGRESQL and SQLITE so
+    # ``GET /api/database/status`` surfaces the transition without an
+    # extra ping round-trip. Safe to call twice (idempotent).
+    #
+    # Defensive ``try/except`` wrap so a transient start failure (e.g.
+    # a broken asyncpg install in a dev sandbox) can never block the
+    # rest of the lifespan startup — mirrors the
+    # ``live_fill_monitor.start()`` / ``trade_tape_ingester.start()``
+    # pattern in W18-2 / W20-7.
+    try:
+        from core.database_manager import db_manager
+        await db_manager.initialize()
+    except Exception as e:  # pragma: no cover — defensive: must not kill startup
+        log.error("[database_manager] startup failed: %s", e)
+
     # ── Watchdog: register every live subsystem (P0-SAF-01) ──
     await watchdog.start()
     for name in (
@@ -597,6 +618,21 @@ async def lifespan(app: FastAPI):
     except Exception as _db_pool_close_exc:  # pragma: no cover — defensive
         log.error(
             "Async DB pool close failed at shutdown: %s", _db_pool_close_exc
+        )
+
+    # ── W21-1 — shut down the unified database manager ────────────────────
+    # Cancels the PG-retry background task. The manager doesn't own
+    # any SQLite connections (each call opens + closes its own via a
+    # context manager), so there's no pool to drain — just the asyncio
+    # task to cancel. Wrapped in try/except so a teardown failure
+    # never blocks the rest of the lifespan shutdown.
+    try:
+        from core.database_manager import db_manager as _db_manager_singleton
+
+        await _db_manager_singleton.shutdown()
+    except Exception as _db_mgr_close_exc:  # pragma: no cover — defensive
+        log.error(
+            "Database manager shutdown failed: %s", _db_mgr_close_exc
         )
 
     # ── W17-8 — stop the background job-queue workers ─────────────────────
@@ -4635,6 +4671,69 @@ async def get_reconciliation_report():
     return report
 
 
+# ── W21-2 — PostgreSQL health monitor endpoints ─────────────────────────────
+# Three endpoints exposed so the dashboard can:
+#   * GET /api/database/pg-health          — current PG health status
+#                                            (is_healthy, consecutive
+#                                            failures, uptime %, avg
+#                                            latency, last 100 checks).
+#   * POST /api/database/pg-health/check   — force an immediate PG ping
+#                                            (operator can verify a
+#                                            recovery without waiting
+#                                            for the next background
+#                                            tick).
+#   * GET /api/database/backend-status     — current backend selection
+#                                            state (PG vs SQLite active,
+#                                            last flip time/reason,
+#                                            flip history).
+# The background monitor task itself is started by the FastAPI lifespan
+# startup handler (see ``core.pg_health_monitor.pg_health_monitor.start``
+# invocation in ``lifespan`` below).
+@app.get("/api/database/pg-health", tags=["database"])
+async def pg_health_status():
+    """Get PostgreSQL health status (W21-2).
+
+    Returns the full ``PGHealthStatus`` snapshot: ``is_healthy`` flag,
+    consecutive failures / successes counters, the last 100 ``HealthCheck``
+    samples (timestamp, healthy, latency_ms, error), lifetime uptime %,
+    and average latency from healthy samples. The dashboard renders this
+    as a "PG health" panel — operators can correlate a latency spike
+    with a state flip without scraping Prometheus.
+
+    The status is whatever the background ``PGHealthMonitor`` task has
+    recorded so far — the endpoint does NOT trigger a fresh ping (use
+    ``POST /api/database/pg-health/check`` for that).
+    """
+    from core.pg_health_monitor import pg_health_monitor
+    return pg_health_monitor.get_status()
+
+
+@app.post("/api/database/pg-health/check", tags=["database"])
+async def force_pg_health_check():
+    """Force an immediate PG health check (W21-2).
+
+    Triggers ``PGHealthMonitor._check_health`` synchronously (rather
+    than waiting for the next background tick) so an operator who just
+    restarted PG can verify the recovery in the dashboard without the
+    default 15s wait. The result is recorded in the monitor's status
+    just like a background tick — calling this endpoint twice in a row
+    produces two recorded ``HealthCheck`` samples.
+
+    Returns the post-check ``PGHealthStatus`` snapshot (the same shape
+    as ``GET /api/database/pg-health``).
+    """
+    from core.pg_health_monitor import pg_health_monitor
+    await pg_health_monitor._check_health()
+    return pg_health_monitor.get_status()
+
+
+# Note: ``GET /api/database/status`` (W21-1) returns the unified
+# ``db_manager.get_status()`` payload — it already surfaces the
+# ``backend`` / ``pg_available`` / ``fallback_count`` / ``recent_errors``
+# fields the W21-2 dashboard panel needs, so a separate
+# ``/api/database/backend-status`` endpoint is unnecessary.
+
+
 # ── System Health, Mode & Pipeline Ingestion Monitor ──────────────────────────
 
 @app.get("/api/system/mode", tags=["system"])
@@ -6179,3 +6278,178 @@ async def get_data_quality():
 from core.trade_ingester import register_routes as _register_trade_tape_routes
 
 _register_trade_tape_routes(app)
+
+
+# (W21-8) core.pg_pool — PostgreSQL connection pool with retry + circuit
+# breaker. Additive wiring appended at end of file per the W21-8 task
+# spec. Adds one endpoint under ``/api/database`` so an operator can
+# inspect the live PG pool's stats (total / active / idle connections,
+# total / failed queries, rolling avg query time, last error, circuit
+# breaker state, consecutive failures, threshold, recovery timeout):
+#
+#   GET /api/database/pool-stats   return the PG pool's runtime stats.
+#                                   Read-only, no caching. The pool is
+#                                   initialized lazily on the first
+#                                   ``execute()`` call (or via
+#                                   ``database_manager`` once W21-1
+#                                   lands); this endpoint returns the
+#                                   zero-state when the pool has not
+#                                   yet been initialized.
+#
+# Auth enforced by ``enforce_api_auth`` (path not in ``PUBLIC_PATHS``).
+# The singleton ``pg_pool`` is constructed at module-import time but
+# opens NO connections until ``initialize()`` is called — mirroring the
+# lazy-init pattern in ``core.db_pool`` / ``core.timescale_db`` so
+# importing ``core.pg_pool`` is side-effect-free.
+@app.get("/api/database/pool-stats", tags=["system"])
+async def get_pool_stats():
+    """Get PostgreSQL connection pool statistics.
+
+    Returns the live snapshot of the PG pool's stats — connection
+    counts (total / active / idle), query counters (total / failed),
+    rolling avg query time (ms, exponential moving average), last
+    error + timestamp, and the circuit breaker state (open /
+    consecutive failures / threshold / recovery timeout). Used by the
+    dashboard's Database panel to surface pool health alongside the
+    existing SQLite / TimescaleDB telemetry.
+
+    The pool is initialized lazily on the first ``execute()`` call;
+    when the pool has not yet been initialized, this endpoint returns
+    the zero-state (every counter at 0, ``circuit_open=False``).
+    """
+    from core.pg_pool import pg_pool
+    return pg_pool.get_stats()
+
+
+# ── W21-1 — Unified database manager (PG primary, SQLite fallback) ──────────
+# Two endpoints under ``/api/database`` so an operator can inspect the
+# active backend and trigger a manual PG retry:
+#
+#   GET  /api/database/status     return the current backend status —
+#                                 ``backend`` (``"postgresql"`` /
+#                                 ``"sqlite"`` / ``"none"``),
+#                                 ``pg_available`` / ``sqlite_available``
+#                                 flags, ``last_pg_check`` /
+#                                 ``last_pg_check_ago_s``, the retry
+#                                 interval, ``fallback_count`` (how many
+#                                 times the manager has fallen back from
+#                                 PG to SQLite — both initial fallback
+#                                 AND mid-operation fallbacks count), and
+#                                 ``recent_errors`` (last 5 PG connection
+#                                 errors). Read-only, no caching.
+#
+#   POST /api/database/retry-pg   trigger an immediate PG retry —
+#                                 bypasses the 60 s retry interval so an
+#                                 operator can pick up a recovered PG
+#                                 within seconds of bringing it back
+#                                 online. Returns the post-retry status
+#                                 payload so the caller sees whether the
+#                                 retry succeeded.
+#
+# Auth enforced by ``enforce_api_auth`` (neither path is in
+# ``PUBLIC_PATHS``). The ``db_manager`` singleton is initialised by the
+# FastAPI lifespan startup handler; the status endpoint works regardless
+# of whether ``initialize()`` has run (returns ``backend="none"`` and
+# ``fallback_count=0`` in that case).
+@app.get("/api/database/status", tags=["system"])
+async def get_database_status():
+    """Get the unified database manager's backend status.
+
+    Returns the current backend (PG vs SQLite), the PG availability
+    flag, the last PG check timestamp (and how long ago it ran), the
+    retry interval, the cumulative fallback count, and the most recent
+    PG connection errors. Read-only — never mutates state.
+
+    W21-1 — surfaces the W17-4 God Mode finding (PG in standby mode,
+    silently using SQLite for everything) as an explicit status field
+    so an operator can see at a glance whether PG is the active
+    backend or whether the bot is degraded to the SQLite fallback.
+    """
+    from core.database_manager import db_manager
+    return db_manager.get_status()
+
+
+@app.post("/api/database/retry-pg", tags=["system"])
+async def retry_pg_connection():
+    """Manually retry the PostgreSQL connection.
+
+    Bypasses the 60 s retry interval so an operator can pick up a
+    recovered PG within seconds of bringing it back online. On
+    successful retry the manager switches back to PG as the primary
+    backend and bumps ``fallback_count`` (so the operator can see "PG
+    came back" in the status payload). On failed retry the manager
+    stays on SQLite; the next scheduled retry (60 s) will pick up the
+    recovery if the manual attempt was premature.
+    """
+    from core.database_manager import db_manager
+
+    if db_manager.is_postgres:
+        # Already on PG — no-op. Return the current status so the
+        # caller sees the "backend=postgresql" state and doesn't have
+        # to issue a separate GET to confirm.
+        return {
+            "retry_attempted": False,
+            "reason": "PG already active — no retry needed",
+            **db_manager.get_status(),
+        }
+
+    recovered = await db_manager._try_postgres()
+    if recovered and not db_manager.is_postgres:
+        # ``_try_postgres`` flipped ``pg_available`` to True but didn't
+        # update ``backend`` (the retry loop is the only place that
+        # does that, to keep the transition logic in one spot). Do the
+        # transition here so the manual retry takes effect immediately
+        # instead of waiting for the next scheduled retry tick.
+        from core.database_manager import DatabaseBackend
+        db_manager._status.backend = DatabaseBackend.POSTGRESQL
+        # Bump ``fallback_count`` so the operator sees "PG came back"
+        # in the status payload — same convention as the retry loop.
+        db_manager._status.fallback_count += 1
+
+    return {
+        "retry_attempted": True,
+        "recovered": recovered,
+        **db_manager.get_status(),
+    }
+
+
+# (W21-5) core.database_manager — Order book depth storage read API.
+# Additive wiring appended at end of file per the W21-5 task spec.
+# Adds two read-only endpoints under ``/api`` so an operator can read
+# the full order book ladder (parsed from the ``bids_json`` /
+# ``asks_json`` JSON columns) and the depth time-series over a
+# trailing window:
+#
+#   GET /api/depth-full/{token_id}        latest snapshot's full
+#                                         bid/ask ladder (parsed) +
+#                                         depth-10 summaries +
+#                                         top-of-book fields.
+#   GET /api/depth-history/{token_id}     depth time-series for the
+#                                         last ``hours`` hours
+#                                         (ascending by timestamp),
+#                                         each row carrying the
+#                                         parsed top-10 ladders +
+#                                         depth-10 summaries +
+#                                         top-of-book.
+#
+# Same registration pattern as the sibling ``register_routes`` blocks
+# above (alias imported under ``_register_*`` to avoid shadowing
+# other modules' ``register_routes`` symbol). Auth enforced by
+# ``enforce_api_auth`` (neither path is in ``PUBLIC_PATHS``).
+#
+# W21-5 also fixed the SQLite INSERT path in ``record_snapshot`` so
+# the ``bids_json`` / ``asks_json`` / ``bid_depth_10`` /
+# ``ask_depth_10`` / ``ingestion_time`` columns are now written on
+# BOTH backends (the W19-5 task spec described the fix but did not
+# actually apply it; the SQLite schema migration in
+# ``_init_sqlite_fallback`` adds the columns idempotently to legacy
+# DBs). The book poller's ``_apply_book`` call path now passes the
+# full bid/ask ladders through to ``record_snapshot`` so the JSON
+# columns are populated with real ladder data — without that call-site
+# fix the JSON columns would have stayed ``NULL`` forever and the
+# read endpoints below would have returned empty ladders regardless
+# of the schema fix.
+from core.database_manager import register_routes as _register_depth_routes
+
+_register_depth_routes(app)
+

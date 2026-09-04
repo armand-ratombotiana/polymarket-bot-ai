@@ -182,15 +182,18 @@ class TradeTapeIngester:
              ``token_id`` filter — the public tape spans every market).
           2. Drop every trade whose ``trade_id`` is already in the
              in-memory ``_last_trade_ids`` set (the fast-path dedup).
-          3. For each new trade, ``await timescale_db.record_trade(...)``.
-             Failures are logged at ``warning`` level and don't abort
-             the rest of the batch (a single bad row can't poison the
-             batch).
+          3. For each new trade, ``await db_manager.record_trade(...)``.
+             The facade (W21-6) routes to PG / TimescaleDB
+             ``market.market_trade`` hypertable when the asyncpg pool
+             is connected, and to the SQLite ``market_trades`` fallback
+             otherwise — callers see one uniform interface. Failures
+             are logged at ``warning`` level and don't abort the rest
+             of the batch (a single bad row can't poison the batch).
           4. Bound the in-memory dedup set so a long-running session
              doesn't grow it without limit.
         """
         from core.clob_client import clob_client
-        from core.timescale_db import timescale_db
+        from core.database_manager import db_manager
 
         self._last_poll_at = time.time()
 
@@ -227,7 +230,7 @@ class TradeTapeIngester:
         written = 0
         for t in new_trades:
             try:
-                await timescale_db.record_trade(
+                await db_manager.record_trade(
                     token_id=t.get("token_id") or "",
                     price=float(t.get("price") or 0.0),
                     size=float(t.get("size") or 0.0),
@@ -298,11 +301,22 @@ class TradeTapeIngester:
 def register_routes(app: FastAPI) -> None:
     """Register the trade-tape HTTP routes on ``app``.
 
-    Adds two endpoints:
+    Adds three endpoints:
 
       * ``GET /api/trades/tape``                — recent trades from the
                                                    tape, most-recent-first.
+      * ``GET /api/trades/stats``               — aggregate stats over the
+                                                   trailing ``hours`` window
+                                                   (default 24h), optional
+                                                   ``token_id`` filter.
       * ``GET /api/trades/ingester-status``     — live ingester stats.
+
+    W21-6 — the ``/api/trades/tape`` and ``/api/trades/stats`` routes
+    now route through the unified ``db_manager`` facade
+    (``core/database_manager.py``), which itself routes to PG /
+    TimescaleDB when the asyncpg pool is connected, or the SQLite
+    fallback otherwise. The facade is the single backend switch —
+    the route handlers don't need a backend-specific branch.
 
     The function is idempotent: registering twice on the same app
     would raise a duplicate-route error at app construction time
@@ -320,7 +334,9 @@ def register_routes(app: FastAPI) -> None:
             "TimescaleDB hypertable), most-recent-first. Optional "
             "``token_id`` filter restricts the result to a single "
             "market; ``limit`` caps the row count (default 100, max "
-            "500). The trade tape is populated by the background "
+            "500); ``since`` (unix epoch seconds) sets a lower-bound "
+            "cutoff so the dashboard can pull 'trades since last "
+            "poll'. The trade tape is populated by the background "
             "trade-tape ingester (W20-7) which polls the CLOB "
             "``/trades`` endpoint every ``poll_interval`` seconds."
         ),
@@ -330,15 +346,60 @@ def register_routes(app: FastAPI) -> None:
             None, max_length=128, description="Optional CTF token id filter"
         ),
         limit: int = Query(100, ge=1, le=500, description="Max rows to return"),
+        since: float | None = Query(
+            None,
+            description="Optional lower-bound unix epoch seconds cutoff",
+        ),
     ):
-        """Get recent trades from the tape."""
-        from core.timescale_db import timescale_db
-        rows = timescale_db.fetch_trades(token_id=token_id or "", limit=limit)
+        """Get recent trades from the tape (W21-6 routes via db_manager)."""
+        from core.database_manager import db_manager
+
+        rows = await db_manager.get_trade_tape(
+            token_id=token_id or None,
+            limit=limit,
+            since_timestamp=since,
+        )
         return {
             "trades": rows,
             "count": len(rows),
             "token_id": token_id,
-            "backend": timescale_db.backend_label,
+            "backend": db_manager.backend_label,
+        }
+
+    @app.get(
+        "/api/trades/stats",
+        tags=["markets"],
+        summary="Trade tape aggregate stats",
+        description=(
+            "Returns aggregate statistics over the trailing ``hours`` "
+            "window (default 24h): total trades, total volume, average "
+            "price, buy/sell counts, and VWAP "
+            "(volume-weighted average price). Optional ``token_id`` "
+            "filter restricts the aggregation to a single market. "
+            "Routes through the W21-6 ``db_manager`` facade which "
+            "selects PG or SQLite automatically."
+        ),
+    )
+    async def get_trade_stats(
+        token_id: str | None = Query(
+            None, max_length=128, description="Optional CTF token id filter"
+        ),
+        hours: float = Query(
+            24.0, ge=0.0, le=24.0 * 365,
+            description="Trailing window in hours (default 24h)",
+        ),
+    ):
+        """Get aggregate trade stats (W21-6 routes via db_manager)."""
+        from core.database_manager import db_manager
+
+        stats = await db_manager.get_trade_stats(
+            token_id=token_id or None, hours=hours
+        )
+        return {
+            "stats": stats,
+            "token_id": token_id,
+            "hours": hours,
+            "backend": db_manager.backend_label,
         }
 
     @app.get(

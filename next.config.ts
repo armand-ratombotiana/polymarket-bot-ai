@@ -16,6 +16,7 @@ const withBundleAnalyzer = bundleAnalyzer({
 
 const nextConfig: NextConfig = {
   output: "standalone",
+  turbopack: {},  // Silence Turbopack warning — webpack config only runs for production builds
   /* config options here */
   typescript: {
     ignoreBuildErrors: true,

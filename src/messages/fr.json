@@ -16,6 +16,7 @@
     "backtest": "Labo Backtest",
     "health": "Santé Système",
     "database": "Explorateur Données",
+    "database_status": "Base de Données",
     "decisions": "Registre Décisions",
     "attribution": "Attribution",
     "execution": "Qualité Exécution",

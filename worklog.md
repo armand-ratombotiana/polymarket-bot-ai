@@ -27987,3 +27987,156 @@ Stage Summary:
   God Mode assessment, improvement plans, and reassessment documents").
 - All tests passing: **yes** (1855 backend + 709 frontend = 2564+ total,
   0 main-suite failures; lint clean).
+
+---
+Task ID: W21-7
+Agent: full-stack-developer
+Task: Database Status Panel (PG vs SQLite + health + table stats + retry)
+
+Work Log:
+- Read worklog tail (~last 350 lines — W16-7 async DB pool, W17-10
+  Wave 17 reassessment docs, W16-8 Playwright E2E expansion) to
+  understand the current Wave-17 end-state + the design conventions
+  used across the System panel family.
+- Read existing System panel pattern files:
+  - `SystemHealthView.tsx` (177 lines) — polling health panel that
+    uses `kpi-card` + `badge-*` design-system classes + 3s polling
+    interval + `/api/system/health` endpoint.
+  - `ObservabilityPanel.tsx` (898 lines) — richer observability
+    dashboard with collapsible category sections, sparklines,
+    severity colour-coding, and a visibility-aware 30s polling
+    loop (the visibility-aware pattern was the model for the
+    Database Status panel's 15s polling).
+  - `Sidebar.tsx` (318 lines) — `NavSection` union + `NAV_GROUPS`
+    structure; the `system` group already contained 8 nav items.
+  - `page.tsx` (1091 lines) — `lazyPanel()` wrapper +
+    per-section render cases wrapped in `<PanelErrorBoundary>`.
+  - `RateLimitPanel.tsx` + `RateLimitPanel.test.tsx` — used as the
+    pattern model for the polling + retry-button test strategy
+    (fake timers + `act(async () => await
+    vi.advanceTimersByTimeAsync(N))` for polling assertions).
+  - `RetentionPanel.tsx` — used as the pattern model for shadcn/ui
+    integration (Card + CardHeader + CardTitle + CardContent +
+    Table primitives + Button outline variant) layered on top of
+    the dark dashboard colour palette.
+
+Created 1 new component: `src/components/DatabaseStatusPanel.tsx`
+(660+ lines). Implements all 7 features required by the W21-7 spec:
+
+1. **Backend indicator** — Large `Badge` in the header showing
+   `PostgreSQL` (green) or `SQLite` (amber), with a status dot.
+2. **Connection health** — `Card` with 5-column PG health grid:
+   Status · Uptime % · Avg Latency · Pool In-Use · Consecutive
+   Failures. Cells are colour-coded (green ≥ 99% uptime, amber
+   ≥ 90%, red < 90%). HealthBadge sub-component renders the
+   status pill (Healthy / Degraded / Unhealthy / Unknown).
+3. **Fallback counter** — KPI card showing SQLite fallback count
+   with adaptive colour (green = 0, amber < 5, red ≥ 5).
+4. **Database tables** — shadcn/ui `Table` with table name, PG/
+   SQLite per-table badge, row count, on-disk size (formatted
+   via `formatBytes` helper that adapts to B/KB/MB/GB), and a
+   relative-time last-modified stamp. `max-h-72 overflow-y-auto`
+   so a long table list scrolls inside the card.
+5. **Recent errors** — Last 5 connection errors as a vertical list
+   of red `XCircle` icons + error message + relative-time + backend
+   + retry-attempt count. Empty state shows green `CheckCircle2`
+   "No connection errors recorded" message.
+6. **Manual retry button** — `Button` that fires
+   `POST /api/system/db-retry` and renders a success (✓ green) /
+   failure (✗ red) banner with the backend message. Re-fetches
+   status immediately on completion.
+7. **Auto-refresh** — Polls `GET /api/system/db-status` every 15s,
+   paused when document is hidden (mirrors the visibility-aware
+   pattern from `RateLimitPanel.tsx` + `ObservabilityPanel.tsx`:
+   the tick re-checks `document.hidden` AND the visibilitychange
+   listener stopPolling()/startPolling()s on tab switch).
+
+Visual language matches SystemHealthView.tsx + DatabaseExplorerView.tsx
+(dark `#13161e` panel surface, `#1f2335` borders, `#dde1ed` primary
+text, `#7e8aaa` secondary text) but uses shadcn/ui primitives per
+the W21-7 spec (Card + CardContent + CardHeader + CardTitle, Badge
+with success/warning/destructive variants, Table primitives, Button
+outline/default variants).
+
+Wired into the navigation:
+- `src/components/Sidebar.tsx` — Added `'system-database-status'`
+  to the `NavSection` union type + a new `NavItem` in the `system`
+  group with `label: 'Database'`, `shortLabel: 'DB'`, `icon: '🗄'`,
+  positioned between `system-database` (Data Explorer) and
+  `system-observability` so the two database panels sit together.
+- `src/app/page.tsx` — Added
+  `lazyPanel(() => import('@/components/DatabaseStatusPanel'),
+  'Loading Database Status…')` alongside the other Wave-8 system
+  dynamic imports + a render case
+  `{activeSection === 'system-database-status' && (<PanelErrorBoundary
+  label="Database Status">...)}` mirroring the existing 8 system
+  panel render cases.
+- `src/messages/en.json` — Added `nav.database_status: "Database"`.
+- `src/messages/fr.json` — Added `nav.database_status: "Base de
+  Données"`.
+
+Created 1 new test file: `src/components/DatabaseStatusPanel.test.tsx`
+(22 tests). Covers all four contract surfaces required by the
+W21-7 spec (SQLite backend rendering, PostgreSQL backend rendering,
+retry button, auto-refresh) plus empty/degraded/error edge cases:
+
+- Initial loading skeleton
+- SQLite backend (amber badge, KPI = 0, tables, no-errors empty state)
+- PostgreSQL backend (green badge, full 5-column health grid, recent
+  errors list, PG per-table badge)
+- Degraded state (amber HealthBadge)
+- Empty tables state
+- Hard-error state (HTTP 500 + network error → ErrorState with retry)
+- Retry button fires POST /api/system/db-retry (asserts method + URL)
+- Retry success banner + failure banner
+- Header Refresh button (manual fetch)
+- 15s poll updates KPIs (fake timers + advance 15s)
+- Authorization header propagated via apiFetch
+- Visibility-aware polling (tab hidden → 0 polls; tab restored →
+  immediate refresh + resumed polling)
+- Unmount clears the polling interval (no leaked setState)
+- "15s poll" badge in the header
+
+Test strategy mirrors `RateLimitPanel.test.tsx`:
+- Per-test `global.fetch` mock via `vi.mocked(fetch).mockImplementation`.
+- Real timers + `waitFor` for initial-render assertions.
+- `vi.useFakeTimers()` + `act(async () => await
+  vi.advanceTimersByTimeAsync(N))` for polling assertions.
+- `getAllByText` for values that appear in multiple DOM nodes
+  (e.g. "SQLite" in the badge + KPI + per-table badge; uptime %
+  in the KPI + grid; "Healthy" in the HealthBadge + Status column).
+- A `mockFetchRouteGetPost` helper distinguishes GET vs POST calls
+  so the retry button test can return a different payload for the
+  POST `/api/system/db-retry` call.
+
+Verification:
+- `cd /home/z/my-project && bun run lint` → clean (eslint . exits 0,
+  no warnings, no errors).
+- `cd /home/z/my-project && bunx vitest run
+  ./src/components/DatabaseStatusPanel.test.tsx` → **22 passed (22)**
+  in 1.95s.
+- `cd /home/z/my-project && bun run test` → **701 passed (701)** in
+  62.56s across 33 test files. The new test file adds 22 new tests
+  to the suite (baseline was 679 tests in 32 files before this
+  work). All pre-existing tests continue to pass — no regressions.
+- Dev server log (`dev.log`) — clean. Next.js 16.1.3 / Turbopack
+  compiled `/` in 4ms on subsequent requests after the initial
+  7.5s first-compile. No runtime errors introduced by the new panel,
+  sidebar item, or page render case.
+
+Stage Summary:
+- Created 1 new component (`DatabaseStatusPanel.tsx`, 660+ lines)
+  implementing all 7 W21-7 features (backend indicator, connection
+  health, fallback counter, database tables, recent errors, manual
+  retry button, 15s auto-refresh).
+- Created 1 new test file (`DatabaseStatusPanel.test.tsx`, 22 tests)
+  covering the 4 required contract surfaces + edge cases.
+- Wired the panel into the navigation: Sidebar `NavSection` +
+  NavItem, page.tsx dynamic import + render case, i18n keys for
+  both `en.json` and `fr.json`.
+- Lint clean; 22 new tests pass; full 701-test suite passes with
+  no regressions.
+- Backend contract (GET /api/system/db-status + POST
+  /api/system/db-retry) is documented in the file header; the
+  panel gracefully degrades to an `ErrorState` with a retry
+  button when the backend hasn't yet implemented the endpoints.

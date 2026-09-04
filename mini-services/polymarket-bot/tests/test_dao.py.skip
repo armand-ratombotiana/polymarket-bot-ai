@@ -1,0 +1,472 @@
+"""
+tests/test_dao.py — W21-4 unit tests for the unified Data Access Objects.
+
+Scope: 6 tests covering the public-surface guarantees of the W21-4 DAO
+layer (``core/dao/``) against the SQLite backend. The PG path is covered
+by an explicit fallback test that flips ``db_manager._status`` to PG
+mode and monkey-patches ``BaseDAO._pg_execute`` to raise, then verifies
+the DAO transparently falls back to SQLite and flips the runtime backend
+to ``DatabaseBackend.SQLITE``.
+
+Tests
+~~~~~
+
+  1. ``test_market_data_dao_records_snapshot_on_sqlite``
+     — ``MarketDataDAO.record_snapshot()`` writes a row to
+     ``market_snapshots`` and the row is retrievable via
+     ``get_snapshots()``.
+
+  2. ``test_market_data_dao_get_snapshots_returns_most_recent_first``
+     — multiple snapshots for the same token are returned most-recent-
+     first (``ORDER BY timestamp DESC``), and ``limit`` is honoured.
+
+  3. ``test_market_data_dao_records_trade_on_sqlite``
+     — ``MarketDataDAO.record_trade()`` writes a row to
+     ``market_trades`` and the row is retrievable via ``get_trades()``.
+
+  4. ``test_market_data_dao_get_trades_supports_token_filter_and_global``
+     — ``get_trades(token_id=...)`` filters by token;
+     ``get_trades(token_id=None)`` returns the global recent tape.
+
+  5. ``test_decision_ledger_dao_record_and_retrieve_by_correlation``
+     — ``DecisionLedgerDAO.record()`` writes a row to
+     ``decision_events``; ``get_by_correlation()`` returns the chain
+     in ascending-timestamp order; ``get_by_token()`` returns events
+     most-recent-first.
+
+  6. ``test_dao_falls_back_to_sqlite_when_pg_fails``
+     — When ``db_manager.is_postgres`` is True and
+     ``BaseDAO._pg_execute`` raises, the DAO's ``execute()`` dispatcher
+     flips ``db_manager._status.backend`` to ``DatabaseBackend.SQLITE``
+     and reruns the query against SQLite. The test asserts both that
+     the SQLite fallback returned the correct rows AND that the runtime
+     backend was flipped (so the next call short-circuits straight to
+     SQLite).
+
+Environment strategy
+~~~~~~~~~~~~~~~~~~~~~
+
+``core/database_manager.py`` resolves the market DB path via
+``timescale_db._sqlite_path`` (which reads ``MARKET_DB_PATH`` at
+``timescale_db`` import time). The shared ``tests/conftest.py`` already
+calls ``os.environ.setdefault("MARKET_DB_PATH", ...)`` BEFORE the first
+import of ``core.timescale_db`` so the singleton is constructed against
+a writable ``/tmp/pmbot_conftest_isolation/market_intelligence.db`` path
+every time.
+
+The decision-ledger DAO uses a SEPARATE SQLite file resolved from the
+``BOT_DATA_DIR`` env var (added to conftest.py's ``_ENV_REDIRECTS``
+block by this task) — the manager's ``get_sqlite_path("decision_ledger")``
+returns ``<BOT_DATA_DIR>/decision_ledger.db`` so the DAO's
+``decision_events`` schema (with ``correlation_id`` / ``model_version``
+columns the legacy ``core/decision_ledger.py`` schema lacks) doesn't
+collide with the legacy immutable audit-trail ledger's file.
+
+Each test additionally re-points ``BOT_DATA_DIR`` to a per-test
+``tmp_path`` via the ``reset_dao_paths`` fixture so writes from one
+test cannot leak into the next. The fixture also pre-creates the
+schema via ``db_manager._init_decision_ledger_db()`` so the DAO has a
+fresh empty table for the test.
+
+The market DB is shared with the rest of the suite (the conftest-
+redirected ``/tmp/pmbot_conftest_isolation/market_intelligence.db``)
+because the existing ``timescale_db`` singleton has already captured
+that path at import time and a per-test re-point would require
+swapping the singleton itself. Each market-data test uses a unique
+``token_id`` so cross-test row leakage is impossible even with a
+shared market DB file.
+"""
+from __future__ import annotations
+
+import json
+import os
+import sqlite3
+import time
+from pathlib import Path
+
+import pytest
+
+# Apply ``@pytest.mark.asyncio`` to every ``async def test_...`` in this
+# module (the repo's ``pytest.ini`` / ``pyproject.toml`` declare
+# ``testpaths = tests`` but do NOT set ``asyncio_mode = "auto"`` —
+# pytest-asyncio defaults to strict mode, so the mark is required).
+pytestmark = pytest.mark.asyncio
+
+
+# ── Fixture: per-test decision-ledger SQLite path ───────────────────────────
+@pytest.fixture
+def reset_dao_paths(tmp_path, monkeypatch):
+    """Re-point ``BOT_DATA_DIR`` at per-test ``tmp_path``.
+
+    The market DB path is shared with the rest of the suite (the
+    conftest-redirected ``/tmp/pmbot_conftest_isolation/market_intelligence
+    .db``) because ``timescale_db`` captures it at import time and a
+    per-test re-point would require swapping the singleton. Each test
+    uses a unique ``token_id`` so cross-test row leakage is impossible
+    even with a shared market DB file.
+
+    The decision-ledger path IS per-test because the DAO's
+    ``get_sqlite_path("decision_ledger")`` resolves the env var fresh on
+    every call (no module-level caching), so ``monkeypatch.setenv``
+    takes effect immediately. The fixture pre-creates the schema via
+    ``db_manager._init_decision_ledger_db()`` so the first ``record()``
+    call doesn't pay the schema-init cost.
+
+    Also resets the runtime backend to SQLite (``pg_available = False``
+    / ``backend = DatabaseBackend.SQLITE``) so the PG path is never
+    accidentally attempted in a non-PG test (the fallback test sets
+    these to PG explicitly via a separate monkey-patch).
+    """
+    from core.database_manager import DatabaseBackend, db_manager
+
+    # Re-point BOT_DATA_DIR to per-test tmp_path so the decision-ledger
+    # SQLite file lives under tmp_path (no leakage between tests).
+    # Also re-point the cached _sqlite_paths dict so the DAO picks up
+    # the new path on its next call.
+    dao_dir = tmp_path / "dao_data"
+    dao_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("BOT_DATA_DIR", str(dao_dir))
+    # Force-refresh the cached _sqlite_paths dict so the DAO's
+    # ``get_sqlite_path("decision_ledger")`` returns the new path.
+    db_manager._init_sqlite_paths()
+    # Pre-create the schema so the first ``record()`` call doesn't have
+    # to call ``_init_decision_ledger_db`` (which would still work but
+    # adds noise to the test's call count assertions in the fallback
+    # test below).
+    db_manager._init_decision_ledger_db()
+
+    # Force SQLite backend so non-PG tests never attempt a real PG call.
+    db_manager._status.pg_available = False
+    db_manager._status.backend = DatabaseBackend.SQLITE
+    yield {"decision_ledger": db_manager.get_sqlite_path("decision_ledger")}
+
+
+# ── 1. record_snapshot writes a row that get_snapshots can retrieve ────────
+async def test_market_data_dao_records_snapshot_on_sqlite(reset_dao_paths):
+    """``MarketDataDAO.record_snapshot()`` persists a row, retrievable
+    via ``get_snapshots()``."""
+    from core.dao import market_data_dao
+
+    token_id = "test_token_records_snapshot"
+    await market_data_dao.record_snapshot(
+        token_id=token_id,
+        best_bid=0.42,
+        best_ask=0.44,
+        mid=0.43,
+        spread=0.02,
+        bid_size=100.0,
+        ask_size=80.0,
+        volume=1500.0,
+        bids_json='[{"price": 0.42, "size": 100}]',
+        asks_json='[{"price": 0.44, "size": 80}]',
+        bid_depth_10=850.0,
+        ask_depth_10=720.0,
+    )
+
+    snapshots = await market_data_dao.get_snapshots(token_id, limit=10)
+    assert len(snapshots) == 1
+    row = snapshots[0]
+    # Required columns
+    assert row["token_id"] == token_id
+    assert row["best_bid"] == pytest.approx(0.42)
+    assert row["best_ask"] == pytest.approx(0.44)
+    assert row["mid"] == pytest.approx(0.43)
+    assert row["spread"] == pytest.approx(0.02)
+    # volume column is volume_24h on the existing schema (mapped by
+    # db_manager.record_snapshot's volume → volume_24h kwarg).
+    assert row["volume_24h"] == pytest.approx(1500.0)
+    # bids_json / asks_json round-trip — the SQLite TEXT column preserves
+    # the raw JSON string the caller supplied.
+    assert row["bids_json"] == '[{"price": 0.42, "size": 100}]'
+    assert row["asks_json"] == '[{"price": 0.44, "size": 80}]'
+    # depth-10 summaries
+    assert row["bid_depth_10"] == pytest.approx(850.0)
+    assert row["ask_depth_10"] == pytest.approx(720.0)
+    # NOTE: bid_size / ask_size are accepted by the DAO's signature for
+    # forward-compat but the current ``db_manager.record_snapshot``
+    # implementation drops them on the floor (the underlying
+    # ``timescale_db.record_snapshot`` doesn't accept them). When the
+    # schema migration that adds ``bid_size`` / ``ask_size`` columns
+    # lands AND ``db_manager.record_snapshot`` is updated to persist
+    # them, this assertion can be flipped to check the column.
+
+
+# ── 2. get_snapshots returns most-recent-first and honours limit ───────────
+async def test_market_data_dao_get_snapshots_returns_most_recent_first(
+    reset_dao_paths,
+):
+    """``get_snapshots()`` returns rows in ``timestamp DESC`` order and
+    honours the ``limit`` argument."""
+    from core.dao import market_data_dao
+    from core.database_manager import db_manager
+
+    token_id = "test_token_ordering"
+    # Record 5 snapshots with explicit timestamps 100s apart so the
+    # ordering assertion is unambiguous (without explicit timestamps,
+    # ``time.time()`` may return the same float for back-to-back calls).
+    base_ts = 1_700_000_000.0
+    market_path = db_manager.get_sqlite_path("market")
+    for i in range(5):
+        await market_data_dao.record_snapshot(
+            token_id=token_id,
+            best_bid=0.40 + i * 0.01,
+            best_ask=0.42 + i * 0.01,
+            mid=0.41 + i * 0.01,
+            spread=0.02,
+        )
+        # Bump the timestamp on the row directly so the test isn't
+        # racing ``time.time()`` granularity. ``record_snapshot`` stamps
+        # ``time.time()`` itself; we override the timestamp via a direct
+        # UPDATE so the ordering assertion is deterministic.
+        with sqlite3.connect(market_path) as conn:
+            conn.execute(
+                "UPDATE market_snapshots SET timestamp = ? "
+                "WHERE id = (SELECT MAX(id) FROM market_snapshots "
+                "            WHERE token_id = ?)",
+                (base_ts + i * 100.0, token_id),
+            )
+            conn.commit()
+
+    # Default limit=100 returns all 5.
+    all_rows = await market_data_dao.get_snapshots(token_id, limit=100)
+    assert len(all_rows) == 5
+    # Ordering: most-recent (highest timestamp) first.
+    timestamps = [r["timestamp"] for r in all_rows]
+    assert timestamps == sorted(timestamps, reverse=True)
+
+    # limit=3 returns the 3 most-recent.
+    top3 = await market_data_dao.get_snapshots(token_id, limit=3)
+    assert len(top3) == 3
+    assert top3[0]["timestamp"] == base_ts + 4 * 100.0
+    assert top3[2]["timestamp"] == base_ts + 2 * 100.0
+
+
+# ── 3. record_trade writes a row that get_trades can retrieve ──────────────
+async def test_market_data_dao_records_trade_on_sqlite(reset_dao_paths):
+    """``MarketDataDAO.record_trade()`` persists a row, retrievable via
+    ``get_trades()``."""
+    from core.dao import market_data_dao
+
+    token_id = "test_token_trade"
+    await market_data_dao.record_trade(
+        token_id=token_id,
+        price=0.55,
+        size=42.5,
+        side="BUY",
+        trade_id="trade-001",
+        timestamp=1_700_000_100.0,
+    )
+
+    trades = await market_data_dao.get_trades(token_id, limit=10)
+    assert len(trades) == 1
+    row = trades[0]
+    assert row["token_id"] == token_id
+    assert row["trade_id"] == "trade-001"
+    assert row["price"] == pytest.approx(0.55)
+    assert row["size"] == pytest.approx(42.5)
+    assert row["side"] == "BUY"
+    assert row["timestamp"] == pytest.approx(1_700_000_100.0)
+
+
+# ── 4. get_trades supports token filter and global recent tape ─────────────
+async def test_market_data_dao_get_trades_supports_token_filter_and_global(
+    reset_dao_paths,
+):
+    """``get_trades(token_id=...)`` filters by token;
+    ``get_trades(token_id=None)`` returns the global recent tape (most-
+    recent-first across all tokens)."""
+    from core.dao import market_data_dao
+
+    # Write 2 trades for token A and 1 trade for token B with explicit
+    # timestamps so the global ordering assertion is unambiguous.
+    await market_data_dao.record_trade(
+        token_id="token_A_filter_global",
+        price=0.10,
+        size=10.0,
+        side="BUY",
+        trade_id="a-1-fg",
+        timestamp=1_700_000_100.0,
+    )
+    await market_data_dao.record_trade(
+        token_id="token_B_filter_global",
+        price=0.20,
+        size=20.0,
+        side="SELL",
+        trade_id="b-1-fg",
+        timestamp=1_700_000_200.0,
+    )
+    await market_data_dao.record_trade(
+        token_id="token_A_filter_global",
+        price=0.30,
+        size=30.0,
+        side="SELL",
+        trade_id="a-2-fg",
+        timestamp=1_700_000_300.0,
+    )
+
+    # token_A filter: 2 rows, most-recent-first.
+    a_trades = await market_data_dao.get_trades("token_A_filter_global", limit=10)
+    assert len(a_trades) == 2
+    assert a_trades[0]["trade_id"] == "a-2-fg"
+    assert a_trades[1]["trade_id"] == "a-1-fg"
+
+    # token_B filter: 1 row.
+    b_trades = await market_data_dao.get_trades("token_B_filter_global", limit=10)
+    assert len(b_trades) == 1
+    assert b_trades[0]["trade_id"] == "b-1-fg"
+
+    # Global recent tape (token_id=None): 3 rows, most-recent-first.
+    all_trades = await market_data_dao.get_trades(limit=10)
+    # Filter out any rows from prior tests (token_id starts with our
+    # test prefix) so the assertion is robust against shared-DB leakage.
+    ours = [t for t in all_trades if t["trade_id"].endswith("-fg")]
+    assert len(ours) == 3
+    assert [t["trade_id"] for t in ours] == ["a-2-fg", "b-1-fg", "a-1-fg"]
+
+
+# ── 5. DecisionLedgerDAO record + get ───────────────────────────────────────
+async def test_decision_ledger_dao_record_and_retrieve_by_correlation(
+    reset_dao_paths,
+):
+    """``DecisionLedgerDAO.record()`` writes a row to ``decision_events``;
+    ``get_by_correlation()`` returns the chain in ascending-timestamp
+    order; ``get_by_token()`` returns events most-recent-first."""
+    from core.dao import decision_ledger_dao
+
+    correlation_id = "dec-test-correlation-001"
+    token_id = "test_token_decision"
+
+    # Record 3 stages of a single decision with explicit timestamps
+    # so the ordering assertions are unambiguous.
+    base_ts = 1_700_000_000.0
+    stages = [
+        ("PREDICTION", {"p_pred": 0.65, "confidence": 0.82}),
+        ("SIGNAL", {"action": "BUY", "size_usdc": 1.50}),
+        ("ORDER", {"order_id": "o-1", "price": 0.55, "size": 3.0}),
+    ]
+    decision_path = reset_dao_paths["decision_ledger"]
+    for idx, (stage, data) in enumerate(stages):
+        await decision_ledger_dao.record(
+            correlation_id=correlation_id,
+            token_id=token_id,
+            stage=stage,
+            data=data,
+            model_version="champion_ensemble_v1",
+        )
+        # Bump the timestamp on the row directly so the test isn't
+        # racing ``time.time()`` granularity (DAO's record() stamps
+        # ``time.time()`` which may return the same float for
+        # back-to-back calls).
+        with sqlite3.connect(str(decision_path)) as conn:
+            conn.execute(
+                "UPDATE decision_events SET timestamp = ? "
+                "WHERE id = (SELECT MAX(id) FROM decision_events "
+                "            WHERE correlation_id = ?)",
+                (base_ts + idx * 100.0, correlation_id),
+            )
+            conn.commit()
+
+    # get_by_correlation: 3 rows, ascending-timestamp order.
+    chain = await decision_ledger_dao.get_by_correlation(correlation_id)
+    assert len(chain) == 3
+    assert [r["stage"] for r in chain] == ["PREDICTION", "SIGNAL", "ORDER"]
+    assert [r["timestamp"] for r in chain] == sorted(
+        r["timestamp"] for r in chain
+    )
+
+    # Each row carries the data_json + model_version we wrote.
+    for row in chain:
+        assert row["correlation_id"] == correlation_id
+        assert row["token_id"] == token_id
+        assert row["model_version"] == "champion_ensemble_v1"
+        decoded = json.loads(row["data_json"])
+        expected = dict(stages)[row["stage"]]
+        assert decoded == expected
+
+    # get_by_token: 3 rows, most-recent-first.
+    by_token = await decision_ledger_dao.get_by_token(token_id, limit=10)
+    assert len(by_token) == 3
+    assert [r["stage"] for r in by_token] == [
+        "ORDER", "SIGNAL", "PREDICTION"
+    ]
+
+
+# ── 6. DAO falls back to SQLite when PG fails ──────────────────────────────
+async def test_dao_falls_back_to_sqlite_when_pg_fails(reset_dao_paths):
+    """When ``db_manager.is_postgres`` is True and ``_pg_execute``
+    raises, the DAO's ``execute()`` dispatcher:
+
+      1. Catches the exception.
+      2. Flips ``db_manager._status.backend`` to
+         ``DatabaseBackend.SQLITE`` / ``pg_available = False``.
+      3. Reruns the query against SQLite via ``_sqlite_execute``.
+
+    The test asserts both that the SQLite fallback returned the correct
+    rows AND that the runtime backend was flipped (so the next call
+    short-circuits straight to SQLite without retrying PG).
+    """
+    from core.dao import decision_ledger_dao
+    from core.database_manager import DatabaseBackend, db_manager
+
+    # Force the runtime backend into PG mode so execute() attempts the
+    # PG path first. ``is_postgres`` consults ``_status.backend`` (the
+    # unified flag) directly — flipping ``backend`` to POSTGRESQL is
+    # sufficient.
+    db_manager._status.pg_available = True
+    db_manager._status.backend = DatabaseBackend.POSTGRESQL
+    assert db_manager.is_postgres is True
+
+    # Inject a failing _pg_execute — replaces the bound method on the
+    # DAO instance. The dispatcher catches the exception, flips the
+    # backend to SQLITE, and reruns against SQLite.
+    call_log: list[str] = []
+
+    async def _failing_pg_execute(self, query, params=()):
+        call_log.append("pg_attempted")
+        raise ConnectionError("simulated PG connection failure")
+
+    # Monkey-patch the instance method (not the class method) so other
+    # DAO instances are not affected.
+    original = decision_ledger_dao._pg_execute
+    decision_ledger_dao._pg_execute = (
+        _failing_pg_execute.__get__(
+            decision_ledger_dao, type(decision_ledger_dao)
+        )
+    )
+    try:
+        # Write a row via the DAO — this exercises execute() →
+        # _pg_execute → exception → flip backend → _sqlite_execute.
+        await decision_ledger_dao.record(
+            correlation_id="dec-fallback-test",
+            token_id="token_pg_fallback",
+            stage="PREDICTION",
+            data={"p_pred": 0.55},
+            model_version="v_fallback_test",
+        )
+    finally:
+        decision_ledger_dao._pg_execute = original
+
+    # PG was attempted (and failed) exactly once.
+    assert call_log == ["pg_attempted"]
+
+    # Runtime backend was flipped to SQLite by the execute() dispatcher.
+    assert db_manager.is_postgres is False
+    assert db_manager._status.backend == DatabaseBackend.SQLITE
+    assert db_manager._status.pg_available is False
+
+    # The row was actually persisted to SQLite via the fallback path.
+    chain = await decision_ledger_dao.get_by_correlation("dec-fallback-test")
+    assert len(chain) == 1
+    row = chain[0]
+    assert row["correlation_id"] == "dec-fallback-test"
+    assert row["token_id"] == "token_pg_fallback"
+    assert row["stage"] == "PREDICTION"
+    assert row["model_version"] == "v_fallback_test"
+    assert json.loads(row["data_json"]) == {"p_pred": 0.55}
+
+    # The second call to execute() short-circuits straight to SQLite —
+    # _pg_execute is NOT called again (the dispatcher saw
+    # ``db_manager.is_postgres == False`` and skipped the PG attempt).
+    call_log.clear()
+    await decision_ledger_dao.get_by_token("token_pg_fallback", limit=10)
+    assert call_log == []

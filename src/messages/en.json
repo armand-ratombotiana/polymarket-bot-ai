@@ -16,6 +16,7 @@
     "backtest": "Backtest Lab",
     "health": "System Health",
     "database": "Data Explorer",
+    "database_status": "Database",
     "decisions": "Decision Ledger",
     "attribution": "Attribution",
     "execution": "Execution Quality",

@@ -215,10 +215,17 @@ def test_run_migrations_creates_tables_and_records(tmp_path: Path) -> None:
     assert not missing, f"Missing tables after migration: {missing}"
 
     # The migration was recorded in the _migrations tracker.
+    # W21-3 — both 001 and 002 are applied (002 is the unified schema
+    # migration, SQLite-compatible after the SERIAL → AUTOINCREMENT
+    # translation). 002 runs after 001 and tolerates CREATE INDEX
+    # failures on columns missing from 001's schema (logged as
+    # warnings, not errors).
     rows = _applied_rows(db_path)
-    assert len(rows) == 1
+    assert len(rows) == 2
     assert rows[0][0] == "001_initial_schema.sql"
+    assert rows[1][0] == "002_unified_schema.sql"
     assert rows[0][1] > 0  # applied_at timestamp is set
+    assert rows[1][1] > 0
 
 
 def test_run_migrations_creates_indexes(tmp_path: Path) -> None:
@@ -256,23 +263,37 @@ def test_run_migrations_creates_db_parent_dir(tmp_path: Path) -> None:
 
 
 def test_run_migrations_is_idempotent(tmp_path: Path) -> None:
-    """Re-running ``run_migrations`` skips already-applied migrations."""
+    """Re-running ``run_migrations`` skips already-applied migrations.
+
+    W21-3 — the unified ``002_unified_schema.sql`` is now applied
+    alongside ``001_initial_schema.sql`` on a fresh DB (both are
+    SQLite-compatible after the SERIAL → AUTOINCREMENT translation).
+    The migration sequence is still idempotent — re-running skips
+    both migrations.
+    """
     db_path = tmp_path / "fresh.db"
 
     first = run_migrations(db_path, "fresh")
     second = run_migrations(db_path, "fresh")
 
-    assert first["applied"] == ["001_initial_schema.sql"]
+    # Both 001 and 002 are applied on the first run.
+    assert first["applied"] == [
+        "001_initial_schema.sql",
+        "002_unified_schema.sql",
+    ]
     assert first["skipped"] == []
 
-    # Second run: nothing applied, the one migration skipped, no errors.
+    # Second run: nothing applied, both migrations skipped, no errors.
     assert second["applied"] == []
-    assert second["skipped"] == ["001_initial_schema.sql"]
+    assert second["skipped"] == [
+        "001_initial_schema.sql",
+        "002_unified_schema.sql",
+    ]
     assert second["errors"] == []
 
-    # No duplicate row in _migrations.
+    # No duplicate rows in _migrations.
     rows = _applied_rows(db_path)
-    assert len(rows) == 1
+    assert len(rows) == 2
 
 
 def test_run_migrations_idempotent_alongside_init_db(tmp_path: Path) -> None:
@@ -308,10 +329,13 @@ def test_run_migrations_idempotent_alongside_init_db(tmp_path: Path) -> None:
     assert "001_initial_schema.sql" in result["applied"]
     assert result["errors"] == []
 
-    # And re-running records the migration as skipped.
+    # And re-running records both migrations as skipped.
     second = run_migrations(db_path, "fresh")
     assert second["applied"] == []
-    assert second["skipped"] == ["001_initial_schema.sql"]
+    assert second["skipped"] == [
+        "001_initial_schema.sql",
+        "002_unified_schema.sql",
+    ]
 
 
 # ── (4) Status ─────────────────────────────────────────────────────────────────
@@ -570,7 +594,10 @@ def test_migrate_cli_run_creates_schema(tmp_path: Path, capsys) -> None:
         captured = capsys.readouterr()
         assert rc == 0
         assert "decision_ledger.db" in captured.out
-        assert "Applied (1)" in captured.out
+        # W21-3 — both 001 and 002 are applied (002 is the unified schema
+        # migration, SQLite-compatible after the SERIAL → AUTOINCREMENT
+        # translation). The CLI prints ``Applied (2):`` reflecting both.
+        assert "Applied (2)" in captured.out
         # Schema is actually in place.
         assert "decision_events" in _table_names(db_path)
     finally:

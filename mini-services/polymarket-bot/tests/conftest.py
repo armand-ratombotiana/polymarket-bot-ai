@@ -126,6 +126,28 @@ _ENV_REDIRECTS: dict[str, str] = {
     # ``/app/data`` (read-only in the sandbox) — same defensive pattern
     # as the other *_DB env redirects above.
     "EXPERIMENT_DB": str(_TMP_ROOT / "backtest_experiments.db"),
+    # W21-1 — unified DatabaseManager SQLite paths. Module-level
+    # singleton ``core.database_manager.db_manager`` is constructed at
+    # import time and would otherwise try to mkdir ``/app/data``
+    # (read-only in the sandbox) — same defensive pattern as the other
+    # *_DB env redirects above. The DAO uses SEPARATE SQLite files from
+    # the legacy ``core/market_db.py`` / ``core/decision_ledger.py``
+    # modules so the DAO's market_snapshots table can carry the extra
+    # bid_size / ask_size / bids_json / asks_json / bid_depth_10 /
+    # ask_depth_10 columns and the decision_events table can carry
+    # correlation_id / model_version columns (the legacy schemas lack
+    # these — see ``core/database_manager.py`` docstring for the full
+    # rationale).
+    "MARKET_DAO_DB_PATH": str(_TMP_ROOT / "market_dao.db"),
+    "DECISION_LEDGER_DAO_DB_PATH": str(_TMP_ROOT / "decision_ledger_dao.db"),
+    # W21-4 — Directory holding every DAO-owned SQLite DB file the
+    # ``DatabaseManager`` resolves via ``get_sqlite_path(name)``. The
+    # manager's ``SQLITE_PATHS`` dict is populated eagerly at
+    # ``__init__`` time so the DAO singletons (constructed at module-
+    # import time) can resolve their target path BEFORE
+    # ``initialize()`` runs. Without this redirect, the DAO would
+    # default to ``/app/data`` (read-only in the sandbox).
+    "BOT_DATA_DIR": str(_TMP_ROOT / "dao_data"),
     # Force the canonical trading mode to paper + live disabled so risk-gate
     # tests don't short-circuit at the shadow / live-trading gates inside
     # ``InstitutionalRiskEngine.check_order``.

@@ -21,7 +21,8 @@
 //     suite can navigate the table semantically without `<table>`.
 'use client'
 
-import { FixedSizeList as List } from 'react-window'
+// react-window v2 exports `List` (v1 used `FixedSizeList`).
+import { List } from 'react-window'
 import { ReactNode, useRef, useCallback, useMemo } from 'react'
 
 export interface Column {

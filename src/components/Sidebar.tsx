@@ -32,6 +32,7 @@ export type NavSection =
   | 'capital-allocator'
   | 'system-health'
   | 'system-database'
+  | 'system-database-status'
   | 'system-observability'
   | 'system-retention'
   | 'system-decisions'
@@ -138,6 +139,7 @@ const NAV_GROUPS: NavGroup[] = [
     items: [
       { id: 'system-health', labelKey: 'nav.health', label: 'System Health', shortLabel: 'Health', icon: '⊜', group: 'system' },
       { id: 'system-database', labelKey: 'nav.database', label: 'Data Explorer', shortLabel: 'Data', icon: '⊞', group: 'system' },
+      { id: 'system-database-status', labelKey: 'nav.database_status', label: 'Database', shortLabel: 'DB', icon: '🗄', group: 'system' },
       { id: 'system-observability', labelKey: 'nav.observability', label: 'Observability', shortLabel: 'Observ', icon: '◉', group: 'system' },
       { id: 'system-retention', labelKey: 'nav.retention', label: 'Retention', shortLabel: 'Retain', icon: '⌫', group: 'system' },
       { id: 'system-decisions', labelKey: 'nav.decisions', label: 'Decision Ledger', shortLabel: 'Ledger', icon: '↹', group: 'system' },

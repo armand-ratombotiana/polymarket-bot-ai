@@ -148,6 +148,8 @@ const DecisionLedgerPanel = lazyPanel(() => import('@/components/DecisionLedgerP
 const LiveSafetyGatePanel = lazyPanel(() => import('@/components/LiveSafetyGatePanel'), 'Loading Safety Gate…')
 const AuditLogPanel = lazyPanel(() => import('@/components/AuditLogPanel'), 'Loading Audit Log…')
 const RateLimitPanel = lazyPanel(() => import('@/components/RateLimitPanel'), 'Loading Rate Limits…')
+// W21-7 — Database Status panel (PG vs SQLite + health + table stats).
+const DatabaseStatusPanel = lazyPanel(() => import('@/components/DatabaseStatusPanel'), 'Loading Database Status…')
 
 // Modals
 import DepthChartModal from '@/components/DepthChartModal'
@@ -931,6 +933,15 @@ export default function Dashboard() {
               <PanelErrorBoundary label="Database Explorer">
               <div style={{ height: '100%', overflow: 'hidden' }}>
                 <DatabaseExplorerView />
+              </div>
+              </PanelErrorBoundary>
+            )}
+
+            {/* ── System — Database Status (W21-7) ──────────────────── */}
+            {activeSection === 'system-database-status' && (
+              <PanelErrorBoundary label="Database Status">
+              <div style={{ height: '100%', overflow: 'auto' }} className="scrollbar-thin">
+                <DatabaseStatusPanel />
               </div>
               </PanelErrorBoundary>
             )}

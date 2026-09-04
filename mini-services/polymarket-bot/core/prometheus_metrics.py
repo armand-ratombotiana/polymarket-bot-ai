@@ -190,6 +190,32 @@ mtm_gate_failures_total = Counter(
     'price feed / MTM module is repaired — investigate immediately)',
 )
 
+# === PostgreSQL health (W21-2 — PG health check + fallback) ===
+# Emitted by ``core.pg_health_monitor.PGHealthMonitor._emit_prometheus_metrics``
+# on every ping. A Grafana panel can alert on the status gauge
+# transitioning to 0 (unhealthy) without polling the HTTP endpoint —
+# mirroring the ``up`` convention Prometheus scrapers expect.
+pg_health_status = Gauge(
+    'polymarket_pg_health_status',
+    'PostgreSQL health status (1.0 = healthy, 0.0 = unhealthy). '
+    'Driven by the PG health monitor background task — see '
+    'core/pg_health_monitor.py.',
+)
+
+pg_health_latency_ms = Gauge(
+    'polymarket_pg_health_latency_ms',
+    'PostgreSQL ping round-trip latency in milliseconds '
+    '(``SELECT 1`` round-trip). 0 when the last ping failed (the '
+    'latency is undefined in that window).',
+)
+
+pg_health_consecutive_failures = Gauge(
+    'polymarket_pg_health_consecutive_failures',
+    'PostgreSQL consecutive ping failures since the last success. '
+    'After ``failure_threshold`` (default 3) the monitor marks PG '
+    'unhealthy and the database manager falls back to SQLite.',
+)
+
 
 # === Functions ===
 def record_request(method: str, endpoint: str, status: int, duration: float) -> None:
@@ -348,6 +374,9 @@ __all__ = [
     "auth_failures_total",
     "rate_limit_hits_total",
     "mtm_gate_failures_total",
+    "pg_health_status",
+    "pg_health_latency_ms",
+    "pg_health_consecutive_failures",
     # Helper functions.
     "record_request",
     "record_trade",

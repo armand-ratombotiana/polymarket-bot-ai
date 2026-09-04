@@ -76,6 +76,24 @@ class TimescaleDBEngine:
                 cursor = conn.cursor()
                 cursor.execute("PRAGMA journal_mode=WAL;")
                 cursor.execute("PRAGMA synchronous=NORMAL;")
+                # W21-5 — Order-book depth columns. The W19-5 fix
+                # originally targeted the SQLite INSERT path only, but
+                # the SQLite schema also needs the columns so the INSERT
+                # can write them. Without these columns the INSERT
+                # below would have failed (sqlite3.OperationalError:
+                # table market_snapshots has no column named bids_json)
+                # and ``record_snapshot`` would have silently dropped
+                # every snapshot via the ``except`` clause in
+                # ``_write_via_sqlite``. The columns mirror the PG
+                # ``market.orderbook_snapshot`` hypertable declared in
+                # migration ``001_initial_enterprise_schemas.sql``:
+                #   * ``bids_json``     — full bid ladder (JSON array)
+                #   * ``asks_json``     — full ask ladder (JSON array)
+                #   * ``bid_depth_10``  — sum of top-10 bid sizes
+                #   * ``ask_depth_10``  — sum of top-10 ask sizes
+                #   * ``ingestion_time``— wall-clock at write time, used
+                #     for the W21-5 ``/api/depth-history`` query (rows
+                #     older than ``now - hours*3600`` are filtered out).
                 cursor.execute("""
                     CREATE TABLE IF NOT EXISTS market_snapshots (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -87,9 +105,35 @@ class TimescaleDBEngine:
                         mid REAL,
                         spread REAL,
                         volume_24h REAL,
-                        liquidity REAL
+                        liquidity REAL,
+                        bids_json TEXT,
+                        asks_json TEXT,
+                        bid_depth_10 REAL DEFAULT 0.0,
+                        ask_depth_10 REAL DEFAULT 0.0,
+                        ingestion_time REAL
                     )
                 """)
+                # Idempotent in-place migration for legacy DBs created
+                # before W21-5: the columns are missing on those, so the
+                # ``ALTER TABLE ADD COLUMN`` adds them; on a fresh DB
+                # (where the CREATE TABLE above already declared them)
+                # the ALTER raises ``duplicate column name`` and is
+                # swallowed. Belt-and-braces: same pattern as the
+                # ``market_trades`` schema migration in W20-7.
+                for _col_def in (
+                    "bids_json TEXT",
+                    "asks_json TEXT",
+                    "bid_depth_10 REAL DEFAULT 0.0",
+                    "ask_depth_10 REAL DEFAULT 0.0",
+                    "ingestion_time REAL",
+                ):
+                    try:
+                        cursor.execute(
+                            f"ALTER TABLE market_snapshots ADD COLUMN {_col_def}"
+                        )
+                    except sqlite3.OperationalError:
+                        # Column already exists — fresh DB or already migrated.
+                        pass
                 cursor.execute("CREATE INDEX IF NOT EXISTS idx_snap_token ON market_snapshots(token_id, timestamp DESC)")
 
                 cursor.execute("""
@@ -293,23 +337,105 @@ class TimescaleDBEngine:
         bids_json: dict | None = None,
         asks_json: dict | None = None,
     ) -> bool:
-        """Insert market orderbook snapshot."""
+        """Insert market orderbook snapshot.
+
+        W21-5 — order-book depth is now persisted on BOTH backends:
+
+          * **PostgreSQL** — the ``market.orderbook_snapshot`` hypertable
+            declares ``bids_json`` / ``asks_json`` (JSONB) and
+            ``bid_depth_10`` / ``ask_depth_10`` (DOUBLE PRECISION) columns
+            in migration ``001_initial_enterprise_schemas.sql``. The
+            INSERT below now writes all four columns (plus the existing
+            top-of-book columns). When the caller does NOT pass ladders
+            (e.g. the legacy ``book_poller._apply_book`` call path that
+            was upgraded in this same task), the JSON columns are written
+            as ``NULL`` and the depth-10 columns as ``0.0`` so the row
+            shape is uniform across writer call sites.
+
+          * **SQLite fallback** — the ``market_snapshots`` table now
+            declares the same five columns (``bids_json``, ``asks_json``,
+            ``bid_depth_10``, ``ask_depth_10``, ``ingestion_time``) via
+            the schema migration in ``_init_sqlite_fallback``. The
+            INSERT below now writes them. This is the W19-5 fix the
+            task spec described — verified present here so the
+            ``/api/depth-full/{token_id}`` and
+            ``/api/depth-history/{token_id}`` endpoints (W21-5) can
+            read the ladders back out of the SQLite fallback when PG
+            is unreachable.
+
+        Args:
+            bids_json: Bid ladder. Accepts either a ``list[dict]``
+                (``[{"price": 0.49, "size": 100}, ...]``) or any other
+                JSON-serialisable shape (the legacy signature was typed
+                ``dict | None`` but the actual callers pass lists). When
+                ``None`` or empty, the JSON column is written as ``NULL``
+                and ``bid_depth_10`` as ``0.0``.
+            asks_json: Ask ladder — same shape contract as ``bids_json``.
+        """
         ts = time.time()
         dt = datetime.datetime.fromtimestamp(ts, datetime.timezone.utc)
+        ingestion_time = time.time()
+
+        # Serialise ladders once — the JSON column is the same on both
+        # backends (PG ``JSONB`` / SQLite ``TEXT``). ``None`` / empty
+        # lists map to ``NULL`` so the column carries a clean "no ladder
+        # available" signal rather than the string ``"null"`` / ``"[]"``
+        # (the latter would force every read path to special-case it).
+        bids_serialised = json.dumps(bids_json) if bids_json else None
+        asks_serialised = json.dumps(asks_json) if asks_json else None
+
+        # Pre-compute the top-10 depth summaries. ``bid_depth_10`` is
+        # the sum of the ``size`` field of the first 10 entries in the
+        # ladder; ``ask_depth_10`` mirrors it for the asks. ``0.0`` when
+        # no ladder is supplied so the column is always a numeric value
+        # (the operator dashboard can plot the depth time-series without
+        # guarding against ``None``).
+        bid_depth_10 = 0.0
+        ask_depth_10 = 0.0
+        if isinstance(bids_json, list) and bids_json:
+            try:
+                bid_depth_10 = float(sum(
+                    float(b.get("size", 0)) for b in bids_json[:10]
+                ))
+            except (TypeError, ValueError, AttributeError):
+                bid_depth_10 = 0.0
+        if isinstance(asks_json, list) and asks_json:
+            try:
+                ask_depth_10 = float(sum(
+                    float(a.get("size", 0)) for a in asks_json[:10]
+                ))
+            except (TypeError, ValueError, AttributeError):
+                ask_depth_10 = 0.0
+
         return await self._write(
             table="market_snapshots",
             pg_sql="""
                 INSERT INTO market.orderbook_snapshot (
-                    time, token_id, slug, best_bid, best_ask, mid, spread, volume_24h, liquidity, bids_json, asks_json
+                    time, token_id, slug, best_bid, best_ask, mid, spread,
+                    bid_depth_10, ask_depth_10,
+                    volume_24h, liquidity, bids_json, asks_json
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11);
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13);
             """,
-            pg_params=(dt, token_id, slug, best_bid, best_ask, mid, spread, volume_24h, liquidity, json.dumps(bids_json) if bids_json else None, json.dumps(asks_json) if asks_json else None),
+            pg_params=(
+                dt, token_id, slug, best_bid, best_ask, mid, spread,
+                bid_depth_10, ask_depth_10,
+                volume_24h, liquidity, bids_serialised, asks_serialised,
+            ),
             sqlite_sql="""
-                INSERT INTO market_snapshots (timestamp, token_id, slug, best_bid, best_ask, mid, spread, volume_24h, liquidity)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
+                INSERT INTO market_snapshots (
+                    timestamp, token_id, slug, best_bid, best_ask, mid, spread,
+                    volume_24h, liquidity,
+                    bids_json, asks_json, bid_depth_10, ask_depth_10, ingestion_time
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
             """,
-            sqlite_params=(ts, token_id, slug, best_bid, best_ask, mid, spread, volume_24h, liquidity),
+            sqlite_params=(
+                ts, token_id, slug, best_bid, best_ask, mid, spread,
+                volume_24h, liquidity,
+                bids_serialised, asks_serialised, bid_depth_10, ask_depth_10,
+                ingestion_time,
+            ),
         )
 
     async def record_tick(

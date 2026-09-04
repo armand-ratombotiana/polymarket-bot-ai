@@ -186,6 +186,17 @@ class BookPoller:
         # Ingest into TimescaleDB / PostgreSQL asynchronously
         slug = store.market_slugs.get(token_id, token_id[:16])
         from core.timescale_db import timescale_db
+        # W21-5 — pass the full bid / ask ladders through to
+        # ``record_snapshot`` so the JSON columns (``bids_json`` /
+        # ``asks_json``) and the depth-10 summaries
+        # (``bid_depth_10`` / ``ask_depth_10``) are persisted on both
+        # the PostgreSQL hypertable and the SQLite fallback. The
+        # ladders are converted from ``PriceLevel`` dataclass
+        # instances to plain ``{"price": float, "size": float}``
+        # dicts — the shape ``database_manager.get_order_book_depth``
+        # parses back out of the JSON column on read.
+        bids_payload = [{"price": b.price, "size": b.size} for b in bids]
+        asks_payload = [{"price": a.price, "size": a.size} for a in asks]
         asyncio.create_task(
             timescale_db.record_snapshot(
                 token_id=token_id,
@@ -194,6 +205,8 @@ class BookPoller:
                 best_ask=book.best_ask,
                 mid=book.mid,
                 spread=book.spread,
+                bids_json=bids_payload,
+                asks_json=asks_payload,
             )
         )
         if bids and asks:
