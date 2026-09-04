@@ -172,6 +172,24 @@ rate_limit_hits_total = Counter(
     ['endpoint']
 )
 
+# === Risk gate failures (W18-6 — P0-C06 MTM fail-closed) ===
+# Incremented every time the mark-to-market risk gate in
+# ``risk/manager.py::_check_order_impl`` (section 6e) cannot compute the
+# portfolio's marked exposure and therefore FAILS CLOSED — blocking
+# every subsequent order until the price feed / MTM module is repaired.
+# A non-zero rate on this counter is a P0 trading halt: operators must
+# investigate ``store.order_books`` (missing mid quotes), the MTM module
+# (``core.portfolio_mark_to_market``), or position integrity before
+# resuming trading. Mirrors the contract of ``auth_failures_total``
+# (best-effort increment — failures inside the metrics pipeline itself
+# are swallowed at the call site so a metrics hiccup can never break a
+# risk-gate decision).
+mtm_gate_failures_total = Counter(
+    'polymarket_mtm_gate_failures_total',
+    'Total MTM risk-gate fail-closed events (every order blocked until '
+    'price feed / MTM module is repaired — investigate immediately)',
+)
+
 
 # === Functions ===
 def record_request(method: str, endpoint: str, status: int, duration: float) -> None:
@@ -329,6 +347,7 @@ __all__ = [
     "alerts_active",
     "auth_failures_total",
     "rate_limit_hits_total",
+    "mtm_gate_failures_total",
     # Helper functions.
     "record_request",
     "record_trade",

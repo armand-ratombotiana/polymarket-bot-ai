@@ -501,6 +501,16 @@ class OrderStateMachine:
             return None
         return _row_to_order(row)
 
+    def get_order(self, order_id: str) -> Order | None:
+        """Alias for ``load`` — return the latest persisted snapshot for
+        ``order_id``, or ``None`` if no rows exist for that id.
+
+        W18-1 — added so callers and the HTTP surface can use the more
+        idiomatic ``osm.get_order(order_id)`` form (mirrors the
+        ``get_order`` naming used in the task spec).
+        """
+        return self.load(order_id)
+
     def get_history(self, order_id: str) -> list[Order]:
         """Return every persisted snapshot for ``order_id``, oldest-first
         (the chronological order in which ``save`` was called)."""
@@ -530,6 +540,136 @@ class OrderStateMachine:
             )
             return []
         return [_row_to_order(r) for r in rows]
+
+    # ── Convenience helpers (W18-1) ──────────────────────────────────────
+    # The three methods below wrap the module-level ``create_order`` /
+    # ``transition`` helpers with SQLite persistence so callers can drive
+    # the full lifecycle (CREATED → VALIDATED → SUBMITTED → ACKNOWLEDGED
+    # → OPEN → FILLED/CANCELLED/REJECTED/EXPIRED) with a single call per
+    # hop. They are ADDITIVE: the underlying helpers are untouched, and
+    # every pre-existing caller continues to work.
+    #
+    # The trading pipeline (strategies/base.py + paper/simulator.py)
+    # previously bypassed the OSM entirely (W17-2 / P0-C-01 finding) —
+    # production orders were created directly in the paper sim wrapped in
+    # ``try/except: pass``. These helpers close that gap by giving the
+    # trade path a one-line API to record each transition without
+    # re-implementing the load/transition/save round-trip at every call
+    # site. Errors are logged and re-raised so callers can opt into
+    # best-effort (``try/except``) or hard-fail semantics as appropriate.
+
+    def create_order(
+        self,
+        *,
+        strategy: str,
+        token_id: str,
+        side: str,
+        price: float,
+        size: float,
+        decision_id: str = "",
+        order_id: str | None = None,
+        idempotency_key: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        now: float | None = None,
+    ) -> Order:
+        """Mint a fresh ``CREATED`` Order, persist the snapshot, and return it.
+
+        Thin wrapper around the module-level ``create_order`` factory that
+        additionally calls ``save`` so the CREATED snapshot lands in the
+        SQLite audit trail on the same call. Idempotent at the API level
+        — the only way ``save`` fails is on a persistence error (logged
+        and swallowed inside ``save``, mirroring the fail-soft contract
+        of every other module-level singleton).
+        """
+        order = create_order(
+            strategy=strategy,
+            token_id=token_id,
+            side=side,
+            price=price,
+            size=size,
+            decision_id=decision_id,
+            order_id=order_id,
+            idempotency_key=idempotency_key,
+            metadata=metadata,
+            now=now,
+        )
+        self.save(order)
+        return order
+
+    def transition(
+        self,
+        order_or_order_id: "Order | str",
+        new_state: "OrderState | str",
+        *,
+        filled_size: float | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> Order | None:
+        """Load / transition / persist a state change in a single call.
+
+        Accepts either an ``Order`` instance (used in place of a ``load``
+        round-trip when the caller already holds the latest snapshot) or
+        an ``order_id`` string (in which case the latest snapshot is
+        loaded from the audit trail). The new state must be a legal
+        transition from the current state — otherwise
+        ``InvalidTransition`` is raised (callers that want best-effort
+        semantics wrap the call in ``try/except``).
+
+        Optional ``filled_size`` / ``metadata`` are merged into the
+        post-transition snapshot before persistence: ``filled_size``
+        overwrites the existing field (use for partial-fill updates);
+        ``metadata`` is merged into the existing dict so a caller can
+        stamp the snapshot with auxiliary fields (e.g. the exchange's
+        order_id for live orders) without losing prior metadata.
+
+        Returns the new ``Order`` on success, or ``None`` if the input
+        ``order_id`` could not be loaded (no prior snapshot exists —
+        e.g. a legacy order that pre-dates the OSM wiring). Persistence
+        errors are swallowed and logged (best-effort contract — the
+        trading pipeline never breaks on an OSM write failure).
+        """
+        if isinstance(order_or_order_id, Order):
+            current: Order | None = order_or_order_id
+        elif isinstance(order_or_order_id, str):
+            current = self.load(order_or_order_id)
+        else:
+            log.warning(
+                "[order_state_machine] transition: expected Order or "
+                "order_id str, got %s",
+                type(order_or_order_id).__name__,
+            )
+            return None
+
+        if current is None:
+            log.warning(
+                "[order_state_machine] transition: no prior snapshot for "
+                "order_id=%s; cannot transition to %s",
+                order_or_order_id,
+                new_state,
+            )
+            return None
+
+        try:
+            updated = transition(current, new_state)
+        except InvalidTransition:
+            # Re-raise so callers that want strict semantics can react;
+            # best-effort callers wrap in try/except.
+            raise
+
+        # Merge optional field updates (filled_size, metadata) into the
+        # post-transition snapshot before persistence.
+        if filled_size is not None or metadata is not None:
+            updates: dict[str, Any] = {}
+            if filled_size is not None:
+                updates["filled_size"] = float(filled_size)
+            if metadata:
+                merged_meta = dict(updated.metadata)
+                merged_meta.update(metadata)
+                updates["metadata"] = merged_meta
+            if updates:
+                updated = replace(updated, **updates)
+
+        self.save(updated)
+        return updated
 
 
 def _row_to_order(row: sqlite3.Row) -> Order:
@@ -572,6 +712,13 @@ def _row_to_order(row: sqlite3.Row) -> Order:
 # convention so importers can grab the instance at module import time).
 order_state_machine = OrderStateMachine()
 
+# W18-1 — short alias so call sites can write ``osm.create_order(...)`` /
+# ``osm.transition(order_id, "FILLED")`` without re-typing the longer
+# singleton name. Same instance, same SQLite DB; the alias is purely
+# ergonomic. ``osm`` is exported via ``__all__`` so ``from
+# core.order_state_machine import osm`` resolves as expected.
+osm = order_state_machine
+
 
 __all__ = [
     "DB_PATH",
@@ -582,6 +729,7 @@ __all__ = [
     "InvalidTransition",
     "OrderStateMachine",
     "order_state_machine",
+    "osm",
     "create_order",
     "transition",
     "is_terminal",

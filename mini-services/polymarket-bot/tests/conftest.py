@@ -125,6 +125,36 @@ _ENV_REDIRECTS: dict[str, str] = {
 for _key, _val in _ENV_REDIRECTS.items():
     os.environ.setdefault(_key, _val)
 
+# ── W18-8 — Clear the conftest-redirected model registry BEFORE any project
+# module that imports ``ml.model_registry`` is loaded. ──────────────────────
+# Without this guard, test pollution from a prior pytest session accumulates
+# in ``_TMP_ROOT / "model_registry.json"`` — every ``MarketMLModel.fit_initial``
+# call inside a unit test registers a version (typically ``n=100, brier=0.1786,
+# ece=0.2617`` — the shrunk-synthetic fixture signature), and the next test
+# session boots the singleton against that polluted file. The polluted
+# versions then appear in ``list_versions()`` / ``GET /api/ml/versions`` for
+# the entire session, breaking tests that assert on the lineage shape.
+#
+# Deleting the file BEFORE the singleton is constructed forces ``ModelRegistry
+# .__init__`` → ``_load_from_disk`` to seed the factory baseline
+# (``v1.0.0, n=3000, brier=0.1838, ece=0.038``) — exactly one clean entry.
+# This is the same path the registry takes on a fresh deployment, so the
+# test session starts from a known-clean baseline every time.
+#
+# The unlink is best-effort: a missing file is fine (the registry will be
+# seeded by ``_load_from_disk``); an unwritable file (rare in /tmp) is
+# swallowed so the test session can still proceed (the singleton will load
+# whatever's there).
+_TMP_REGISTRY_FILE = _TMP_ROOT / "model_registry.json"
+if _TMP_REGISTRY_FILE.exists():
+    try:
+        _TMP_REGISTRY_FILE.unlink()
+    except OSError:
+        # Defensive: a transient permission / lock issue must NOT block
+        # the test session from starting. ``_load_from_disk`` will log a
+        # warning and seed the baseline if the file is unreadable.
+        pass
+
 # Make the polymarket-bot package root importable as top-level modules
 # (``core.*``, ``paper.*``, ``risk.*``, ``ml.*``) regardless of the cwd pytest
 # was launched from. Mirrors the bootstrap pattern in every existing

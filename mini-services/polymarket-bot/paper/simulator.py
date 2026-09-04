@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import time
 import uuid
 
 from core.clob_client import OrderArgs
@@ -73,7 +74,8 @@ class PaperSimulator:
                 pass
 
     async def create_order(
-        self, args: OrderArgs, strategy: str = "", decision_id: str = ""
+        self, args: OrderArgs, strategy: str = "", decision_id: str = "",
+        order_id: str | None = None,
     ) -> Order:
         """
         Create a simulated order, add it to the data store, and return it.
@@ -82,9 +84,31 @@ class PaperSimulator:
         ``decision_id`` (R11) is propagated to the resulting ``Order`` so the
         downstream fill loop can record a FILL stage against the originating
         PREDICTION → SIGNAL → RISK_APPROVED chain in the decision ledger.
+
+        ``order_id`` (W18-1) lets the caller (``BaseStrategy.submit_order``)
+        pre-mint the canonical order_id so the OSM audit trail and the
+        in-memory ``Order`` share one identity. When omitted (legacy
+        callers — e.g. ``core/position_manager.py`` TP/SL exits) a fresh
+        ``paper-{uuid}`` id is auto-generated, matching the pre-W18-1
+        behaviour.
+
+        W18-1 — records the canonical OSM lifecycle
+        (CREATED → VALIDATED → SUBMITTED → ACKNOWLEDGED → OPEN) on the
+        same call so paper orders show up in the order-state audit trail
+        the same way live orders do. The OSM calls are ADDITIVE: wrapped
+        in ``try/except`` so a persistence failure never breaks the paper
+        trade flow (mirrors the fail-soft contract of every other audit
+        singleton in the codebase). If the caller pre-created the OSM
+        entry (passed ``order_id`` matching an existing OSM snapshot),
+        only the SUBMITTED → ACKNOWLEDGED → OPEN transitions are
+        recorded; otherwise a fresh CREATED snapshot is minted first.
         """
+        # Pre-mint order_id if the caller didn't supply one so the OSM
+        # entry and the production Order share the same canonical id.
+        if order_id is None:
+            order_id = f"paper-{uuid.uuid4().hex[:12]}"
         order = Order(
-            order_id=f"paper-{uuid.uuid4().hex[:12]}",
+            order_id=order_id,
             token_id=args.token_id,
             side=args.side,
             price=args.price,
@@ -121,23 +145,76 @@ class PaperSimulator:
                 )
             except Exception as e:
                 log.debug("[paper_sim] ledger ORDER record failed: %s", e)
+        # W18-1 — record the OSM lifecycle for the paper order. If the
+        # caller (BaseStrategy.submit_order) pre-created the OSM entry in
+        # the CREATED + VALIDATED states, only the SUBMITTED → ACKNOWLEDGED
+        # → OPEN hops land here; otherwise we mint the full chain so a
+        # legacy caller (position_manager TP/SL exit, manual
+        # ``paper_sim.create_order`` test) still gets an audit trail.
+        try:
+            from core.order_state_machine import OrderState, osm
+            existing = osm.get_order(order.order_id)
+            if existing is None:
+                osm.create_order(
+                    strategy=strategy or "paper",
+                    token_id=args.token_id,
+                    side=args.side.value,
+                    price=args.price,
+                    size=args.size,
+                    decision_id=decision_id,
+                    order_id=order.order_id,
+                    metadata={"paper": True},
+                )
+                osm.transition(order.order_id, OrderState.VALIDATED)
+            # The order has been accepted by the (paper) exchange and is
+            # now resting on the book — record SUBMITTED → ACKNOWLEDGED
+            # → OPEN in one sequence. Each transition is its own
+            # try/except so a failure mid-sequence still leaves the
+            # prior state persisted (append-only audit trail).
+            for state in (
+                OrderState.SUBMITTED,
+                OrderState.ACKNOWLEDGED,
+                OrderState.OPEN,
+            ):
+                try:
+                    osm.transition(order.order_id, state)
+                except Exception as e:
+                    log.debug(
+                        "[paper_sim] OSM %s transition failed for %s: %s",
+                        state.value, order.order_id, e,
+                    )
+        except Exception as e:
+            log.debug(
+                "[paper_sim] OSM wiring on create_order failed for %s: %s",
+                order.order_id, e,
+            )
         return order
 
     async def cancel_order(self, order_id: str) -> bool:
         order = await store.update_order(order_id, status=OrderStatus.CANCELLED)
-        # V13 — record the CANCELLED transition in the order state machine
-        # audit trail (best-effort: a state-machine failure must never break
-        # the paper-trade cancel flow). Local import keeps the simulator
-        # decoupled from core.order_state_machine at module-load time — the
-        # same pattern used by the decision_ledger hook in create_order and
-        # the execution_quality hook in _execute_fill. The bare `except`
-        # mirrors the spec verbatim (catches InvalidTransition on already-
-        # terminal orders, ImportError if the module is unavailable, and
-        # any persistence error from the underlying SQLite layer).
+        # V13 / W18-1 — record the CANCELLED transition in the order state
+        # machine audit trail (best-effort: a state-machine failure must
+        # never break the paper-trade cancel flow). Local import keeps the
+        # simulator decoupled from core.order_state_machine at
+        # module-load time — the same pattern used by the decision_ledger
+        # hook in create_order and the execution_quality hook in
+        # _execute_fill. W18-1 fixes the broken V13 call signature (was
+        # ``transition(order_id, OrderState.CANCELLED, reason=...)`` —
+        # the module-level ``transition`` takes an ``Order`` instance, not
+        # an ``order_id`` str; the kwargs ``reason=`` was never accepted;
+        # the call silently raised + was swallowed by the bare ``except``).
+        # The fix uses the W18-1 ``osm.transition(order_id, state)``
+        # convenience helper which loads + transitions + persists in one
+        # call and re-raises ``InvalidTransition`` so callers can react
+        # (best-effort callers wrap in try/except).
         try:
-            from core.order_state_machine import OrderState, transition
-            transition(order_id, OrderState.CANCELLED, reason="manual cancel")
-        except: pass
+            from core.order_state_machine import OrderState, osm
+            osm.transition(order_id, OrderState.CANCELLED)
+        except Exception as e:
+            log.debug(
+                "[paper_sim] OSM CANCELLED transition failed for %s: %s",
+                order_id, e,
+            )
         if order:
             await store.log_event(f"📄 Paper cancel: {order_id}")
         return order is not None
@@ -241,6 +318,26 @@ class PaperSimulator:
     async def _execute_fill(self, order: Order, fill_price: float) -> None:
         fill_size = order.size_remaining
 
+        # ── W18-7 — snapshot pre-fill position state ───────────────────────
+        # ``store.record_fill`` mutates ``Position`` in place (``yes_shares``
+        # decremented, ``total_invested`` reduced, ``realised_pnl``
+        # accumulated). To detect a *closing* SELL — one that brings
+        # ``yes_shares`` to 0 — we capture the entry-side fields before
+        # the fill is booked so the closed-positions journal can record
+        # the full round-trip (entry price, holding period, entry strategy).
+        # Pre-fix: ``closed_positions.db`` had 0 rows despite 143 EXIT
+        # audit events because only ``core/settlement.py`` (market
+        # resolution) recorded closes; the TP/SL/manual exit path that
+        # routes through ``position_manager → paper_sim.create_order →
+        # _execute_fill`` was silently dropping the round-trip.
+        pos_before = store.positions.get(order.token_id)
+        _entry_shares_before = pos_before.yes_shares if pos_before else 0.0
+        _entry_price_before = pos_before.avg_entry_price if pos_before else 0.0
+        _entry_opened_at = pos_before.opened_at if pos_before else time.time()
+        _entry_strategy = (
+            (pos_before.strategy if pos_before else "") or order.strategy or ""
+        )
+
         # Compute simple P&L for SELL (revenue - cost basis)
         pos = store.positions.get(order.token_id)
         pnl = 0.0
@@ -307,6 +404,87 @@ class PaperSimulator:
             record_execution(order, fill_price, signal_price=order.price)
         except Exception:
             pass
+
+        # ── W18-7 — record closed_position for fully-closing SELL fills ──
+        # When a SELL fill brings ``yes_shares`` from > 0 to exactly 0, the
+        # position has been fully closed (TP / SL / manual exit). Mirror the
+        # round-trip into the closed-positions journal so the 7-dimension
+        # P&L attribution, the live-safety-gate's ``closed_trades`` check
+        # (≥30 closed positions), and the §9 execution-quality framework
+        # have the row they need. ``core/settlement.py`` already records
+        # market-resolution closes; this hook covers every other exit path.
+        #
+        # Idempotency: ``position_id`` is derived from ``order.order_id``
+        # (``fill-<order_id>``) so a replayed fill cannot duplicate the row
+        # (``closed_positions.position_id`` is UNIQUE with
+        # ``INSERT OR IGNORE`` semantics).
+        #
+        # Fire-and-forget: every step is wrapped in ``try/except`` so a
+        # journal hiccup can never break a paper fill (mirrors the
+        # ``decision_ledger`` / ``execution_quality`` fire-and-forget
+        # contract).
+        try:
+            if (
+                order.side == Side.SELL
+                and _entry_shares_before > 0.0
+                and fill_size > 0.0
+            ):
+                pos_after = store.positions.get(order.token_id)
+                shares_after = pos_after.yes_shares if pos_after else 0.0
+                if shares_after <= 0.0:
+                    # Position fully closed by this fill — record the
+                    # round-trip. ``strategy`` is the ENTRY strategy (the
+                    # strategy that opened the position, captured for
+                    # attribution); ``exit_reason`` is the EXIT order's
+                    # strategy (e.g. ``position_manager_tp`` / ``_sl``)
+                    # round-tripped via ``metadata_json``.
+                    from core.closed_positions import closed_positions
+                    holding_seconds = max(0.0, time.time() - _entry_opened_at)
+                    await closed_positions.record_closed_position(
+                        token_id=order.token_id,
+                        strategy=_entry_strategy,
+                        entry_price=_entry_price_before,
+                        exit_price=fill_price,
+                        shares=fill_size,
+                        pnl=pnl,
+                        holding_seconds=holding_seconds,
+                        model_version="",
+                        # Attribution-dimension kwargs (promoted to
+                        # first-class columns by record_closed_position).
+                        direction="BUY",  # long-YES closed via SELL
+                        decision_id=order.decision_id or "",
+                        # Idempotency key — stable per fill.
+                        position_id=f"fill-{order.order_id}",
+                        # Non-attribution extras → metadata_json
+                        # (decoded back as ``data`` on read).
+                        exit_reason=order.strategy,
+                        exit_order_id=order.order_id,
+                        exit_trade_id=trade.trade_id,
+                        paper=True,
+                    )
+        except Exception as e:
+            log.debug("[paper_sim] closed_positions record failed: %s", e)
+        # W18-1 — record the FILLED transition in the OSM audit trail so
+        # the canonical lifecycle terminates with a FILLED snapshot (was
+        # missing per the W17-2 P0-C-01 finding). Best-effort: a state-
+        # machine failure (e.g. the order was already terminal because a
+        # prior cancel race won) is logged and swallowed so a fill never
+        # rolls back. ``filled_size`` is stamped on the snapshot so a
+        # future ``/api/orders/{id}/state`` consumer can see the executed
+        # quantity alongside the state.
+        try:
+            from core.order_state_machine import OrderState, osm
+            osm.transition(
+                order.order_id,
+                OrderState.FILLED,
+                filled_size=fill_size,
+                metadata={"fill_price": fill_price, "pnl": pnl},
+            )
+        except Exception as e:
+            log.debug(
+                "[paper_sim] OSM FILLED transition failed for %s: %s",
+                order.order_id, e,
+            )
 
 
 # Module-level singleton

@@ -392,6 +392,22 @@ async def lifespan(app: FastAPI):
         await store.log_event("📄 Paper trading mode active — no real funds used")
         watchdog.beat("paper_sim")
 
+    # 2b. W18-2 — Live fill acknowledgement loop (P0-C02 fix). When live
+    # trading is enabled, start the background monitor that polls the
+    # CLOB ``/data/trades`` endpoint for fills on our open orders. The
+    # monitor short-circuits in paper mode (no-op), so starting it
+    # unconditionally here is safe — the poll_interval=2.0s default is
+    # the same cadence the paper simulator uses for its own fill loop.
+    # The monitor is the only consumer of ``clob_client.get_trades()``;
+    # without it, live orders stay OPEN in local state indefinitely and
+    # never reach ``store.record_fill`` / ``decision_ledger.record(FILL)``
+    # / ``execution_quality.record_execution``.
+    try:
+        from core.live_fill_monitor import live_fill_monitor
+        await live_fill_monitor.start()
+    except Exception as e:  # pragma: no cover — defensive: must not kill startup
+        log.error("[live_fill_monitor] startup failed: %s", e)
+
     # 3. Seed markets from Gamma API and initialize Vector Store
     _seeded_tokens = await _seed_markets(60)
 
@@ -511,6 +527,13 @@ async def lifespan(app: FastAPI):
     await ws_client.stop()
     if settings.paper_trade:
         await paper_sim.stop()
+    # W18-2 — stop the live fill monitor (P0-C02 fix). Safe to call when
+    # not running (no-op); cancels the polling task if active.
+    try:
+        from core.live_fill_monitor import live_fill_monitor
+        await live_fill_monitor.stop()
+    except Exception as e:  # pragma: no cover — defensive: must not kill shutdown
+        log.error("[live_fill_monitor] shutdown failed: %s", e)
     await gamma_client.close()
 
     # ── W16-7 — close the async SQLite connection pool ─────────────────────
@@ -2358,6 +2381,35 @@ async def place_manual_trade(request: Request, req: ManualTradeRequest):
     except Exception as e:  # noqa: BLE001 — best-effort: never block the trade response
         log.debug("[immutable_audit] trade_executed log failed: %s", e)
     return {"status": "placed", "order": order}
+
+
+# W18-2 — Live fill monitor status endpoint (P0-C02 fix). Surfaces the
+# background monitor's run state (running flag, poll interval, dedup-set
+# size) so an operator can confirm live fill acknowledgement is active.
+# Read-only — no side effects. Unauthenticated routes are NOT exposed;
+# the endpoint inherits the standard bearer-token auth middleware.
+@app.get(
+    "/api/fills/live-status",
+    tags=["trading"],
+    summary="Live fill monitor status",
+    description=(
+        "Returns the run-state of the live fill acknowledgement loop: "
+        "whether it's running, the configured poll interval (seconds), "
+        "and the size of the in-memory seen-trade-id dedup set. Useful "
+        "for confirming that live fills are being acknowledged (the "
+        "monitor is the only consumer of ``clob_client.get_trades()``)."
+    ),
+)
+@limiter.limit(READ_LIMIT)
+async def live_fill_status(request: Request):
+    """Get live fill monitor status."""
+    from core.live_fill_monitor import live_fill_monitor
+
+    return {
+        "running": live_fill_monitor._running,
+        "poll_interval": live_fill_monitor.poll_interval,
+        "seen_trade_ids": len(live_fill_monitor._last_trade_ids),
+    }
 
 
 @app.get(

@@ -378,6 +378,34 @@ class AlertEngine:
         except Exception as e:  # noqa: BLE001 — defensive
             logger.error("[alerting] _store failed: %s", e)
 
+    def fire_alert(self, alert: Alert) -> bool:
+        """Persist + log a one-off alert (NOT driven by an evaluation rule).
+
+        W18-6 (P0-C06) — used by risk gates that need to surface a
+        CRITICAL alert outside the periodic ``evaluate(metrics)`` cycle.
+        The canonical caller is
+        ``risk/manager.py::InstitutionalRiskEngine._check_order_impl``
+        (section 6e): when the MTM risk gate itself fails (broken price
+        feed / broken MTM module / unhandled exception) and FAILS CLOSED,
+        it constructs an ``Alert`` and calls ``fire_alert`` so an operator
+        sees the halt immediately on the dashboard rather than waiting
+        for the next ``evaluate()`` tick to (maybe) catch the side-effect.
+
+        Mirrors the per-rule persistence path used inside ``evaluate``:
+        the alert is stored via ``_store`` (which swallows its own
+        persistence errors so an SQLite hiccup can never break the
+        caller) AND logged at WARNING level so a tail of the bot's log
+        surfaces every fired alert even when the dashboard is down.
+
+        Returns ``True`` to signal the alert was dispatched (the
+        underlying ``_store`` swallows storage errors so this never
+        raises — callers can chain ``fire_alert`` after a critical
+        decision without a try/except wrapper).
+        """
+        self._store(alert)
+        logger.warning("Alert fired: %s — %s", alert.name, alert.message)
+        return True
+
     @timed_query
     def get_recent(
         self, limit: int = 50, unacknowledged_only: bool = False

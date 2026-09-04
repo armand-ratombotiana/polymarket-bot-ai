@@ -191,6 +191,18 @@ class MarketMLModel:
         # even before the first training cycle.
         self.calibration_metrics: dict = {"is_fit": False}
 
+        # W18-8: walk-forward cross-validation results — populated by
+        # ``fit_initial()`` after the ensemble is trained. The CV
+        # re-trains a fresh sklearn-style classifier on expanding
+        # windows of the training set and reports per-fold + pooled
+        # out-of-sample metrics (mean/std Brier + AUC). Stored on the
+        # model so ``/api/ml/metrics`` can surface it alongside the
+        # in-sample calibration metrics above. Initialised to
+        # ``{"ran": False}`` so the metrics payload always has a CV
+        # sub-document even before the first training cycle (or when
+        # the training set was too small for a single fold).
+        self.cv_results: dict = {"ran": False}
+
         # Per-model rolling Brier score tracking — deque for O(1) append/pop
         self._BRIER_WINDOW = 200
         self._rf_brier_window: deque[float] = deque(maxlen=self._BRIER_WINDOW)
@@ -396,6 +408,101 @@ class MarketMLModel:
 
         # Register in Model Registry
         version_str = f"v1.{int(time.time()) % 1000:03d}.0"
+
+        # ── W18-8 — Walk-forward cross-validation on the FULL training set ────
+        # ``ml.validation.time_series_cv`` does an expanding-window walk-forward
+        # split (train on [0:t_k], validate on [t_k:t_k+val_size]) on a FRESH
+        # sklearn classifier clone per fold — so the production ensemble is
+        # never retrained, no fold's fitted state leaks into another fold's
+        # evaluation, and no future information ever enters a training set.
+        #
+        # The CV model is a ``RandomForestClassifier`` (the production
+        # ensemble's primary base learner). ``time_series_cv`` calls
+        # ``sklearn.base.clone(model)`` internally to get a fresh unfitted copy
+        # for each fold — the caller passes one fresh instance and the function
+        # clones it per fold.
+        #
+        # The CV results (``mean_auc`` / ``std_auc`` / ``n_splits_evaluated``)
+        # are surfaced three places:
+        #   1. ``self.cv_results`` — so ``/api/ml/metrics`` can show them.
+        #   2. The ``parameters`` dict passed to
+        #      ``model_registry.register_version`` — so the registry's
+        #      lineage carries the CV headline metric per version.
+        #   3. The info log line below — so the operator sees the CV
+        #      headline immediately after a retrain.
+        #
+        # The whole block is wrapped in ``try/except`` so a CV failure (e.g.
+        # training set too small for even one walk-forward fold — needs ≥
+        # ``min_train_size + 1`` samples) cannot break the production
+        # ``fit_initial`` path. On failure, ``self.cv_results`` is left at
+        # ``{"ran": False, "error": str(e)}`` and the parameters dict is
+        # populated with explicit ``None`` placeholders so the schema is
+        # stable for downstream consumers.
+        cv_auc_mean: float | None = None
+        cv_auc_std: float | None = None
+        cv_n_splits: int = 0
+        cv_min_train_size: int = 0
+        try:
+            from ml.validation import time_series_cv as _time_series_cv
+
+            # Adapt ``min_train_size`` to the actual data size so a 100-row
+            # test fixture still produces at least one fold (the function
+            # needs ``n ≥ min_train_size + 1``). Production (n ≥ 3000)
+            # uses the canonical default of 200.
+            _cv_min_train = min(200, max(1, len(X) // 5))
+            cv_model = RandomForestClassifier(
+                n_estimators=60,
+                max_depth=8,
+                min_samples_leaf=5,
+                random_state=SEED,
+                n_jobs=-1,
+            )
+            cv_out = _time_series_cv(
+                model=cv_model,
+                X=X,
+                y=y,
+                n_splits=5,
+                min_train_size=_cv_min_train,
+            )
+            agg = cv_out.get("aggregate", {}) or {}
+            cv_auc_mean = agg.get("mean_auc")
+            cv_auc_std = agg.get("std_auc")
+            cv_n_splits = int(cv_out.get("n_splits_evaluated", 0))
+            cv_min_train_size = int(cv_out.get("min_train_size", 0))
+            self.cv_results = {
+                "ran": True,
+                "method": cv_out.get("method"),
+                "n_splits_requested": cv_out.get("n_splits_requested"),
+                "n_splits_evaluated": cv_n_splits,
+                "min_train_size": cv_min_train_size,
+                "val_size": cv_out.get("val_size"),
+                "mean_auc": cv_auc_mean,
+                "std_auc": cv_auc_std,
+                "mean_brier": agg.get("mean_brier"),
+                "std_brier": agg.get("std_brier"),
+                "pooled_auc": (agg.get("pooled", {}) or {}).get("auc"),
+                "pooled_brier": (agg.get("pooled", {}) or {}).get("brier"),
+            }
+            log.info(
+                "[ml_model] Walk-forward CV: n_splits=%d (of %d requested), "
+                "mean_AUC=%s ± %s, mean_Brier=%s (pooled AUC=%s, Brier=%s)",
+                cv_n_splits,
+                cv_out.get("n_splits_requested", 0),
+                cv_auc_mean,
+                cv_auc_std,
+                agg.get("mean_brier"),
+                self.cv_results.get("pooled_auc"),
+                self.cv_results.get("pooled_brier"),
+            )
+        except Exception as e:
+            # CV is a *diagnostic* layer — failure to run it MUST NOT break
+            # the production training path. The model is fully trained and
+            # calibrated at this point; the only thing missing is the CV
+            # headline metric. The ``parameters`` dict below carries explicit
+            # ``None`` placeholders so the registry schema is stable.
+            self.cv_results = {"ran": False, "error": str(e)}
+            log.warning("[ml_model] Walk-forward CV failed: %s", e)
+
         model_registry.register_version(
             version=version_str,
             brier_score=self.brier_score,
@@ -409,6 +516,15 @@ class MarketMLModel:
                 "features": N_FEATURES,
                 "calibration": "isotonic",
                 "lgbm": self.lgbm is not None,
+                # W18-8 — Walk-forward CV headline metrics (``None`` when CV
+                # could not run — e.g. training set too small for a single
+                # fold). Surfacing the headline metric per-version in the
+                # registry lineage lets the operator spot a CV degradation
+                # before the next champion/challenger promotion cycle.
+                "cv_auc_mean": cv_auc_mean,
+                "cv_auc_std": cv_auc_std,
+                "cv_n_splits": cv_n_splits,
+                "cv_min_train_size": cv_min_train_size,
             },
         )
 

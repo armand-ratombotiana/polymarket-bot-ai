@@ -6,6 +6,27 @@ Provides:
   - Dynamic trailing stop adjustments based on peak contract valuation
   - Max slippage protection thresholds
   - Integration with durable audit logging
+
+W18-5 — P0-C05 fix
+-------------------
+TP/SL exits now route through :mod:`core.execution_interface`, which
+branches on ``settings.paper_trade``:
+
+  * Paper mode: delegates to ``paper_sim.create_order`` (unchanged
+    behaviour — simulator builds the local Order, runs the slippage model
+    in its 1 s fill loop, records the ORDER stage in the decision ledger).
+  * Live mode: delegates to ``clob_client.create_order`` (signs + POSTs
+    a real EIP-712 limit order to the Polymarket CLOB). The local
+    ``Order`` is added to ``store.open_orders`` so the
+    ``active_exit_order_id`` tracker can cancel it on the next trigger
+    evaluation. Submission failures are caught inside the execution
+    interface and surfaced as ``None`` so the position manager's
+    surrounding ``try/except`` can decide whether to retry on the next
+    loop tick.
+
+Prior to W18-5, ``evaluate_positions`` unconditionally called
+``paper_sim.create_order`` for exits regardless of
+``settings.paper_trade``, so live TP/SL exits never reached the exchange.
 """
 from __future__ import annotations
 
@@ -15,6 +36,7 @@ import time
 
 from core.audit_logger import audit_logger
 from core.data_store import store
+from core.execution_interface import cancel_exit_order, submit_exit_order
 
 log = logging.getLogger(__name__)
 
@@ -80,38 +102,40 @@ class PositionManager:
                     token_id=pos.token_id,
                     slug=store.market_slugs.get(pos.token_id),
                     pnl=pos.realised_pnl,
-                    strategy="position_manager",
+                    strategy="position_manager_tp",
                 )
-                from core.data_store import Order, Side
-                from paper.simulator import paper_sim
-                # R1: Cancel prior stale exit order before placing a new one
+                # W18-5 — R1: Cancel prior stale exit order before placing a new
+                # one. The cancel is routed through the execution interface so
+                # the right venue (paper_sim or clob_client) is consulted.
                 if managed.active_exit_order_id:
                     try:
-                        await paper_sim.cancel_order(managed.active_exit_order_id)
+                        await cancel_exit_order(managed.active_exit_order_id)
                         log.debug("[position_manager] Cancelled prior exit order %s for %s",
                                   managed.active_exit_order_id, pos.token_id[:12])
                     except Exception as cancel_err:
                         log.debug("[position_manager] Prior exit cancel failed (%s) — continuing", cancel_err)
-                exit_order = Order(
-                    token_id=pos.token_id,
-                    side=Side.SELL,
-                    price=book.best_bid,  # R1: MARKETABLE — sell into current bid for immediate fill (was round(mid,3) which never crossed)
-                    size=pos.yes_shares,
-                    strategy="position_manager_tp",
-                )
-                # V3 — Risk gate: exit orders must clear the same institutional
-                # risk constraints as entries. Previously exits bypassed
-                # risk_manager.check_order entirely, letting TP/SL closes slip
-                # past circuit breakers (kill switch, daily loss stop, max
-                # drawdown, observation-only mode, weekly loss stop). The gate
-                # is best-effort: a rejection (or any unexpected exception) is
-                # logged + audited and the exit order is skipped for this
-                # evaluation cycle (will be retried on the next loop tick if
-                # the trigger still holds).
-                strat = exit_order.strategy
+                # W18-5 — Build the exit payload. ``best_bid`` (not ``mid``)
+                # makes the order MARKETABLE so it crosses the spread and fills
+                # immediately. The ``submit_exit_order`` helper routes to
+                # paper_sim in paper mode and clob_client in live mode based
+                # on ``settings.paper_trade``.
+                strat = "position_manager_tp"
                 try:
                     from risk.manager import risk_manager
-                    allowed, reason = await risk_manager.check_order(exit_order)
+                    from core.data_store import Order, Side
+                    # Pre-check Order for the risk gate. ``order_id`` is a
+                    # placeholder — the execution interface assigns the real id
+                    # (paper-<uuid> in paper mode, the CLOB orderID in live
+                    # mode) and returns it via the resulting ``Order``.
+                    pre_check_order = Order(
+                        order_id="position-manager-tp-precheck",
+                        token_id=pos.token_id,
+                        side=Side.SELL,
+                        price=book.best_bid,
+                        size=pos.yes_shares,
+                        strategy=strat,
+                    )
+                    allowed, reason = await risk_manager.check_order(pre_check_order)
                     if not allowed:
                         log.warning(
                             "[position_manager] 🚫 TP exit order for %s rejected by risk gate: %s",
@@ -127,17 +151,24 @@ class PositionManager:
                             strategy=strat,
                         )
                         continue
-                    # Signature supports strategy + decision_id kwargs (paper/
-                    # simulator.py:create_order). Passing them preserves
-                    # strategy attribution and decision-ledger linkage on the
-                    # resulting paper Order (which the simulator constructs
-                    # internally and would otherwise default to "").
-                    await paper_sim.create_order(
-                        exit_order,
+                    # Submit through the unified execution interface. Returns
+                    # the local ``Order`` (paper or live) on success, ``None``
+                    # on live failure. Paper-mode never returns None.
+                    submitted = await submit_exit_order(
+                        token_id=pos.token_id,
+                        side=Side.SELL,
+                        price=book.best_bid,
+                        size=pos.yes_shares,
                         strategy=strat,
-                        decision_id=exit_order.decision_id,
+                        decision_id=pre_check_order.decision_id,
                     )
-                    managed.active_exit_order_id = exit_order.order_id
+                    if submitted is not None:
+                        managed.active_exit_order_id = submitted.order_id
+                    else:
+                        log.warning(
+                            "[position_manager] TP exit submission returned None for %s — will retry next tick",
+                            pos.token_id[:12],
+                        )
                 except Exception as exit_err:
                     log.warning(
                         "[position_manager] TP exit submission failed for %s: %s",
@@ -156,36 +187,34 @@ class PositionManager:
                     pnl=pos.realised_pnl,
                     strategy="position_manager_sl",
                 )
-                from core.data_store import Order, Side
-                from paper.simulator import paper_sim
-                # R1: Cancel prior stale exit order before placing a new one
+                # W18-5 — R1: Cancel prior stale exit order before placing a new
+                # one. The cancel is routed through the execution interface so
+                # the right venue (paper_sim or clob_client) is consulted.
                 if managed.active_exit_order_id:
                     try:
-                        await paper_sim.cancel_order(managed.active_exit_order_id)
+                        await cancel_exit_order(managed.active_exit_order_id)
                         log.debug("[position_manager] Cancelled prior exit order %s for %s",
                                   managed.active_exit_order_id, pos.token_id[:12])
                     except Exception as cancel_err:
                         log.debug("[position_manager] Prior exit cancel failed (%s) — continuing", cancel_err)
-                exit_order = Order(
-                    token_id=pos.token_id,
-                    side=Side.SELL,
-                    price=book.best_bid,  # R1: MARKETABLE — sell into current bid for immediate fill (was round(mid,3) which never crossed)
-                    size=pos.yes_shares,
-                    strategy="position_manager_sl",
-                )
-                # V3 — Risk gate: exit orders must clear the same institutional
-                # risk constraints as entries. Previously exits bypassed
-                # risk_manager.check_order entirely, letting TP/SL closes slip
-                # past circuit breakers (kill switch, daily loss stop, max
-                # drawdown, observation-only mode, weekly loss stop). The gate
-                # is best-effort: a rejection (or any unexpected exception) is
-                # logged + audited and the exit order is skipped for this
-                # evaluation cycle (will be retried on the next loop tick if
-                # the trigger still holds).
-                strat = exit_order.strategy
+                # W18-5 — Build the exit payload. ``best_bid`` (not ``mid``)
+                # makes the order MARKETABLE so it crosses the spread and fills
+                # immediately. The ``submit_exit_order`` helper routes to
+                # paper_sim in paper mode and clob_client in live mode based
+                # on ``settings.paper_trade``.
+                strat = "position_manager_sl"
                 try:
                     from risk.manager import risk_manager
-                    allowed, reason = await risk_manager.check_order(exit_order)
+                    from core.data_store import Order, Side
+                    pre_check_order = Order(
+                        order_id="position-manager-sl-precheck",
+                        token_id=pos.token_id,
+                        side=Side.SELL,
+                        price=book.best_bid,
+                        size=pos.yes_shares,
+                        strategy=strat,
+                    )
+                    allowed, reason = await risk_manager.check_order(pre_check_order)
                     if not allowed:
                         log.warning(
                             "[position_manager] 🚫 SL exit order for %s rejected by risk gate: %s",
@@ -201,17 +230,21 @@ class PositionManager:
                             strategy=strat,
                         )
                         continue
-                    # Signature supports strategy + decision_id kwargs (paper/
-                    # simulator.py:create_order). Passing them preserves
-                    # strategy attribution and decision-ledger linkage on the
-                    # resulting paper Order (which the simulator constructs
-                    # internally and would otherwise default to "").
-                    await paper_sim.create_order(
-                        exit_order,
+                    submitted = await submit_exit_order(
+                        token_id=pos.token_id,
+                        side=Side.SELL,
+                        price=book.best_bid,
+                        size=pos.yes_shares,
                         strategy=strat,
-                        decision_id=exit_order.decision_id,
+                        decision_id=pre_check_order.decision_id,
                     )
-                    managed.active_exit_order_id = exit_order.order_id
+                    if submitted is not None:
+                        managed.active_exit_order_id = submitted.order_id
+                    else:
+                        log.warning(
+                            "[position_manager] SL exit submission returned None for %s — will retry next tick",
+                            pos.token_id[:12],
+                        )
                 except Exception as exit_err:
                     log.warning(
                         "[position_manager] SL exit submission failed for %s: %s",

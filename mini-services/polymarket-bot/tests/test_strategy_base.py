@@ -220,9 +220,19 @@ async def test_submit_order_passes_through_risk_gate_when_approved(monkeypatch):
     assert provisional.decision_id == "dec-1"
 
     # (b) Paper sim was awaited exactly once with the correct payload.
-    mock_paper.create_order.assert_awaited_once_with(
-        args, strategy=strat.name, decision_id="dec-1",
-    )
+    # W18-1 — submit_order now passes a pre-minted ``order_id`` so the
+    # OSM audit trail and the in-memory ``Order`` share one identity;
+    # ``assert_awaited_once_with`` would require us to predict the uuid,
+    # so we just check the call was made with the right args / strategy /
+    # decision_id (the order_id kwarg is checked separately for shape).
+    mock_paper.create_order.assert_awaited_once()
+    call_args, call_kwargs = mock_paper.create_order.await_args
+    assert call_args == (args,)
+    assert call_kwargs.get("strategy") == strat.name
+    assert call_kwargs.get("decision_id") == "dec-1"
+    # The pre-minted order_id is a non-empty string with the paper- prefix
+    # so the OSM audit trail and the in-memory Order share one identity.
+    assert call_kwargs.get("order_id", "").startswith("paper-")
 
     # (c) The returned Order is the sentinel (no synthesis at the
     #     strategy layer in paper mode).
@@ -289,9 +299,12 @@ async def test_submit_order_creates_paper_order_in_paper_mode(monkeypatch):
     # Build the Order the real PaperSimulator.create_order would have
     # produced: identity fields mirror ``args``, attributed to the
     # caller's strategy + decision_id, paper=True.
-    def _create_order(args, strategy="", decision_id=""):
+    # W18-1 — accepts the optional ``order_id`` kwarg that
+    # ``BaseStrategy.submit_order`` now passes so the OSM audit trail and
+    # the in-memory ``Order`` share one identity.
+    def _create_order(args, strategy="", decision_id="", order_id=None):
         return Order(
-            order_id="paper-mock-1234",
+            order_id=order_id or "paper-mock-1234",
             token_id=args.token_id,
             side=args.side,
             price=args.price,
@@ -310,10 +323,15 @@ async def test_submit_order_creates_paper_order_in_paper_mode(monkeypatch):
 
     # (a) paper_sim.create_order was awaited exactly once with the
     #     originating OrderArgs (identity check — same instance) and
-    #     the strategy / decision_id propagated verbatim.
-    mock_paper.create_order.assert_awaited_once_with(
-        args, strategy=strat.name, decision_id="dec-paper-3",
-    )
+    #     the strategy / decision_id propagated verbatim. W18-1 also
+    #     passes a pre-minted ``order_id`` (paper-{uuid}) — checked for
+    #     shape rather than value because the uuid is non-deterministic.
+    mock_paper.create_order.assert_awaited_once()
+    call_args, call_kwargs = mock_paper.create_order.await_args
+    assert call_args == (args,)
+    assert call_kwargs.get("strategy") == strat.name
+    assert call_kwargs.get("decision_id") == "dec-paper-3"
+    assert call_kwargs.get("order_id", "").startswith("paper-")
 
     # (b) Returned Order is paper=True, carries the right identity
     #     fields, and is attributed to this strategy + decision_id.

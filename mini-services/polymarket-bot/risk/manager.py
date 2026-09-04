@@ -301,18 +301,103 @@ class InstitutionalRiskEngine:
             # A profitable position can therefore silently widen true risk past
             # the $25 ceiling simply because its mark has appreciated. This gate
             # re-checks the same $25 cap on a mark-to-market basis so unrealized
-            # gains cannot outflank the cap. Best-effort: if
-            # `core.portfolio.compute_mark_to_market_exposure` is unavailable or
-            # raises, the gate is skipped (fail-open) — section 5 still enforces
-            # the cost-basis $25 cap, so coverage never regresses below baseline.
+            # gains cannot outflank the cap.
+            #
+            # P0-C06 (W18-6) — FAIL CLOSED. The previous implementation wrapped
+            # the MTM call in `try: ... except: pass`, silently failing OPEN
+            # (allowing every order through whenever the MTM computation
+            # raised). That meant a broken price feed, a broken MTM module, or
+            # even a simple type error would let orders pass with NO mark-to-
+            # market supervision — the exact opposite of the gate's purpose.
+            # Worse: the legacy import path
+            # (`from core.portfolio import compute_mark_to_market_exposure`)
+            # never resolved (the function lives in
+            # `core.portfolio_mark_to_market`), so every call raised
+            # ImportError, was swallowed by the bare except, and the MTM gate
+            # was effectively a no-op for every order since the gate was added.
+            # On top of that, the function is SYNC but the call site
+            # `await`-ed it — TypeError on the await was also swallowed by
+            # the bare except.
+            #
+            # The gate now:
+            #   * imports from the canonical module path;
+            #   * calls the (sync) function WITHOUT await;
+            #   * on ANY exception, logs at ERROR, fires a CRITICAL alert,
+            #     increments a Prometheus counter, and returns False — every
+            #     order is blocked until the price feed / MTM module is
+            #     repaired.
+            # Operators MUST treat an MTM gate failure as a hard trading halt,
+            # not a degraded mode — the W17-8 P0-C06 assessment explicitly
+            # classified silent fail-open as a P0 risk.
             try:
-                from core.portfolio import compute_mark_to_market_exposure
-                mtm = await compute_mark_to_market_exposure()
-                mtm_total = mtm.get('total_exposure_mark', 0.0)
+                from core.portfolio_mark_to_market import compute_mark_to_market_exposure
+                mtm = compute_mark_to_market_exposure()  # SYNC — do NOT await
+                mtm_total = to_dec(float(mtm.get('total_exposure_mark', 0.0)))
                 if mtm_total + order_cost > Decimal('25.0'):
-                    return False, f'Mark-to-market exposure ${mtm_total:.2f} + order ${order_cost:.2f} exceeds $25.00 cap'
-            except:
-                pass
+                    return False, (
+                        f'Mark-to-market exposure ${float(mtm_total):.2f} '
+                        f'+ order ${float(order_cost):.2f} exceeds $25.00 cap'
+                    )
+            except Exception as mtm_err:
+                # ── FAIL CLOSED — block every order until the price feed is repaired.
+                log.error(
+                    "[risk_manager] MTM gate FAILED CLOSED: %r — blocking ALL "
+                    "trades. RECOMMENDATION: check order_books / price feeds, "
+                    "the MTM module (core.portfolio_mark_to_market), and "
+                    "position integrity before resuming trading.",
+                    mtm_err, exc_info=True,
+                )
+                await store.log_event(
+                    f"🛑 MTM gate FAILED CLOSED: {mtm_err!r} — all trades "
+                    f"blocked; check price feeds (order_books) and "
+                    f"core.portfolio_mark_to_market"
+                )
+                # Prometheus metric (best-effort).
+                try:
+                    from core.prometheus_metrics import mtm_gate_failures_total
+                    mtm_gate_failures_total.inc()
+                except Exception:
+                    log.debug(
+                        "[risk_manager] prometheus_metrics unavailable while "
+                        "recording MTM gate failure",
+                        exc_info=True,
+                    )
+                # CRITICAL alert (best-effort).
+                try:
+                    import time as _time
+                    from core.alerting import (
+                        Alert,
+                        SEVERITY_CRITICAL,
+                        alert_engine,
+                    )
+                    alert = Alert(
+                        alert_id=f"mtm_gate_fail_closed_{int(_time.time() * 1000)}",
+                        timestamp=_time.time(),
+                        category="risk",
+                        name="mtm_gate_fail_closed",
+                        severity=SEVERITY_CRITICAL,
+                        message=(
+                            f"MTM risk gate failed closed: {mtm_err!r}. All "
+                            f"trading halted until the price feed / MTM module "
+                            f"is repaired. Check core.portfolio_mark_to_market "
+                            f"and store.order_books for missing mid quotes."
+                        ),
+                        value=None,
+                        threshold=None,
+                        metadata={"exception": repr(mtm_err)},
+                    )
+                    alert_engine.fire_alert(alert)
+                except Exception:
+                    log.debug(
+                        "[risk_manager] alerting unavailable while firing MTM "
+                        "fail-closed alert",
+                        exc_info=True,
+                    )
+                return False, (
+                    f"MTM risk gate failed closed ({mtm_err!r}) — all trades "
+                    f"blocked; check price feeds and the MTM module before "
+                    f"resuming"
+                )
 
             # 7. Max Open Positions Count (8) — only active positions count
             if order.side == Side.BUY:
