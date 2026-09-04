@@ -125,6 +125,7 @@ from core.profiling import profiler
 from core.rate_limit_tracker import rate_limit_tracker
 from core.security import validate_token_strength
 from core.settlement import settlement_engine
+from core.strategy_health import strategy_health_monitor
 from core.watchdog import watchdog
 from core.ws_broadcast import ws_manager
 from core.ws_client import ws_client
@@ -295,6 +296,31 @@ async def _state_persistence_loop() -> None:
             log.debug("Persistence loop error: %s", e)
 
 
+async def _recovery_checkpoint_loop() -> None:
+    """Periodic state-recovery checkpoint loop (W24-1).
+
+    Awaits ``state_recovery.checkpoint()`` every 30 s so the on-disk
+    ``recovery_state.json`` reflects the live ``store`` state (open
+    positions, open orders, paper balance) + the durable kill-switch file
+    marker + the SQLite-backed feature-flag cache. The next restart's
+    ``recover()`` call reads this file to produce the ``RecoveryReport``.
+
+    Mirrors ``_state_persistence_loop`` (which writes ``store_state.json``
+    via ``store.save_to_disk()``) — distinct because the recovery snapshot
+    captures open orders + flags, neither of which the ``data_store``
+    schema persists. Errors are logged at debug level so a transient
+    checkpoint failure never spams the operator log (the prior checkpoint
+    is still on disk and the next tick will retry).
+    """
+    from core.state_recovery import state_recovery
+    while True:
+        await asyncio.sleep(30)
+        try:
+            await state_recovery.checkpoint()
+        except Exception as e:  # noqa: BLE001 — checkpoint must never break the loop
+            log.debug("[recovery-checkpoint] loop error: %s", e)
+
+
 # ── Lifespan Manager ──────────────────────────────────────────────────────────
 
 @asynccontextmanager
@@ -393,6 +419,39 @@ async def lifespan(app: FastAPI):
         )
     except Exception as e:  # pragma: no cover - audit failures must not kill startup
         log.error("Failed to write mode audit event: %s", e)
+
+    # ── W24-1 — State recovery ─────────────────────────────────────────────
+    # Load the last recovery checkpoint (if any), classify open orders as
+    # stale-vs-terminal, and produce a ``RecoveryReport`` summarising what
+    # was restored. Runs AFTER the SQLite migrations (so ``feature_flags.db``
+    # exists) but BEFORE the main subsystems start mutating state — the
+    # report must reflect the pre-boot snapshot, not the post-startup state.
+    #
+    # Best-effort: a corrupt / missing checkpoint file yields a report with
+    # ``errors=[...]`` populated but does NOT raise — the bot must always be
+    # able to boot, mirroring the fail-soft contract of every other singleton
+    # in the codebase.
+    from core.state_recovery import state_recovery
+    try:
+        _recovery_report = await state_recovery.recover()
+        log.info(
+            "[lifespan] State recovery: positions=%d, orders=%d, stale=%d, "
+            "kill_switch=%s, flags=%d, recovery_time=%.3fs",
+            _recovery_report.recovered_positions,
+            _recovery_report.recovered_orders,
+            _recovery_report.stale_orders,
+            _recovery_report.kill_switch_active,
+            _recovery_report.flags_restored,
+            _recovery_report.recovery_time,
+        )
+        await store.log_event(
+            f"🔁 State recovery: {_recovery_report.recovered_positions} positions, "
+            f"{_recovery_report.recovered_orders} orders "
+            f"({_recovery_report.stale_orders} stale), kill_switch="
+            f"{_recovery_report.kill_switch_active}"
+        )
+    except Exception as e:  # pragma: no cover — defensive: recovery must not kill startup
+        log.error("[lifespan] State recovery failed: %s", e)
 
     # ── Start TimescaleDB / PostgreSQL time-series pool
     from core.timescale_db import timescale_db
@@ -581,6 +640,21 @@ async def lifespan(app: FastAPI):
     token_sync_task = asyncio.create_task(_token_sync_loop(), name="token-sync")
     persist_task = asyncio.create_task(_state_persistence_loop(), name="state-persist")
 
+    # W24-1 — periodic state-recovery checkpoint (every 30 s). Snapshots
+    # the live ``store`` state (open positions + open orders + paper balance)
+    # alongside the durable kill-switch file marker and the SQLite-backed
+    # feature-flag cache so the next restart's ``recover()`` can rebuild an
+    # accurate "what was open at shutdown?" picture. Distinct from
+    # ``_state_persistence_loop`` (which writes ``store_state.json`` via
+    # ``store.save_to_disk()``) — this task writes a SEPARATE
+    # ``recovery_state.json`` that additionally captures open orders (the
+    # ``data_store`` schema doesn't persist them) so a restart can detect
+    # "the bot had an open BUY order at shutdown — did it fill during the
+    # downtime?" before re-submitting with the same idempotency key.
+    recovery_checkpoint_task = asyncio.create_task(
+        _recovery_checkpoint_loop(), name="recovery-checkpoint"
+    )
+
     # 9. Reconciliation job (P0-DAT-03): initial pass at startup + daily artifact
     from core.reconciliation import run_reconciliation
     try:
@@ -603,7 +677,20 @@ async def lifespan(app: FastAPI):
     token_sync_task.cancel()
     persist_task.cancel()
     recon_task.cancel()
+    recovery_checkpoint_task.cancel()
     store.save_to_disk()
+
+    # W24-1 — final state-recovery checkpoint so the next restart sees the
+    # exact pre-shutdown state (not up to 30 s stale). Awaited AFTER
+    # ``store.save_to_disk()`` so the recovery snapshot's positions /
+    # paper_balance reflect the same final values the data_store just
+    # persisted. Best-effort: a checkpoint failure is logged but does NOT
+    # block shutdown (the prior periodic checkpoint is still on disk).
+    try:
+        from core.state_recovery import state_recovery as _state_recovery_singleton
+        await _state_recovery_singleton.checkpoint()
+    except Exception as e:  # pragma: no cover — defensive: must not kill shutdown
+        log.error("[lifespan] Final recovery checkpoint failed: %s", e)
 
     await training_orchestrator.stop()
     from core.label_backfill import label_backfill_engine
@@ -1047,6 +1134,11 @@ version mismatch first.
         {"name": "live", "description": "Live-trading readiness gate and enable control"},
         {"name": "retention", "description": "Data retention policy enforcement"},
         {"name": "monitoring", "description": "Prometheus /metrics endpoint + Grafana dashboard"},
+        # W24-5 — honest performance reporting. Each category
+        # (backtest / walk-forward / paper / live) is reported
+        # SEPARATELY with its own confidence intervals + significance
+        # assessment; metrics are NEVER combined across categories.
+        {"name": "analytics", "description": "Honest performance reporting (backtest / walk-forward / paper / live, separated)"},
     ],
     docs_url="/docs",
     redoc_url="/redoc",
@@ -2023,6 +2115,54 @@ async def toggle_strategy(req: StrategyToggleRequest):
         # W23-5 — same invalidation as the start branch above.
         analytics_cache.invalidate("strategies_performance")
         return {"status": "stopped" if ok else "not_running", "strategy": strat_id}
+
+
+# ── Strategy Health Endpoints (W24-8) ────────────────────────────────────────
+# W24-8 — surfaces the in-memory strategy health snapshot held by
+# ``core.strategy_health.strategy_health_monitor``. The monitor's
+# ``check_strategy`` method is invoked periodically (every 5 min per the
+# spec) by an external scheduler; these two GET endpoints are read-only
+# views into the monitor's ``_health`` dict so the dashboard can render
+# the strategy health table + summary KPI strip.
+
+
+@app.get(
+    "/api/strategies/health",
+    tags=["strategies"],
+    summary="Per-strategy health status",
+    description=(
+        "W24-8 — Out-of-sample / risk-limit failure auto-disable. "
+        "Returns the health snapshot for every strategy the monitor "
+        "has evaluated: win rate, expectancy, max drawdown, error "
+        "count, last trade time, last check time, and (if disabled) "
+        "the disable reason + timestamp. Status is one of "
+        "``healthy`` / ``degraded`` / ``disabled`` / ``inactive``. "
+        "Strategies the monitor has NOT yet evaluated are absent "
+        "from the list — call ``check_strategy`` from the periodic "
+        "sweep first (or GET the catalog to see every registered "
+        "strategy id)."
+    ),
+)
+async def get_strategy_health():
+    """Get health status of every strategy the monitor has evaluated."""
+    return strategy_health_monitor.get_all_health()
+
+
+@app.get(
+    "/api/strategies/health/summary",
+    tags=["strategies"],
+    summary="Strategy health summary (counts by status)",
+    description=(
+        "W24-8 — Aggregated health counts (healthy / degraded / "
+        "disabled / inactive) so the dashboard's headline KPI strip "
+        "can render \"X healthy, Y degraded, Z disabled\" without "
+        "walking the full per-strategy list returned by "
+        "``GET /api/strategies/health``."
+    ),
+)
+async def get_strategy_health_summary():
+    """Get strategy health summary (counts by status)."""
+    return strategy_health_monitor.get_summary()
 
 
 # ── AI Copilot & Semantic Vector Search ───────────────────────────────────────
@@ -5691,6 +5831,81 @@ async def profiling_reset(
     return {"ok": True}
 
 
+# ── W24-6 — Unified deduplication registry endpoints ─────────────────────────
+# Surfaces ``core.dedup.dedup_registry`` so an operator can inspect per-
+# entity-type dedup counters (orders / fills / decisions / alerts / audits
+# / snapshots) and clear them without a restart. Mirrors the cache + rate-
+# limit + profiling panels already exposed under ``/api/system/*`` — the
+# dashboard's "Dedup" panel (sidebar → System → Dedup) consumes
+# ``GET /api/dedup/stats`` to render the per-type counters and the
+# ``POST /api/dedup/clear`` route to wipe them.
+#
+# Auth enforced by ``enforce_api_auth`` (neither path is in
+# ``PUBLIC_PATHS``); the GET is rate-limited by ``READ_LIMIT`` so a
+# dashboard polling every 30 s can't starve the trading path; the POST is
+# rate-limited by ``WRITE_LIMIT`` because it mutates state.
+@app.get(
+    "/api/dedup/stats",
+    tags=["system"],
+    summary="Per-entity-type dedup statistics",
+    description=(
+        "Return per-entity-type counters (total_seen / duplicates_blocked "
+        "/ unique_passed / duplicate_rate) for every entity_type the "
+        "dedup registry has seen since process start. Used by the "
+        "dashboard's 'Dedup' panel (sidebar → System → Dedup) and by "
+        "operators tailing the registry mid-incident. All state is "
+        "in-memory and process-local — a restart zeroes the counters."
+    ),
+)
+@limiter.limit(READ_LIMIT)
+async def dedup_stats(
+    request: Request,  # noqa: ARG001 — slowapi requires the `request` arg
+    entity_type: str | None = Query(
+        None,
+        description=(
+            "Optional entity_type filter (e.g. 'order', 'fill', "
+            "'decision', 'alert'). When omitted, returns a dict keyed "
+            "by entity_type."
+        ),
+    ),
+):
+    """Return per-entity-type dedup statistics."""
+    from core.dedup import dedup_registry
+    return dedup_registry.get_stats(entity_type)
+
+
+@app.post(
+    "/api/dedup/clear",
+    tags=["system"],
+    summary="Clear the dedup registry",
+    description=(
+        "Drop every entry (and reset every counter) in the dedup "
+        "registry, or just one entity_type when the optional "
+        "``entity_type`` query param is supplied. Used by operators to "
+        "force the next order / fill / decision / alert to bypass the "
+        "dedup gate during debugging."
+    ),
+)
+@limiter.limit(WRITE_LIMIT)
+async def dedup_clear(
+    request: Request,  # noqa: ARG001 — slowapi requires the `request` arg
+    entity_type: str | None = Query(
+        None,
+        description=(
+            "Optional entity_type to clear (e.g. 'order'). When "
+            "omitted, clears every entity_type."
+        ),
+    ),
+):
+    """Clear the dedup registry (all types, or one when filtered)."""
+    from core.dedup import dedup_registry
+    dedup_registry.clear(entity_type)
+    return {
+        "ok": True,
+        "cleared": entity_type or "all",
+    }
+
+
 # ── W15-8 — Advanced execution planner endpoint ──────────────────────────────
 # Surfaces ``execution.advanced_router.AdvancedOrderRouter`` to the dashboard
 # so an operator can preview an execution schedule (TWAP / VWAP / iceberg /
@@ -6728,3 +6943,326 @@ async def latency_recent(
 ):
     """Get the most-recent latency records."""
     return latency_tracker.get_recent(limit)
+
+
+# ── W24-4 — Data ingestion validator stats endpoint ──────────────────────────
+# Additive: appends one read-only endpoint under ``/api/data-validator/stats``
+# so an operator (or a future ``DataValidatorPanel`` React component) can
+# surface the live dedup / valid / invalid counts without a DB round-trip.
+# Sibling to the W20-6 ``/api/data-quality`` endpoint — same singleton
+# pattern, same in-memory + process-local contract (a restart zeroes the
+# data, which is fine for an "operator dashboard" operational view).
+#
+# Auth enforced by ``enforce_api_auth`` (path not in ``PUBLIC_PATHS``).
+# Rate-limited by ``READ_LIMIT`` so a dashboard polling every few seconds
+# can't starve the trading path.
+#
+# The data is fed by the two validation call sites added in W24-4:
+#
+#   * ``core.book_poller.py::_apply_book``  → validate_snapshot
+#   * ``core/trade_ingester.py::_ingest_trades`` → validate_trade
+@app.get(
+    "/api/data-validator/stats",
+    tags=["system"],
+    summary="Data ingestion validator runtime stats",
+    description=(
+        "Returns the live state of the data ingestion validator (W24-4): "
+        "cumulative counts of valid / invalid / duplicate records, and "
+        "the current size of the in-memory dedup deques (snapshots by "
+        "hash, trades by trade_id). Used by the operator dashboard to "
+        "verify the ingestion gate is firing and to spot a sudden spike "
+        "in duplicates / invalid records that would indicate an upstream "
+        "regression."
+    ),
+)
+@limiter.limit(READ_LIMIT)
+async def data_validator_stats(
+    request: Request,  # noqa: ARG001 — slowapi requires the `request` arg
+):
+    """Get data ingestion validator runtime stats.
+
+    Shape::
+
+        {
+          "valid_count": 1234,
+          "invalid_count": 12,
+          "duplicate_count": 567,
+          "seen_ids_size": 890,    # trades dedup deque
+          "seen_hashes_size": 456  # snapshots dedup deque
+        }
+
+    All values are plain ints (JSON-serialisable). The ``seen_*_size``
+    values reflect the current size of the in-memory dedup deques,
+    which are capped at 10_000 entries each (oldest evicted on
+    overflow — the durable ``UNIQUE(trade_id)`` constraint on the
+    TimescaleDB / SQLite trade-tape tables is the backstop for
+    restarts / replays past the in-memory window).
+    """
+    from core.data_validator import data_validator
+
+    return data_validator.get_stats()
+
+
+# ── W24-2 — Out-of-sample ML validation endpoint ────────────────────────────
+# Additive: appends ``POST /api/ml/out-of-sample`` so an operator can
+# trigger a rigorous out-of-sample validation run on the model's current
+# training data. Sibling to the W18-8 ``POST /api/ml/validate``
+# (walk-forward CV / out-of-time test) endpoint — the W24-2 endpoint
+# differs in that it:
+#
+#   * Pulls training data from ``ml_model.get_training_data()`` (the
+#     canonical real-first fetch path) instead of accepting a posted
+#     feature matrix — so the operator gets the *actual* training
+#     distribution the production model sees, not a hand-rolled
+#     sample.
+#   * Uses a three-way train / validation / test split (60 / 20 / 20)
+#     with purge + embargo gaps between the windows, instead of the
+#     W18-8 two-way train / test split — so the operator can read the
+#     generalization gap from train → validation → test directly and
+#     spot a model that overfits the test-set hyperparameters via
+#     repeated evaluation.
+#   * Reports in-sample, validation, AND out-of-sample metrics
+#     separately, plus the ``auc_decay`` / ``brier_increase``
+#     overfitting diagnostics and a flat-$1-per-trade simulated OOS
+#     P&L — the ``is_overfit`` / ``is_valid`` verdicts gate model
+#     promotion (``POST /api/ml/{version}/promote``).
+#
+# Auth enforced by ``enforce_api_auth`` (path NOT in ``PUBLIC_PATHS``).
+# The validator trains a fresh ``Pipeline(StandardScaler +
+# RandomForestClassifier)`` per call (via
+# ``ml_model._create_ensemble()``) — no production singleton state is
+# mutated, no model artifact is persisted. The runtime ceiling is
+# ~3 s for a 3 000-row training set on the sandbox; well inside the
+# READ_LIMIT 120/min budget for an operator-driven dashboard poll.
+from ml.out_of_sample import register_routes as _register_ml_oos_routes
+
+_register_ml_oos_routes(app)
+
+
+# ── W24-5 — Honest performance reporter endpoints ─────────────────────────────
+# Additive: appends TWO read-only endpoints under ``/api/performance/*`` so an
+# operator (or a future ``PerformancePanel`` React component) can pull the
+# honest per-category performance breakdown the W24-5 spec requires.
+#
+# The reporter (``core.performance_reporter.PerformanceReporter``) NEVER
+# combines metrics across categories — backtest / walk-forward / paper / live
+# each get their own ``PerformanceMetrics`` snapshot with its own 95%
+# confidence interval + binomial-test p-value vs the 50% coin-flip null. The
+# ``disclaimer`` field on ``GET /api/performance/report`` is the cardinal
+# reminder that backtest performance does NOT guarantee future results — the
+# sin this reporter exists to prevent.
+#
+# Auth enforced by ``enforce_api_auth`` (neither path is in ``PUBLIC_PATHS``).
+# Rate-limited by ``READ_LIMIT`` so a dashboard polling every 30 s can't
+# starve the trading path. The ``GET /api/performance/paper`` route pulls the
+# 500 most-recent closed positions from the SQLite ``closed_positions`` store
+# via the async ``closed_positions.get_closed_positions`` helper (the fetch
+# runs in a thread — see the ``@timed_query`` wrapper in
+# ``core/closed_positions.py``); the endpoint must be ``async def`` so it can
+# ``await`` that fetch.
+@app.get(
+    "/api/performance/report",
+    tags=["analytics"],
+    summary="Honest performance report — all categories reported separately",
+    description=(
+        "Returns the full per-category performance breakdown: paper-trading "
+        "metrics computed inline (the canonical honest, current view) plus "
+        "pointers to the dedicated endpoints for backtest / walk-forward / "
+        "live metrics. Each category is reported SEPARATELY with its own 95% "
+        "confidence interval + binomial-test p-value vs the 50% coin-flip "
+        "null. Metrics are NEVER combined across categories."
+    ),
+)
+@limiter.limit(READ_LIMIT)
+async def get_performance_report(
+    request: Request,  # noqa: ARG001 — slowapi requires the `request` arg
+):
+    """Get honest performance report — all categories reported separately.
+
+    Shape::
+
+        {
+          "paper_trading": { ...PerformanceMetrics.to_dict()... },
+          "backtest":      "POST /api/backtest/report with a strategy_id...",
+          "walk_forward":  "POST /api/backtest/walk-forward with train...",
+          "live":          "No live trading data (paper mode active)",
+          "disclaimer":    "Metrics are reported SEPARATELY by category..."
+        }
+
+    Backtest / walk-forward / live categories are returned as pointers to
+    their dedicated endpoints rather than computed inline — each has its own
+    request shape (strategy_id + days for backtest, train_window /
+    test_window / step for walk-forward, a live trade journal for live) and
+    computing them speculatively would be wasteful. Paper-trading is computed
+    inline because it's the canonical "honest, current" view that the
+    dashboard needs on every load.
+    """
+    from core.performance_reporter import performance_reporter
+
+    return await performance_reporter.get_all_metrics()
+
+
+@app.get(
+    "/api/performance/paper",
+    tags=["analytics"],
+    summary="Paper-trading performance metrics",
+    description=(
+        "Returns the full ``PerformanceMetrics`` snapshot for paper trading: "
+        "win rate (with 95% Wilson-score CI), profit factor, expectancy, "
+        "Sharpe / Sortino, max drawdown, open exposure, capital utilisation, "
+        "slippage + fees, n_trades, and the binomial-test p-value vs the "
+        "50% coin-flip null (with the 30-trade minimum significance guard)."
+    ),
+)
+@limiter.limit(READ_LIMIT)
+async def get_paper_performance(
+    request: Request,  # noqa: ARG001 — slowapi requires the `request` arg
+    limit: int = Query(500, ge=1, le=1000, description="Max positions to pull"),
+):
+    """Get paper trading performance metrics.
+
+    Pulls the ``limit`` most-recent closed positions from the
+    ``closed_positions`` SQLite store and runs the full metrics suite
+    against them. The closed_positions schema (``pnl``, ``timestamp``,
+    ``holding_seconds``, ``shares``, ``entry_price``, ``exit_price``)
+    maps cleanly into the reporter's trade-dict shape.
+
+    Shape: see ``PerformanceMetrics.to_dict`` in
+    ``core/performance_reporter.py``.
+    """
+    from core.performance_reporter import performance_reporter
+
+    metrics = await performance_reporter.get_paper_trading_metrics(limit=limit)
+    return metrics.to_dict()
+
+
+# ── W24-7 — API resilience layer health endpoint ─────────────────────────────
+# Additive: appends one read-only endpoint under ``/api/api-health`` so an
+# operator (or a future ``APIHealthPanel`` React component) can surface the
+# per-API health status tracked by ``core.api_resilience.APIResilienceLayer``
+# without scraping the per-API client logs. Sibling to the W13-2 circuit-
+# breaker status (surfaced via ``/api/system/health``'s ``checks`` map) and
+# the W21-1 ``/api/database/status`` endpoint — same singleton pattern, same
+# in-memory + process-local contract (a restart zeroes the per-API health
+# counters, which is fine for an "operator dashboard" operational view).
+#
+# Auth enforced by ``enforce_api_auth`` (path NOT in ``PUBLIC_PATHS``). The
+# endpoint exposes failure counts and last-error strings (potentially
+# including upstream URL fragments), so unauthenticated exposure would leak
+# operational internals to an unauthenticated caller. Rate-limited by
+# ``READ_LIMIT`` so a dashboard polling every few seconds can't starve the
+# trading path.
+#
+# The data is fed by the two W24-7 call sites:
+#
+#   * ``core.clob_client.ClobClient.get_order_book`` → records to "clob"
+#   * ``core.gamma_client.GammaClient.get_markets``   → records to "gamma"
+#
+# Each successful logical call records ``last_success`` / increments
+# ``total_calls`` / updates the EMA ``avg_latency_ms``; each failed logical
+# call (after exhausting the 3 internal retries) records ``last_failure`` /
+# increments ``consecutive_failures`` / ``total_failures``. The status enum
+# (``HEALTHY`` / ``DEGRADED`` / ``UNHEALTHY`` / ``UNKNOWN``) is derived from
+# ``consecutive_failures`` so the dashboard can colour-code the row without
+# recomputing the threshold client-side.
+@app.get(
+    "/api/api-health",
+    tags=["system"],
+    summary="External API resilience layer health",
+    description=(
+        "Returns the per-API health status tracked by the W24-7 API "
+        "resilience layer. Each external API (``clob`` / ``gamma``) "
+        "gets a record carrying the rolling status (HEALTHY / "
+        "DEGRADED / UNHEALTHY / UNKNOWN), the last success / failure "
+        "timestamps, the consecutive-failure count, the total call / "
+        "failure / timeout counts, the EMA latency in ms, and the "
+        "last error string. Used by the operator dashboard to see at "
+        "a glance which external API is degraded and to verify the "
+        "resilience layer's circuit breaker is correctly tripping on "
+        "sustained outages. All state is in-memory and process-local "
+        "— a restart zeroes the counters."
+    ),
+)
+@limiter.limit(READ_LIMIT)
+async def get_api_health(
+    request: Request,  # noqa: ARG001 — slowapi requires the `request` arg
+):
+    """Get health status of all external APIs.
+
+    Shape::
+
+        {
+          "clob":  {"status": "healthy", "last_success": 1730000000.0,
+                    "last_failure": 0.0, "consecutive_failures": 0,
+                    "total_calls": 42, "total_failures": 0,
+                    "total_timeouts": 0, "avg_latency_ms": 87.3,
+                    "last_error": ""},
+          "gamma": {"status": "degraded", ...}
+        }
+
+    The dict is keyed by API name (``clob`` / ``gamma``); the values are
+    plain dicts (JSON-serialisable). An API never called returns no
+    entry at all (lazily created on first call).
+    """
+    from core.api_resilience import api_resilience
+
+    return api_resilience.get_health()
+
+
+# ── W24-1 — State recovery report ────────────────────────────────────────────
+# Additive: appends a single read-only endpoint under ``/api/system`` so an
+# operator (or a future ``RecoveryReportPanel`` React component) can verify
+# "the bot booted with N positions + M open orders + K stale orders + kill
+# switch off" without grepping server logs.
+#
+# The recovery report is produced by the lifespan startup handler calling
+# ``await state_recovery.recover()`` early in boot (see the lifespan above).
+# The report is cached on the ``state_recovery`` singleton so the endpoint
+# is a constant-time read (no re-computation on every poll).
+#
+# Auth enforced by ``enforce_api_auth`` (path is NOT in ``PUBLIC_PATHS``).
+# Rate-limited by ``READ_LIMIT`` so a dashboard polling every few seconds
+# can't starve the trading path.
+@app.get(
+    "/api/system/recovery-report",
+    tags=["system"],
+    summary="Last state-recovery report (W24-1)",
+    description=(
+        "Returns the ``RecoveryReport`` produced by the most recent "
+        "``state_recovery.recover()`` call at lifespan startup. The "
+        "report summarises how many positions / orders were restored "
+        "from the on-disk checkpoint, how many of those orders are "
+        "potentially stale (open at shutdown → may have filled during "
+        "downtime → need reconciliation), whether the kill switch was "
+        "active at boot, and how many feature flags were hydrated. "
+        "Returns ``{\"status\": \"no_recovery_yet\"}`` if the endpoint "
+        "is queried before the lifespan startup phase ran."
+    ),
+)
+@limiter.limit(READ_LIMIT)
+async def get_recovery_report(
+    request: Request,  # noqa: ARG001 — slowapi requires the `request` arg
+):
+    """Get the last state recovery report (W24-1).
+
+    Shape::
+
+        {
+          "recovered_positions": 3,
+          "recovered_orders": 2,
+          "stale_orders": 1,
+          "kill_switch_active": false,
+          "flags_restored": 13,
+          "recovery_time": 0.012,
+          "errors": [],
+          "recovered_at": 1735689600.0,
+          "checkpoint_timestamp": 1735689550.0
+        }
+
+    ``checkpoint_timestamp`` is ``None`` when the manager recovered with no
+    on-disk state (fresh boot). ``recovered_at`` is the ``time.time()`` of
+    the ``recover()`` call so an operator can see how stale the report is.
+    """
+    from core.state_recovery import report_to_dict, state_recovery
+    return report_to_dict(state_recovery.get_last_report())
+

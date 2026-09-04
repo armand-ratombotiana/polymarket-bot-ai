@@ -11,6 +11,7 @@ from typing import Any
 import httpx
 
 from config import settings
+from core.api_resilience import api_resilience
 from core.circuit_breaker import CircuitBreakerOpenError, gamma_breaker
 
 log = logging.getLogger(__name__)
@@ -22,6 +23,13 @@ class GammaClient:
     def __init__(self) -> None:
         self._base = settings.poly_gamma_host.rstrip("/")
         self._client: httpx.AsyncClient | None = None
+        # W24-7 — last successful ``get_markets`` payload. Returned as
+        # the graceful-degradation fallback when the resilience layer
+        # exhausts its retries (or the circuit breaker is open). An
+        # empty list (the initial value) is a safe fallback because
+        # every consumer of ``get_markets`` iterates the result — an
+        # empty iteration is a no-op rather than a crash.
+        self._cached_markets: list[dict] = []
 
     async def _ensure_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
@@ -66,7 +74,26 @@ class GammaClient:
         order: str = "volume24hr",
         ascending: bool = False,
     ) -> list[dict]:
-        """Fetch markets sorted by volume. Returns list of market dicts."""
+        """Fetch markets sorted by volume. Returns list of market dicts.
+
+        W24-7 — wrapped in the API resilience layer so a transient
+        Gamma API failure (timeout / 5xx / connection refused) is
+        retried up to 3 times with exponential backoff (100 ms /
+        500 ms / 2 000 ms) before the layer falls back to the
+        last-successful ``get_markets`` payload cached in
+        ``self._cached_markets``. When the cache is empty (first
+        call after boot) the layer returns ``[]`` — a safe empty
+        list rather than raising, because every consumer of
+        ``get_markets`` iterates the result and an empty iteration
+        is a no-op rather than a crash.
+
+        The cache is refreshed on every successful fetch so the next
+        outage's fallback returns the most recent payload, not a
+        stale one from boot time. Layered with the W13-2
+        ``gamma_breaker`` — the inner breaker short-circuits the
+        HTTP transport; this outer layer short-circuits the logical
+        call and supplies the cached fallback.
+        """
         params: dict[str, Any] = {
             "limit": limit,
             "offset": offset,
@@ -78,10 +105,34 @@ class GammaClient:
         if closed is not None:
             params["closed"] = str(closed).lower()
 
-        data = await self._get("/markets", params=params)
-        if isinstance(data, list):
-            return data
-        return data.get("data", data) if isinstance(data, dict) else []
+        async def _fetch() -> list[dict]:
+            # The inner ``_get`` already integrates ``gamma_breaker``
+            # (records success / failure on every HTTP attempt). The
+            # resilience layer wraps the outer logical call.
+            data = await self._get("/markets", params=params)
+            if isinstance(data, list):
+                return data
+            return data.get("data", data) if isinstance(data, dict) else []
+
+        # ``fallback_data`` is the cached list — the resilience layer
+        # checks ``fallback_data is not None`` before returning it.
+        # An empty list ``[]`` is NOT ``None``, so the layer returns
+        # ``[]`` on cache-miss rather than raising (the safe no-op
+        # contract for a never-booted Gamma client).
+        result = await api_resilience.call_with_resilience(
+            "gamma", _fetch, fallback_data=self._cached_markets,
+        )
+
+        if result:
+            # Refresh the cache so the next outage's fallback returns
+            # the most recent payload. An empty result is NOT cached
+            # — a transient empty list (e.g. the upstream API returned
+            # a valid-but-empty response) would otherwise poison the
+            # fallback and a real outage would serve ``[]`` even when
+            # the prior call had real data.
+            self._cached_markets = result
+
+        return result
 
     async def get_market(self, condition_id: str) -> dict:
         """Fetch a single market by conditionId."""

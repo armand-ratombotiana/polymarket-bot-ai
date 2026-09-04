@@ -20,6 +20,7 @@ from eth_account import Account
 from eth_account.messages import encode_defunct
 
 from config import settings
+from core.api_resilience import api_resilience
 from core.circuit_breaker import CircuitBreakerOpenError, clob_breaker
 from core.data_store import Side
 
@@ -89,6 +90,17 @@ class ClobClient:
         self._key = settings.poly_private_key
         self._creds: ApiCreds | None = None
         self._http: httpx.AsyncClient | None = None
+        # W24-7 — per-token cached order book snapshots. Populated on
+        # every successful ``get_order_book`` call; returned as the
+        # graceful-degradation fallback when the resilience layer
+        # exhausts its retries (or the circuit breaker is open). The
+        # cache is intentionally in-memory only — a process restart
+        # zeroes it, which is the correct contract for "stale data is
+        # better than no data, but only for as long as the operator
+        # can see it's stale" (the dashboard surfaces the
+        # ``avg_latency_ms`` / ``last_success`` gap via
+        # ``GET /api/api-health`` so the staleness is observable).
+        self._cached_order_books: dict[str, dict] = {}
 
         # Load pre-configured creds if available
         if settings.has_api_keys:
@@ -228,8 +240,69 @@ class ClobClient:
         return await self._get(f"/markets/{condition_id}")
 
     async def get_order_book(self, token_id: str) -> dict:
-        """Fetch the current order book snapshot for a token."""
-        return await self._get("/book", params={"token_id": token_id})
+        """Fetch the current order book snapshot for a token.
+
+        W24-7 — wrapped in the API resilience layer so a transient
+        CLOB failure (timeout / 5xx / connection refused) is retried
+        up to 3 times with exponential backoff (100 ms / 500 ms /
+        2 000 ms) before the layer falls back to the per-token cached
+        snapshot in ``self._cached_order_books``. When the cache is
+        empty (first call after boot, or a token never seen before)
+        the layer raises ``ConnectionError`` so the caller can decide
+        whether to skip the cycle (the book poller already does —
+        ``_fetch_book`` propagates exceptions to ``_poll_tier``'s
+        ``return_exceptions=True`` gather, which counts them in the
+        ``_error_count`` stat without crashing the poller).
+
+        The resilience layer's circuit breaker trips after 5
+        consecutive logical-call failures; while open, every
+        subsequent ``get_order_book`` returns the cached snapshot
+        immediately without burning a network round-trip. The
+        breaker re-arms on the next successful call (the layer's
+        ``_record_success`` zeroes ``consecutive_failures``).
+
+        Layered with the W13-2 ``clob_breaker`` — the inner breaker
+        short-circuits the HTTP transport (no socket opened when the
+        breaker is OPEN); this outer layer short-circuits the
+        logical call (no retries burnt) and supplies the cached
+        fallback. The two layers are complementary: the inner one
+        protects the upstream (no load during an outage), the outer
+        one protects the downstream (no cascading failure when the
+        upstream is down).
+        """
+        async def _fetch() -> dict:
+            # The inner ``_get`` already integrates ``clob_breaker``
+            # (records success / failure on every HTTP attempt). The
+            # resilience layer wraps the outer logical call, so a
+            # single ``call_with_resilience`` invocation may record
+            # up to 3 breaker successes (one per retry) — but only
+            # ONE resilience-layer failure on exhaustion. This
+            # asymmetry is intentional: the breaker should react to
+            # the underlying transport's health, the resilience
+            # layer to the logical call's.
+            return await self._get("/book", params={"token_id": token_id})
+
+        # ``fallback_data=None`` is the sentinel for "no cache yet".
+        # The resilience layer checks ``fallback_data is not None``
+        # before returning it, so a ``None`` cache miss becomes a
+        # ``ConnectionError`` rather than a silent ``None`` return
+        # (which would propagate as ``None`` through ``store.update
+        # _order_book`` and corrupt the in-memory book state).
+        fallback = self._cached_order_books.get(token_id)
+
+        result = await api_resilience.call_with_resilience(
+            "clob", _fetch, fallback_data=fallback,
+        )
+
+        if result is not None:
+            # Refresh the cache on every successful fetch so the next
+            # outage's fallback returns the most recent snapshot, not
+            # a stale one from boot time. The cache is unbounded (one
+            # entry per tracked token — the poller tracks ≤ 200 tokens
+            # at any time, so the memory footprint is trivial).
+            self._cached_order_books[token_id] = result
+
+        return result
 
     async def get_spread(self, token_id: str) -> dict:
         return await self._get("/spread", params={"token_id": token_id})

@@ -411,6 +411,30 @@ class AlertEngine:
         raises — callers can chain ``fire_alert`` after a critical
         decision without a try/except wrapper).
         """
+        # W24-6 — duplicate-alert prevention. ``fire_alert`` is the
+        # canonical "one-off alert outside the periodic evaluate() cycle"
+        # entry point (the risk gate's MTM-fail-closed path calls it
+        # directly). A risk gate that fires the same ``alert_id`` twice
+        # within a short window (e.g. the gate is re-evaluated before the
+        # operator acknowledges the first alert) would otherwise land two
+        # rows in SQLite + log two warnings + broadcast two WS envelopes.
+        # Block the duplicate here so the operator sees exactly one alert
+        # card per distinct (alert_id, 5-min window). The 300s TTL matches
+        # the default dedup window. Best-effort: a registry exception
+        # must NEVER break the alert fire path (mirrors the fail-soft
+        # contract of every other audit singleton in the bot).
+        try:
+            from core.dedup import dedup_registry
+            if not dedup_registry.check_and_add("alert", alert.alert_id, ttl_seconds=300):
+                logger.debug(
+                    "[alerting] Duplicate alert blocked by dedup registry: %s",
+                    alert.alert_id,
+                )
+                return False
+        except Exception as e:  # noqa: BLE001 — dedup must never break alerts
+            logger.debug(
+                "[alerting] dedup_registry check failed (continuing): %s", e
+            )
         self._store(alert)
         logger.warning("Alert fired: %s — %s", alert.name, alert.message)
         # W23-3 — fire-and-forget broadcast. ``asyncio.create_task``
@@ -436,6 +460,71 @@ class AlertEngine:
                 "[alerting] alerts broadcast schedule failed: %s", e
             )
         return True
+
+    def record_alert(
+        self,
+        name: str,
+        category: str,
+        severity: str,
+        message: str,
+        value: Optional[float] = None,
+        threshold: Optional[float] = None,
+        metadata: Optional[dict] = None,
+    ) -> Alert:
+        """Construct + fire a one-off alert from primitive fields.
+
+        W24-8 — convenience wrapper around ``fire_alert`` so callers
+        (e.g. the strategy health monitor's
+        ``StrategyHealthMonitor._disable``) don't have to construct an
+        ``Alert`` dataclass + generate an ``alert_id`` + timestamp
+        themselves. The canonical caller is the strategy health
+        monitor: when a strategy fails its win-rate / expectancy /
+        drawdown / error-rate thresholds, the monitor calls
+        ``record_alert(name="strategy_auto_disabled", category="strategy",
+        severity=SEVERITY_WARNING, message=...)`` so an operator sees
+        the auto-disable on the dashboard immediately (W23-3 WS push
+        via ``_broadcast_alert``) AND as a durable row in the alerts
+        SQLite store.
+
+        The method:
+
+        1. Generates a fresh ``alert_id`` (UUID4 hex) + ``timestamp``
+           (now).
+        2. Constructs an ``Alert`` with the supplied fields + the
+           generated id/timestamp + ``acknowledged=False``.
+        3. Delegates to ``fire_alert`` which persists + logs + schedules
+           the WS broadcast (fire-and-forget — if no event loop is
+           running the broadcast is silently skipped, persistence +
+           log still happen).
+
+        Returns the constructed ``Alert`` so the caller can log / inspect
+        it (e.g. record the ``alert_id`` against the strategy's
+        ``StrategyHealth`` dataclass for cross-correlation).
+
+        ``category`` is typically one of ``risk`` / ``ml`` / ``system``
+        / ``data`` (the 4 default rule categories) but the engine does
+        NOT enforce this — a caller can introduce a new category
+        (``strategy``, ``execution`` …) without a schema migration
+        because ``category`` is a free-form ``TEXT`` column in SQLite.
+        The dashboard's per-category drill-down will simply include the
+        new category once a row with that value exists.
+        """
+        import uuid
+
+        alert = Alert(
+            alert_id=uuid.uuid4().hex,
+            timestamp=time.time(),
+            category=category,
+            name=name,
+            severity=severity,
+            message=message,
+            value=value,
+            threshold=threshold,
+            metadata=metadata or {},
+            acknowledged=False,
+        )
+        self.fire_alert(alert)
+        return alert
 
     async def _broadcast_alert(self, alert: Alert) -> None:
         """Push a single alert on the ``alerts`` WS channel.

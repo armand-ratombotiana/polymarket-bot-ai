@@ -335,6 +335,37 @@ class DecisionLedger:
             data["model_version"] = _resolve_active_model_version()
         ts = time.time()
         payload = json.dumps(data, default=str) if data else None
+        # W24-6 — duplicate-stage prevention. Keyed on (decision_id, stage,
+        # payload_hash) so a replayed record() call with the EXACT same
+        # payload within a short TTL window is dedup'd (almost always a
+        # bug — double-dispatch of signal_trader._ml_signal → record
+        # pipeline, a retry loop, a duplicated ws_client broadcast),
+        # while a legitimate update to the same stage with a DIFFERENT
+        # payload (the canonical "last write wins" semantic tested by
+        # ``test_get_full_chain_last_write_wins_for_repeated_stage``) is
+        # allowed through. The 300s TTL matches the default window — long
+        # enough to catch a retry storm, short enough that a legit re-
+        # record after a 5-minute gap (rare but possible in backfill /
+        # replay scenarios) still goes through. Best-effort: a registry
+        # exception must NEVER break the ledger write path.
+        try:
+            import hashlib as _hashlib
+            from core.dedup import dedup_registry
+            payload_hash = (
+                _hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+                if payload else "empty"
+            )
+            stage_key = f"{decision_id}:{stage}:{payload_hash}"
+            if not dedup_registry.check_and_add("decision", stage_key, ttl_seconds=300):
+                log.debug(
+                    "[decision_ledger] Duplicate stage blocked by dedup "
+                    "registry: %s:%s", decision_id, stage,
+                )
+                return
+        except Exception as e:  # noqa: BLE001 — dedup must never break ledger
+            log.debug(
+                "[decision_ledger] dedup_registry check failed (continuing): %s", e
+            )
 
         def _insert() -> None:
             try:

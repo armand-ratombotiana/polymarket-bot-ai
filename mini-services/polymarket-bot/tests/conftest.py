@@ -305,6 +305,17 @@ def _reset_store_factory_defaults():
     path. Resetting everything to factory defaults before every test
     removes that race entirely.
 
+    W24-6 — also clears the unified ``dedup_registry`` singleton so each
+    test starts with a fresh dedup gate. Without this, the very first
+    ``submit_order`` call in test N would be blocked by the dedup
+    registry's memory of test N-1's order (e.g. two strategy_base tests
+    that both submit ``OrderArgs(token_id=_TOKEN_ID, side=BUY, size=2.0,
+    price=0.50)`` share the same dedup key within the 60 s order TTL —
+    the second test would see its order "blocked" as a duplicate of the
+    first test's order, breaking the assertion that the order goes
+    through). Mirrors the pattern already in place for the cache
+    singletons (``_clear_all_caches``).
+
     Idempotency
     -----------
     Safe to stack with the per-module autouse reset fixtures already
@@ -328,11 +339,15 @@ def _reset_store_factory_defaults():
       * observation-only mode off
       * per-strategy cooldowns cleared
       * ``paper_sim._virtual_balance_usdc`` reset to ``BANKROLL_BASELINE``
+      * dedup_registry cleared (W24-6)
+      * data_validator dedup deques + counters cleared (W24-4)
     """
     _clear_durable_kill_switch()
     _reset_store_state()
     _reset_risk_engine_state()
     _reset_paper_simulator_state()
+    _clear_dedup_registry()
+    _clear_data_validator_dedup()
 
     yield  # ── test runs ──
 
@@ -401,6 +416,100 @@ def _reset_paper_simulator_state() -> None:
     ``store.paper_balance`` back to the baseline.
     """
     paper_sim._virtual_balance_usdc = BANKROLL_BASELINE
+
+
+def _clear_dedup_registry() -> None:
+    """Wipe every entity_type's dedup registry + stats.
+
+    W24-6 — the unified ``dedup_registry`` singleton is process-global
+    (mirrors the ``cache`` / ``rate_limit_tracker`` / ``profiler``
+    singletons already reset above). Without this clear, a prior test
+    that registered an order / fill / decision / alert key would block
+    the next test's call with the same key (e.g. two ``strategy_base``
+    tests that both submit ``OrderArgs(token_id=_TOKEN_ID, side=BUY,
+    size=2.0, price=0.50)`` share the same dedup key within the 60 s
+    order TTL). The clear drops every entity_type's registry so each
+    test starts with a fresh gate.
+
+    Also clears the W24-3 ``idempotency_manager`` singleton (added by
+    a concurrent agent's W24-3 pre-submission gate). The W24-3 idempotency
+    cache persists across tests for the same reason — without a reset,
+    a prior test's order would block the next test's order via the
+    pre_submission_gate's ``idempotency`` check (the cache key is the
+    SHA-256 of ``(strategy, token_id, side, price, size)``, so two tests
+    that submit the same OrderArgs share a key). Belt-and-braces with
+    the dedup_registry clear above — both singletons are reset so the
+    next test sees a clean duplicate-prevention baseline.
+
+    Best-effort: a missing ``core.dedup`` / ``core.idempotency`` module
+    (e.g. a renamed / removed future version, or a parallel agent that
+    hasn't landed its file yet) is swallowed so the test session still
+    boots — the dedup gate is best-effort in production too.
+    """
+    try:
+        from core.dedup import dedup_registry
+        dedup_registry.clear()
+    except ImportError:  # pragma: no cover — defensive
+        pass
+    try:
+        from core.idempotency import idempotency_manager
+        idempotency_manager.reset()
+    except ImportError:  # pragma: no cover — W24-3 not landed yet
+        pass
+    try:
+        from core.data_validator import data_validator
+        # W24-4 — data_validator has internal dedup deques; clear them so
+        # a prior test's snapshot / trade hash doesn't block the next test.
+        # The deques are bounded (maxlen=10000) so a single test's writes
+        # rarely fill them, but the duplicate_count / valid_count counters
+        # would otherwise leak across tests and break stat assertions.
+        data_validator._seen_ids.clear()
+        data_validator._seen_hashes.clear()
+        data_validator._duplicate_count = 0
+        data_validator._invalid_count = 0
+        data_validator._valid_count = 0
+    except ImportError:  # pragma: no cover — W24-4 not landed yet
+        pass
+    except AttributeError:  # pragma: no cover — defensive
+        pass
+
+
+def _clear_data_validator_dedup() -> None:
+    """Wipe the W24-4 ``data_validator`` singleton's dedup deques + counters.
+
+    The ``core.data_validator.data_validator`` singleton is process-global
+    (mirrors the ``cache`` / ``rate_limit_tracker`` / ``profiler`` /
+    ``dedup_registry`` singletons already reset above). It holds two
+    bounded deques (``_seen_ids`` for trades, ``_seen_hashes`` for
+    snapshots) and three cumulative counters (``_valid_count`` /
+    ``_invalid_count`` / ``_duplicate_count``). Without this clear,
+    a prior test that ran a trade with ``trade_id="t-1"`` through
+    ``core.trade_ingester._ingest_trades`` would leave ``t-1`` in the
+    ``_seen_ids`` deque — and the next test's first poll of the same
+    trade_id would be rejected by the validator as a duplicate, never
+    reaching ``db_manager.record_trade`` and breaking the existing
+    ``test_ingest_trades_dedupes_seen_trade_ids`` assertion.
+
+    The clear rebuilds the deques from scratch (a fresh ``deque(maxlen=10_000)``
+    for each) rather than ``.clear()``-ing in place — belt-and-braces
+    against a future refactor that might swap ``deque`` for a different
+    container.
+
+    Best-effort: a missing ``core.data_validator`` module (e.g. a renamed /
+    removed future version) is swallowed so the test session still boots.
+    """
+    try:
+        from collections import deque
+
+        from core.data_validator import data_validator
+
+        data_validator._seen_ids = deque(maxlen=data_validator._seen_ids.maxlen)
+        data_validator._seen_hashes = deque(maxlen=data_validator._seen_hashes.maxlen)
+        data_validator._duplicate_count = 0
+        data_validator._invalid_count = 0
+        data_validator._valid_count = 0
+    except ImportError:  # pragma: no cover — defensive
+        pass
 
 
 # ── (1) isolated_store ──────────────────────────────────────────────────────

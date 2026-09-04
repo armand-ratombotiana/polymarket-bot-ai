@@ -198,6 +198,17 @@ class StrategyRegistry:
     def __init__(self) -> None:
         self._catalog: dict[str, StrategyMeta] = {s.strategy_id: s for s in STRATEGY_CATALOG}
         self._instances: dict[str, BaseStrategy] = {}
+        # W24-8 — strategy auto-disable. ``_disabled`` holds strategy_ids
+        # that were auto-disabled by the strategy health monitor
+        # (``core.strategy_health.StrategyHealthMonitor._disable``) so
+        # subsequent ``start_strategy`` calls short-circuit instead of
+        # silently restarting a strategy the operator (or the health
+        # monitor) explicitly turned off. ``enable()`` clears the flag.
+        # Stored separately from ``_instances`` so a strategy can be
+        # disabled WITHOUT first being started (the monitor runs even
+        # when the strategy hasn't been instantiated yet — e.g. an
+        # out-of-sample failure detected before live deployment).
+        self._disabled: set[str] = set()
 
     def get_catalog(self, implemented_only: bool = False) -> list[dict]:
         """Return the catalog as a list of plain dicts.
@@ -225,6 +236,11 @@ class StrategyRegistry:
                 "implemented": implemented,
                 "is_running": implemented and (s.strategy_id in self._instances),
                 "default_enabled": s.default_enabled,
+                # W24-8 — surface the auto-disable flag so the UI can
+                # render a "DISABLED — auto-disabled by health monitor"
+                # badge on strategies the monitor turned off (vs. a
+                # strategy that was simply never started).
+                "is_disabled": s.strategy_id in self._disabled,
             })
         return rows
 
@@ -233,6 +249,16 @@ class StrategyRegistry:
         canonical_id = _LEGACY_ALIASES.get(strategy_id, strategy_id)
         if canonical_id != strategy_id:
             strategy_id = canonical_id
+
+        # W24-8 — short-circuit if the strategy was auto-disabled by
+        # the health monitor. ``enable()`` clears the flag and is the
+        # explicit operator path to resume a disabled strategy.
+        if strategy_id in self._disabled:
+            log.info(
+                "[strategy_registry] %s is disabled; skipping start "
+                "(call enable() to re-enable)", strategy_id,
+            )
+            return False
 
         if strategy_id in self._instances:
             return True
@@ -277,6 +303,106 @@ class StrategyRegistry:
             await inst.stop()
             return True
         return False
+
+    def disable(self, strategy_id: str, reason: str = "") -> bool:
+        """SYNC auto-disable entry point — marks the strategy as disabled
+        AND cancels its running loop without awaiting.
+
+        W24-8 — the strategy health monitor's
+        ``StrategyHealthMonitor.check_strategy`` is itself a sync method
+        (called from a periodic check loop / health endpoint), so it
+        cannot ``await`` the async ``stop_strategy``. This sync wrapper:
+
+        1. Resolves legacy aliases (``market_maker`` → ``mm_avellaneda_stoikov``)
+           so a disable request by either name lands on the same row.
+        2. Adds the strategy_id to ``self._disabled`` so subsequent
+           ``start_strategy`` calls short-circuit (a disabled strategy
+           cannot be restarted without ``enable()``).
+        3. Pops the running instance (if any) from ``_instances`` and
+           cancels its asyncio ``_task`` WITHOUT awaiting — the task's
+           ``CancelledError`` will be raised on its next tick and the
+           loop will tear it down. ``inst._running`` is set to ``False``
+           so any in-flight cycle sees the flag and exits cleanly.
+        4. Returns ``True`` iff the strategy was in the catalog (whether
+           or not it was actually running) — the caller uses this to
+           decide whether the disable was a no-op.
+
+        The optional ``reason`` string is logged at WARNING level so the
+        operator can correlate the disable with the health check that
+        triggered it. ``reason`` is NOT persisted on the registry itself
+        — the canonical record of WHY a strategy was disabled lives on
+        the ``StrategyHealth`` dataclass in
+        ``core.strategy_health.StrategyHealthMonitor._health`` (and in
+        the alert fired via ``alert_engine.record_alert``).
+
+        The async ``stop_strategy`` is still the preferred path when the
+        caller has a running event loop — it awaits ``inst.stop()`` which
+        awaits ``store.log_event`` so the strategy-stopped event lands in
+        the audit trail synchronously. ``disable`` is for the no-loop /
+        can't-await case (tests, periodic health checks).
+        """
+        canonical_id = _LEGACY_ALIASES.get(strategy_id, strategy_id)
+        if canonical_id != strategy_id:
+            strategy_id = canonical_id
+
+        if strategy_id not in self._catalog:
+            return False
+
+        already_disabled = strategy_id in self._disabled
+        self._disabled.add(strategy_id)
+
+        inst = self._instances.pop(strategy_id, None)
+        if inst is not None:
+            try:
+                # Mark not running so any in-flight cycle sees the flag.
+                inst._running = False
+                task = getattr(inst, "_task", None)
+                if task is not None and not task.done():
+                    task.cancel()
+            except Exception as e:  # noqa: BLE001 — defensive: disable must not raise
+                log.warning(
+                    "[strategy_registry] disable(%s) cleanup error: %s",
+                    strategy_id, e,
+                )
+            log.warning(
+                "[strategy_registry] Auto-disabled %s: %s (instance stopped)",
+                strategy_id, reason or "(no reason given)",
+            )
+        elif not already_disabled:
+            log.warning(
+                "[strategy_registry] Auto-disabled %s: %s (not running)",
+                strategy_id, reason or "(no reason given)",
+            )
+        return True
+
+    def enable(self, strategy_id: str) -> bool:
+        """Re-enable a previously auto-disabled strategy.
+
+        W24-8 — counterpart to ``disable()``. Clears the ``_disabled``
+        flag so the next ``start_strategy`` call can resume the
+        strategy. Does NOT auto-start the strategy — the operator (or
+        the supervisor) must explicitly call ``start_strategy`` after
+        ``enable()`` so the resume is intentional, not a side-effect of
+        clearing the flag.
+
+        Returns ``True`` iff the strategy was previously disabled (i.e.
+        the flag actually needed clearing). ``False`` means the
+        strategy wasn't disabled to begin with — a no-op, not an error.
+        """
+        canonical_id = _LEGACY_ALIASES.get(strategy_id, strategy_id)
+        if canonical_id != strategy_id:
+            strategy_id = canonical_id
+
+        if strategy_id in self._disabled:
+            self._disabled.discard(strategy_id)
+            log.info("[strategy_registry] Re-enabled %s", strategy_id)
+            return True
+        return False
+
+    def is_disabled(self, strategy_id: str) -> bool:
+        """W24-8 — check whether a strategy is currently auto-disabled."""
+        canonical_id = _LEGACY_ALIASES.get(strategy_id, strategy_id)
+        return canonical_id in self._disabled
 
     def get_active_instances(self) -> dict[str, BaseStrategy]:
         return self._instances

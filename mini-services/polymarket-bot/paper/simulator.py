@@ -318,6 +318,30 @@ class PaperSimulator:
     async def _execute_fill(self, order: Order, fill_price: float) -> None:
         fill_size = order.size_remaining
 
+        # ── W24-6 — duplicate-fill prevention ───────────────────────────────
+        # A paper order can only be filled ONCE (the OSM transition to
+        # FILLED is terminal). If ``_execute_fill`` is re-entered for the
+        # same order (e.g. the periodic ``_try_fill_orders`` loop races a
+        # manual ``paper_sim.cancel_order`` that fires after the order's
+        # size_remaining was already zeroed), the second call would
+        # double-record the fill — a phantom Trade, a phantom FILL ledger
+        # stage, a phantom closed_position. Dedup by ``order.order_id``
+        # (the canonical per-order identity) so a second call within the
+        # 1h TTL window returns silently. Best-effort: a registry
+        # exception must NEVER break the fill path (mirrors the
+        # decision_ledger / execution_quality fire-and-forget contract).
+        try:
+            from core.dedup import dedup_registry
+            fill_key = f"paper:{order.order_id}"
+            if not dedup_registry.check_and_add("fill", fill_key, ttl_seconds=3600):
+                log.debug(
+                    "[paper_sim] Duplicate fill blocked by dedup registry: %s",
+                    order.order_id,
+                )
+                return
+        except Exception as e:  # noqa: BLE001 — dedup must never break fills
+            log.debug("[paper_sim] dedup_registry check failed (continuing): %s", e)
+
         # ── W18-7 — snapshot pre-fill position state ───────────────────────
         # ``store.record_fill`` mutates ``Position`` in place (``yes_shares``
         # decremented, ``total_invested`` reduced, ``realised_pnl``

@@ -221,6 +221,27 @@ class LiveFillMonitor:
         if trade_id in self._last_trade_ids:
             return
         self._last_trade_ids.add(trade_id)
+        # W24-6 — also register the trade with the unified dedup registry
+        # so global stats (``GET /api/dedup/stats``) reflect the live-fill
+        # dedup rate alongside paper fills / orders / decisions / alerts.
+        # The local ``_last_trade_ids`` set is preserved verbatim so the
+        # existing ``_MAX_SEEN_TRADE_IDS`` / ``_KEEP_SEEN_TRADE_IDS``
+        # bound still applies; the registry's own ``deque(maxlen=10000)``
+        # bound is independent. Best-effort: a registry exception must
+        # NEVER break the live fill path (mirrors the fail-soft contract
+        # of every other audit singleton in the bot).
+        try:
+            from core.dedup import dedup_registry
+            if not dedup_registry.check_and_add("fill", f"live:{trade_id}", ttl_seconds=3600):
+                logger.debug(
+                    "[live_fill_monitor] Duplicate fill blocked by dedup "
+                    "registry: %s", trade_id,
+                )
+                return
+        except Exception as e:  # noqa: BLE001 — dedup must never break fills
+            logger.debug(
+                "[live_fill_monitor] dedup_registry check failed (continuing): %s", e
+            )
 
         # ── Extract fill fields (defensive — CLOB shapes vary) ───────────
         token_id = (

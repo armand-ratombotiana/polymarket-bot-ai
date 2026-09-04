@@ -184,19 +184,27 @@ def _active_strategies_snapshot(paused_names: set[str]) -> list[dict[str, Any]]:
 
 def register_routes(app: Any) -> None:
     """
-    Append the risk-inspection endpoint to a FastAPI app.
+    Append the risk-inspection endpoints to a FastAPI app.
 
     Pure addition — does not touch any existing route, middleware, or
     decorator. Auth is enforced by the caller's existing
-    ``enforce_api_auth`` middleware (this path is not in ``PUBLIC_PATHS``).
+    ``enforce_api_auth`` middleware (none of these paths are in
+    ``PUBLIC_PATHS``).
 
-    Endpoint registered:
+    Endpoints registered:
 
       GET /api/risk/strategies/paused
           Returns the currently paused (cooldown) strategies with
           ``seconds_remaining`` plus the registered-running strategies
           that are NOT currently paused. See the module docstring for
           the full response shape.
+
+      POST /api/risk/pre-submission-check
+          Run the 14-check pre-submission risk gate WITHOUT actually
+          submitting an order. Returns the full ``PreSubmissionResult``
+          (``approved`` + per-check details) so a caller can dry-run
+          an order against the gate before committing. W24-3 — God Mode
+          §pre-submission-gate.
     """
     @app.get("/api/risk/strategies/paused", tags=["risk"])
     async def _list_paused_strategies():
@@ -215,6 +223,64 @@ def register_routes(app: Any) -> None:
             "cooldown_seconds": float(STRATEGY_COOLDOWN),
             "threshold_usd": float(PER_TRADE_MAX_LOSS),
         }
+
+    @app.post("/api/risk/pre-submission-check", tags=["risk"])
+    async def _pre_submission_check(
+        order_request: dict,
+        market_data: dict | None = None,
+        account_state: dict | None = None,
+    ):
+        """Run the pre-submission risk gate WITHOUT submitting the order.
+
+        W24-3 — God Mode §pre-submission-gate. Returns the full
+        ``PreSubmissionResult`` (``approved``, per-check ``checks[]``,
+        ``rejection_reason``, ``rejection_category``, ``timestamp``) so
+        a caller can dry-run an order against the 14-check gate before
+        committing to ``submit_order``.
+
+        The endpoint runs the SAME gate ``BaseStrategy.submit_order``
+        runs on every order — so a 200 + ``approved: true`` here means
+        the order would pass the pre-submission gate at submission time
+        (assuming the same context is supplied then).
+
+        Body:
+            ``order_request`` (JSON object): ``{token_id, side, size,
+            price, strategy, edge?, confidence?, order_id?}``. The
+            ``edge`` / ``confidence`` keys are optional — when absent,
+            the corresponding checks are skipped (passed=True,
+            message="skipped — no input data").
+
+        Query params (or JSON body keys alongside ``order_request``):
+            ``market_data`` (JSON object, optional): ``{best_bid,
+            best_ask, spread, liquidity, last_update}``. When absent,
+            the freshness / spread / liquidity checks are skipped.
+            ``account_state`` (JSON object, optional): ``{balance,
+            total_exposure, open_orders, daily_pnl, drawdown,
+            max_total_exposure, max_single_position, max_open_orders,
+            daily_loss_limit, max_drawdown_limit}``. When absent, the
+            balance / exposure / single-position / open-orders /
+            daily-loss / drawdown checks are skipped.
+
+        Returns:
+            The ``PreSubmissionResult`` serialised as a dict —
+            ``{approved, checks[], rejection_reason, rejection_category,
+            timestamp}``. Each entry in ``checks[]`` carries
+            ``{check_name, passed, value, threshold, message}``.
+
+        Auth enforced by ``enforce_api_auth`` (path NOT in
+        ``PUBLIC_PATHS``).
+        """
+        # Late import so the route module loads even if the gate module
+        # is mid-refactor (mirrors the local-import pattern used by
+        # every other additive route in this codebase).
+        from core.pre_submission_gate import pre_submission_gate
+
+        result = pre_submission_gate.check(
+            order_request=order_request,
+            market_data=market_data,
+            account_state=account_state,
+        )
+        return result.to_dict()
 
 
 __all__ = ["register_routes"]

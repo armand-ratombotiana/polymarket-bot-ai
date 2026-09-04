@@ -229,16 +229,58 @@ class TradeTapeIngester:
         # doesn't abort the rest of the batch.
         written = 0
         for t in new_trades:
+            # W24-4 — Ingestion-time validation gate. Runs each new
+            # trade through ``DataValidator.validate_trade`` (schema
+            # check, value-range check, side normalisation, timestamp
+            # normalisation) BEFORE persisting to ``market_trades``.
+            # The ingester's own in-memory ``_last_trade_ids`` set
+            # above is the fast-path dedup; the validator's
+            # ``_seen_ids`` deque is the belt-and-braces second layer
+            # (it would only fire if the ingester's dedup missed,
+            # e.g. on a race between two polls returning the same
+            # ``trade_id`` — in steady state ``is_duplicate`` stays
+            # ``False`` here because the fast path already filtered
+            # the trade out).
+            from core.data_validator import data_validator
+
+            result = data_validator.validate_trade(t)
+            if not result.is_valid:
+                if result.is_duplicate:
+                    # Defensive: the fast-path dedup above should
+                    # have already skipped this trade. Log at
+                    # ``debug`` (not ``warning``) so the operator
+                    # log isn't flooded if a transient race ever
+                    # surfaces this branch.
+                    logger.debug(
+                        "Validator rejected duplicate trade %s (ingester fast-path missed)",
+                        t.get("trade_id", "<unknown>"),
+                    )
+                else:
+                    logger.warning(
+                        "Invalid trade %s: %s",
+                        t.get("trade_id", "<unknown>"),
+                        result.errors,
+                    )
+                continue
+
+            # Use the validator's normalised payload — ``price`` /
+            # ``size`` / ``timestamp`` coerced to ``float``, ``side``
+            # upper-cased to ``BUY`` / ``SELL``, provenance fields
+            # (``ingestion_time`` / ``processing_time`` / ``source``)
+            # added. The ``trade_id`` / ``token_id`` / ``maker_address``
+            # / ``taker_order_id`` fields are passed through unchanged
+            # from the CLOB normalisation in ``clob_client.get_public_trades``.
+            norm = result.normalized_data
             try:
                 await db_manager.record_trade(
-                    token_id=t.get("token_id") or "",
-                    price=float(t.get("price") or 0.0),
-                    size=float(t.get("size") or 0.0),
-                    side=str(t.get("side") or ""),
-                    timestamp=float(t.get("timestamp") or 0.0),
-                    trade_id=t.get("trade_id") or "",
-                    maker_address=t.get("maker_address") or "",
-                    taker_order_id=t.get("taker_order_id") or "",
+                    token_id=norm.get("token_id") or "",
+                    price=float(norm.get("price") or 0.0),
+                    size=float(norm.get("size") or 0.0),
+                    side=str(norm.get("side") or ""),
+                    timestamp=float(norm.get("timestamp") or 0.0),
+                    trade_id=norm.get("trade_id") or "",
+                    maker_address=norm.get("maker_address") or "",
+                    taker_order_id=norm.get("taker_order_id") or "",
                 )
                 written += 1
             except Exception as e:

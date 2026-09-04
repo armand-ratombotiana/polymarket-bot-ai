@@ -20,7 +20,7 @@ import pickle
 import time
 from collections import deque
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from sklearn.calibration import CalibratedClassifierCV
@@ -1238,6 +1238,52 @@ class MarketMLModel:
         model.fit_initial()
         model.save()
         return model
+
+    # ── W24-2 — Fresh-ensemble factory for out-of-sample validation ──────
+    #
+    # ``_create_ensemble`` returns a fresh, unfitted, sklearn-style
+    # classifier (a ``Pipeline(StandardScaler + RandomForestClassifier)``)
+    # that the :class:`OutOfSampleValidator` can ``.fit(X, y)`` on the
+    # train window and ``.predict_proba(X)`` on the validation / test
+    # windows. Returned fresh on every call so the validator's per-run
+    # ``model_factory`` invocation gets a clean state — no risk of
+    # state leakage from a prior fit.
+    #
+    # The factory is **deliberately simpler** than the full 4-member
+    # production ensemble (RF + GB + SGD + LightGBM + meta-learner + post-hoc
+    # calibrator). The full ensemble is too slow to retrain in the
+    # OOS validator's tight loop (which trains one model per
+    # ``validate()`` call) AND it carries the live-model singleton's
+    # online-update state, which would defeat the OOS test's purpose.
+    # The pipeline returned here matches the W11-era ensemble's *shape*
+    # (StandardScaler + RF) — the validator's job is to measure the
+    # generalization gap of a representative learner, not to reproduce
+    # the exact production blend.
+    #
+    # ``random_state=SEED`` pins the RF's bootstrap to a deterministic
+    # outcome so the same training data produces the same metrics across
+    # runs (critical for reproducible OOS validation reports).
+    def _create_ensemble(self) -> Any:
+        """Return a fresh, unfitted sklearn ``Pipeline`` for OOS validation.
+
+        The pipeline is ``StandardScaler → RandomForestClassifier`` with
+        ``random_state=SEED`` for reproducibility. Exposed publicly so the
+        W24-2 :class:`OutOfSampleValidator` can pull a fresh learner via
+        ``ml_model._create_ensemble()`` per ``validate()`` invocation.
+        """
+        from sklearn.ensemble import RandomForestClassifier as _RF
+        from sklearn.pipeline import Pipeline as _Pipeline
+
+        return _Pipeline(steps=[
+            ("scaler", StandardScaler()),
+            ("clf", _RF(
+                n_estimators=80,
+                max_depth=8,
+                min_samples_leaf=5,
+                random_state=SEED,
+                n_jobs=-1,
+            )),
+        ])
 
 
 # Global singleton

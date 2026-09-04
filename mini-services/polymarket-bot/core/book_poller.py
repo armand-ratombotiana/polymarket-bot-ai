@@ -183,18 +183,65 @@ class BookPoller:
         )
         await store.update_order_book(book)
 
-        # Ingest into TimescaleDB / PostgreSQL asynchronously
+        # W24-4 — Ingestion-time validation gate. Runs the snapshot
+        # through ``DataValidator.validate_snapshot`` (dedup by hash,
+        # schema check, value-range check, staleness detection,
+        # timestamp normalisation) BEFORE persisting to TimescaleDB.
+        # A rejected snapshot is logged and the downstream
+        # ``record_snapshot`` / ``record_tick`` calls are skipped so a
+        # bad row never reaches the hypertable. Duplicates are
+        # silently dropped at ``debug`` level (the CLOB legitimately
+        # returns the same book on consecutive polls within a single
+        # Tier-1 interval, so dedup is the expected steady state, not
+        # an error).
+        #
+        # The in-memory ``store.order_books`` is updated ABOVE this
+        # gate intentionally — the live trading path needs the freshest
+        # top-of-book even if the snapshot is a duplicate (a duplicate
+        # is the SAME data we already saw, so updating the store is a
+        # no-op semantically; rejecting the DB write just avoids the
+        # hypertable row inflation that drove the W24-4 task).
+        from core.data_validator import data_validator
+
+        raw_snapshot = {
+            "token_id": token_id,
+            "best_bid": book.best_bid,
+            "best_ask": book.best_ask,
+            "timestamp": data.get("timestamp") or book.updated_at,
+            "source": "clob_rest",
+        }
+        if book.mid is not None:
+            raw_snapshot["mid"] = book.mid
+        if book.spread is not None:
+            raw_snapshot["spread"] = book.spread
+
+        result = data_validator.validate_snapshot(raw_snapshot)
+        if not result.is_valid:
+            if result.is_duplicate:
+                log.debug(
+                    "[book_poller] Skipping duplicate snapshot for %s",
+                    token_id[:12],
+                )
+            else:
+                log.warning(
+                    "[book_poller] Invalid snapshot for %s: %s",
+                    token_id[:12],
+                    result.errors,
+                )
+            return
+
+        # Ingest into TimescaleDB / PostgreSQL asynchronously (W21-5 —
+        # pass the full bid / ask ladders through to ``record_snapshot``
+        # so the JSON columns (``bids_json`` / ``asks_json``) and the
+        # depth-10 summaries (``bid_depth_10`` / ``ask_depth_10``) are
+        # persisted on both the PostgreSQL hypertable and the SQLite
+        # fallback. The ladders are converted from ``PriceLevel``
+        # dataclass instances to plain ``{"price": float, "size":
+        # float}`` dicts — the shape
+        # ``database_manager.get_order_book_depth`` parses back out of
+        # the JSON column on read.)
         slug = store.market_slugs.get(token_id, token_id[:16])
         from core.timescale_db import timescale_db
-        # W21-5 — pass the full bid / ask ladders through to
-        # ``record_snapshot`` so the JSON columns (``bids_json`` /
-        # ``asks_json``) and the depth-10 summaries
-        # (``bid_depth_10`` / ``ask_depth_10``) are persisted on both
-        # the PostgreSQL hypertable and the SQLite fallback. The
-        # ladders are converted from ``PriceLevel`` dataclass
-        # instances to plain ``{"price": float, "size": float}``
-        # dicts — the shape ``database_manager.get_order_book_depth``
-        # parses back out of the JSON column on read.
         bids_payload = [{"price": b.price, "size": b.size} for b in bids]
         asks_payload = [{"price": a.price, "size": a.size} for a in asks]
         asyncio.create_task(

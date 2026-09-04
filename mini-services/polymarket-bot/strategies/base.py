@@ -34,14 +34,23 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any, Optional
 
 from config import settings
 from core.clob_client import OrderArgs, clob_client
 from core.data_store import Order, store
+# W24-3 — Pre-submission risk gate (God Mode §pre-submission-gate). Runs
+# BEFORE the existing risk_manager.check_order so account-state /
+# market-data / idempotency / circuit-breaker checks the existing gate
+# doesn't cover are enforced on every order. Rejections are recorded in
+# the rejected-opportunities store (fire-and-forget) so the operator
+# dashboard surfaces them in the same analytics roll-up as
+# risk-manager rejections.
+from core.pre_submission_gate import pre_submission_gate
 from paper.simulator import paper_sim
 from risk.manager import risk_manager
 
@@ -349,7 +358,12 @@ class BaseStrategy(StrategyContract):
 
     # ── Order helpers ─────────────────────────────────────────────────────
 
-    async def submit_order(self, args: OrderArgs, decision_id: str = "") -> Order | None:
+    async def submit_order(
+        self,
+        args: OrderArgs,
+        decision_id: str = "",
+        gate_context: dict[str, Any] | None = None,
+    ) -> Order | None:
         """
         Submit an order through the risk manager, then either:
         - Paper mode: record in PaperSimulator
@@ -359,6 +373,46 @@ class BaseStrategy(StrategyContract):
         ``decision_id`` (R11) links the resulting ORDER (and downstream FILL)
         stage to the originating PREDICTION → SIGNAL chain in the unified
         decision ledger. Defaults to "" for legacy / manual callers.
+
+        W24-3 — Pre-submission risk gate (God Mode §pre-submission-gate).
+        BEFORE the existing ``risk_manager.check_order`` gate runs, this
+        method calls ``pre_submission_gate.check(...)`` with the order
+        request + caller-supplied market / account context so the
+        14-check pre-submission gate (kill switch / balance / exposure /
+        single-position / open-orders / daily-loss / drawdown / data
+        freshness / spread / liquidity / edge / confidence / idempotency
+        / circuit breaker) is enforced on EVERY order. When the gate
+        rejects, the order is short-circuited (returns ``None``) and the
+        rejection is recorded in the rejected-opportunities store
+        (fire-and-forget async) so the operator dashboard can surface
+        "what the gate rejected and why" in the same analytics roll-up
+        that surfaces risk-engine rejections.
+
+        ``gate_context`` (W24-3) is an optional dict carrying the
+        market / account context the gate needs to enforce account-state
+        and market-data checks. When ``None`` (the default for backward-
+        compatible callers), the gate's account-state and market-data
+        checks are recorded as PASSED with the explicit
+        ``"skipped — no input data"`` message — the gate still runs the
+        kill-switch / idempotency / circuit-breaker checks (which don't
+        depend on caller-supplied context). Callers that want full
+        enforcement pass a dict like::
+
+            {
+                "edge": 0.05,
+                "confidence": 0.62,
+                "market_data": {"best_bid": 0.48, "best_ask": 0.52,
+                                  "spread": 0.04, "liquidity": 250.0,
+                                  "last_update": time.time()},
+                "account_state": {"balance": 95.0, "total_exposure": 12.0,
+                                    "open_orders": 3, "daily_pnl": 0.4,
+                                    "drawdown": 0.02,
+                                    "max_total_exposure": 25.0,
+                                    "max_single_position": 3.0,
+                                    "max_open_orders": 8,
+                                    "daily_loss_limit": -2.0,
+                                    "max_drawdown_limit": 0.15},
+            }
 
         W18-1 — Order State Machine (OSM) wiring (closes the P0-C-01 gap
         surfaced by the W17-2 Bot Execution Engine Assessment). Every
@@ -391,6 +445,29 @@ class BaseStrategy(StrategyContract):
         side_str = (
             args.side.value if hasattr(args.side, "value") else str(args.side)
         )
+        # W24-6 — duplicate-order prevention. Consult the unified dedup
+        # registry BEFORE any OSM / risk / paper / live work so a
+        # duplicate submit (same token_id + side + size + price within
+        # a short TTL window) short-circuits with a warning rather than
+        # booking a second order on the book. The 60s TTL is short enough
+        # that legitimate re-quotes (e.g. a market maker refreshing the
+        # same price 5 minutes later) still go through, but a stuck retry
+        # loop spamming the same order is throttled. Best-effort: a
+        # registry exception must NEVER block the order path (mirrors the
+        # fail-soft contract of every other audit singleton in the bot).
+        try:
+            from core.dedup import dedup_registry
+            order_key = f"{args.token_id}:{side_str}:{args.size}:{args.price}"
+            if not dedup_registry.check_and_add("order", order_key, ttl_seconds=60):
+                log.warning(
+                    "[%s] Duplicate order blocked by dedup registry: %s",
+                    self.name,
+                    order_key[:64],
+                )
+                return None
+        except Exception as e:  # noqa: BLE001 — dedup must never break trading
+            log.debug("[%s] dedup_registry check failed (continuing): %s", self.name, e)
+
         if self._paper:
             osm_order_id = f"paper-{uuid.uuid4().hex[:12]}"
         else:
@@ -426,6 +503,144 @@ class BaseStrategy(StrategyContract):
             paper=self._paper,
             decision_id=decision_id,
         )
+
+        # W24-3 — Pre-submission risk gate. Runs BEFORE the existing
+        # ``risk_manager.check_order`` so the 14-check gate (kill switch /
+        # balance / exposure / single-position / open-orders / daily-loss /
+        # drawdown / data freshness / spread / liquidity / edge / confidence
+        # / idempotency / circuit breaker) is enforced on EVERY order. When
+        # ``gate_context`` is None (the default for backward-compatible
+        # callers), the account-state and market-data checks are recorded
+        # as PASSED with the explicit "skipped — no input data" message —
+        # the gate still runs the kill-switch / idempotency / circuit-breaker
+        # checks (which don't depend on caller-supplied context). When the
+        # gate rejects, the order is short-circuited (returns ``None``) and
+        # the rejection is recorded in the rejected-opportunities store
+        # (fire-and-forget async) so the operator dashboard can surface
+        # "what the gate rejected and why" in the same analytics roll-up
+        # that surfaces risk-engine rejections.
+        gate_ctx = gate_context or {}
+        gate_result = pre_submission_gate.check(
+            order_request={
+                "token_id": args.token_id,
+                "side": side_str,
+                "size": args.size,
+                "price": args.price,
+                "strategy": self.name,
+                "order_id": osm_order_id,
+                **(
+                    {"edge": float(gate_ctx["edge"])}
+                    if "edge" in gate_ctx else {}
+                ),
+                **(
+                    {"confidence": float(gate_ctx["confidence"])}
+                    if "confidence" in gate_ctx else {}
+                ),
+            },
+            market_data=gate_ctx.get("market_data") or None,
+            account_state=gate_ctx.get("account_state") or None,
+        )
+        if not gate_result.approved:
+            log.warning(
+                "[%s] Order rejected by pre-submission gate: %s (%s)",
+                self.name,
+                gate_result.rejection_reason,
+                gate_result.rejection_category,
+            )
+            await store.log_event(
+                f"⚠ Gate block [{self.name}]: "
+                f"{gate_result.rejection_category} — {gate_result.rejection_reason}"
+            )
+            # W24-3 — record the rejection in the rejected-opportunities
+            # store so the operator dashboard surfaces it. Fire-and-forget
+            # (``asyncio.create_task``) so a store write never blocks the
+            # order path — mirrors the contract on
+            # ``risk_manager.check_order``'s wrapper that records the same
+            # store on risk-rejected orders.
+            try:
+                from core.rejected_opportunities import (
+                    record_rejected_opportunity,
+                )
+                asyncio.create_task(record_rejected_opportunity(
+                    token_id=args.token_id,
+                    strategy=self.name,
+                    signal_action=side_str,
+                    signal_price=float(args.price) if args.price else 0.0,
+                    signal_size=float(args.size) if args.size else 0.0,
+                    predicted_edge=float(gate_ctx.get("edge", 0.0) or 0.0),
+                    confidence=float(gate_ctx.get("confidence", 0.0) or 0.0),
+                    rejection_reason=gate_result.rejection_category,
+                    rejection_details={
+                        "raw_message": gate_result.rejection_reason,
+                        "check_name": gate_result.rejection_category,
+                        "gate_layer": "pre_submission",
+                        "all_checks": [
+                            c.to_dict() for c in gate_result.checks
+                        ],
+                    },
+                    market_price_at_rejection=(
+                        float(gate_ctx.get("market_data", {}).get("mid", 0.0))
+                        if gate_ctx.get("market_data") else None
+                    ),
+                    correlation_id=decision_id or None,
+                ))
+            except Exception as e:  # noqa: BLE001 — fire-and-forget must never break trading
+                log.debug(
+                    "[%s] rejected_opportunities record failed for gate "
+                    "rejection (continuing): %s", self.name, e,
+                )
+            # W18-1 — record the REJECTED transition so a gate-rejected
+            # order is visible in the OSM audit trail with the rejection
+            # reason stamped in metadata. Mirrors the existing risk-reject
+            # OSM block: VALIDATED (with risk_rejected metadata) → REJECTED.
+            try:
+                from core.order_state_machine import OrderState, osm
+                if osm_order is not None:
+                    osm.transition(
+                        osm_order.order_id,
+                        OrderState.VALIDATED,
+                        metadata={
+                            "gate_rejected": True,
+                            "reason": gate_result.rejection_reason,
+                            "category": gate_result.rejection_category,
+                        },
+                    )
+                    osm.transition(
+                        osm_order.order_id,
+                        OrderState.REJECTED,
+                        metadata={
+                            "reason": gate_result.rejection_reason,
+                            "category": gate_result.rejection_category,
+                            "gate_layer": "pre_submission",
+                        },
+                    )
+            except Exception as e:
+                log.debug(
+                    "[%s] OSM gate-REJECTED transition failed: %s",
+                    self.name, e,
+                )
+            # R11 — record a GATE_REJECTED stage in the decision ledger so
+            # the chain shows why the order never reached the book. Best-
+            # effort: a ledger exception must NEVER block the order path.
+            try:
+                from core.decision_ledger import decision_ledger
+                await decision_ledger.record(
+                    decision_id=decision_id,
+                    stage="GATE_REJECTED",
+                    token_id=args.token_id,
+                    strategy=self.name,
+                    pnl=0.0,
+                    side=side_str,
+                    price=args.price,
+                    size=args.size,
+                    reason=gate_result.rejection_reason,
+                )
+            except Exception as e:
+                log.debug(
+                    "[%s] ledger GATE_REJECTED record failed: %s",
+                    self.name, e,
+                )
+            return None
 
         allowed, reason = await risk_manager.check_order(provisional)
         if not allowed:
