@@ -29484,3 +29484,136 @@ conftest pattern.
    to verify the live-mode OSM transitions (SUBMITTED →
    ACKNOWLEDGED → OPEN via the live path, plus the REJECTED branch
    when `clob_client` returns `None`). Out of scope for W28-4.
+
+---
+
+## W30-5 — Verify all 31 sidebar panels render correctly via Agent Browser
+
+- **Date:** 2026-09-04
+- **Scope:** Visual verification that every sidebar nav item renders
+  without crashing the panel error boundary. Includes a smoke pass on
+  the four cross-cutting interactions the task spec calls out
+  (Positions table, Command Center KPIs, Cmd+K shortcut, theme
+  toggle). No source code edits — verification only.
+
+### Background / investigation
+
+- The task brief asked to open `http://localhost:3000/`, click each of
+  the 31 sidebar nav items, and confirm none of them trips the
+  `PanelErrorBoundary`. The dashboard is a single Next.js page
+  (`src/app/page.tsx`) that swaps the active panel via local React
+  state; `Sidebar.tsx` declares exactly 31 `NavItem`s grouped under
+  `main` / `markets` / `portfolio` / `capital` / `strategies` /
+  `intelligence` / `analytics` / `system` (verified by reading
+  `NAV_GROUPS` in `src/components/Sidebar.tsx`).
+- The two sidebar items labelled **"Performance"** are distinct
+  panels — one is `strategies-performance` (Strategy group, no
+  shortcut) and the other is `analytics-performance` (Analytics
+  group, keyboard shortcut "press 8"). The agent-browser snapshot
+  distinguishes them via the shortcut annotation in the accessible
+  name; refs `@e39` and `@e45` are assigned separately.
+- A first attempt with the Next.js dev server (`next dev`, Turbopack)
+  was unstable: `dmesg` showed repeated
+  `Out of memory: Killed process 5244 (next-server …)` with
+  `anon-rss:1768288kB`. The sandbox has 4 GB RAM / 0 swap and Chrome
+  headless needs ~150 MB; with the dev server already at ~1.7 GB RSS,
+  every `agent-browser open` pushed total committed memory past the
+  limit and the OOM killer reclaimed the largest victim (next-server).
+- Stabilisation strategy: built the app once with
+  `NODE_OPTIONS="--max-old-space-size=2048" next build`, copied
+  `.next/static` into `.next/standalone/.next/`, and ran the
+  production server (`node server.js` inside `.next/standalone/`).
+  Cold-start RSS dropped from ~1.7 GB to ~50 MB, leaving ~2.8 GB
+  headroom for the browser. The server was still killed once during
+  the run; the verify script restarts it transparently and re-opens
+  the dashboard so the run completes end-to-end.
+
+### Findings — all 31 panels render
+
+Each row is `panel id (sidebar label) — error-boundary state — first
+~200 chars of `.page-area` innerText`. All 31 panels returned
+`OK` (no `panel-error-boundary` element present) and rendered
+their expected panel content (not the previous panel's stale DOM).
+
+| # | Panel ID | Sidebar label | State | Page-area excerpt |
+|---|----------|---------------|-------|-------------------|
+| 1 | `command` | Command Center | ✅ OK | 🛡 RISK & EXPOSURE · UNAVAILABLE · Risk engine offline or starting up. · ⚡ ACTIVE ORDER BOOKS (0) · L2 STREAM · Avg Spread: 0.0¢ · … |
+| 2 | `markets-books` | Live Books | ✅ OK | ⚡ ACTIVE ORDER BOOKS (0) · L2 STREAM · Avg Spread: 0.0¢ · ALL · CRYPTO · POLITICS · ECONOMY · SPORTS · TECH · Synchronizing live prediction market order books… |
+| 3 | `markets-screener` | Screener | ✅ OK | 🔍 PREDICTION MARKET SCREENER · 0 OF 0 MARKETS · ⚠️ Failed to load markets (HTTP 404) · Retry · MARKET EVENT / CATEGORY / 24H VOLUME / LIQUIDITY / ACTION · No markets |
+| 4 | `markets-order-flow` | Order Flow | ✅ OK | TOKEN · No markets available · 30s · 1m · 5m · Δ +0.0 · IMB 0% · TAPE 0/min · ORDER FLOW — BUYS VS SELLS + CUMULATIVE Δ · No order flow in the last 1m · BID / ASK IMBALANCE |
+| 5 | `portfolio-positions` | Positions | ✅ OK | 💼 ACTIVE POSITIONS (0) · USD 25 EXPOSURE CAP · EXPOSURE: $0.00 (0%) · REALIZED: +$0.00 · DAILY PNL: +$0.00 · 💼 No positions found · Automated strategies (Market Maker, Arbitrage, Signal Trader) will populate live positions here. |
+| 6 | `portfolio-orders` | Orders | ✅ OK | 📋 WORKING ORDERS (0) · 📋 No working limit orders · Active market making & arbitrage quoting loops will place limit orders in the matching engine. |
+| 7 | `portfolio-trades` | Trades & Fills | ✅ OK | ⚡ RECENT EXECUTIONS (0) · AUDIT STREAM · VOL: $0.00 · NET P&L: +$0.00 · ⚡ No executed trades · Fills will appear here as orders match against live Polymarket books. |
+| 8 | `capital-allocator` | Capital Allocator | ✅ OK | CAPITAL ALLOCATOR · MICHAELIS-MENTEN · Allocator API unavailable · Allocator endpoint returned 404 · Retry |
+| 9 | `strategies-registry` | Strategy Registry | ✅ OK | ⚡ QUANTITATIVE STRATEGY MATRIX · 0 OF 3 IMPLEMENTED ACTIVE · 47 STUBS / RESEARCH · Catalog: Failed to load strategy catalog (HTTP 404) · Performance: Failed to … |
+| 10 | `strategies-arbitrage` | Arbitrage | ✅ OK | ⚡ High-Frequency Binary Dutch-Book Arbitrage Scanner · PAPER MODE · $3 CAP · Real-time mispricing detector: Ask(YES) + Ask(NO) < $1.00 - fees · ACTIVE ARBS: 0 · MAX EDGE: +0 bps · AVG NET ROI: +0.00% |
+| 11 | `strategies-performance` | Performance (Strategy group) | ✅ OK | Strategy performance endpoint unavailable · GET /api/strategies/performance → 404 Not Found · Retry |
+| 12 | `intelligence-analysis` | Deep Analysis | ✅ OK | Analysis Engine Offline · Failed to fetch deep analysis (HTTP 404) · Retry Analysis |
+| 13 | `intelligence-aiml` | AI / ML Engine | ✅ OK | 🧠 AI / ML Quantitative Telemetry & Gated Model Registry · 38-FEATURE PIPELINE · Calibrated 4-Member Ensemble (RF + GB + SGD + LightGBM) · Isotonic Regression · Continuous Drift Supervision · ACTIVE: V1.C… |
+| 14 | `intelligence-copilot` | Copilot | ✅ OK | 💡 MARKET INTELLIGENCE & QUANT COPILOT · TF/IDF Semantic Search + 4-Member Calibrated ML Insights · GENAI HYBRID ENGINE · ONLINE · 🎯 Top high-conviction ML opportunities · ⚖️ Current 4-member ensemble weights |
+| 15 | `intelligence-shadow` | Shadow Inference | ✅ OK | SHADOW INFERENCE + COUNTERFACTUAL JOURNAL · Unable to reach any shadow-inference backend. Retrying… · LIVE · CHALLENGER MODELS (0) · Register Challenger · Champion (active) · Shadow (validated, not promote |
+| 16 | `intelligence-validation` | ML Validation | ✅ OK | ML Validation & Walk-Forward CV · GOVERNANCE + DRIFT · /api/ml/metrics · /api/ml/drift · /api/ml/versions · ML validation backend unreachable · All ML validation endpoints returned no payload · Retry |
+| 17 | `analytics-performance` | Performance (Analytics group, "press 8") | ✅ OK | 📈 EQUITY CURVE · Equity: Failed to load equity timeline (HTTP 404) · ⏱️ Accumulating paper execution points… · Baseline: $100.00 Operating Capital · Analytics data unavailable · 🏆 STRATEGY LEADERBOARD · RISK-ADJUSTED |
+| 18 | `analytics-performance-report` | Performance Report | ✅ OK | 📈 Honest Performance Report · Per-Category · ⚠ HTTP 404 · ⚠ Performance Metrics Disclaimer · ⚠ Backtest performance does NOT guarantee future results. Only paper/live metrics reflect actual system beha |
+| 19 | `analytics-backtest` | Backtest Lab | ✅ OK | 🧪 Quantitative Backtest & Binary Payoff Simulation Lab · KELLY SIZING MODEL · Monte Carlo path modeling, $1.00 binary resolution payouts, and institutional metrics (VaR 95%, Calmar, Brier) · TRADING STRA |
+| 20 | `analytics-attribution` | Attribution | ✅ OK | ATTRIBUTION ANALYSIS · Attribution unavailable · HTTP 404 Not Found · Retry |
+| 21 | `analytics-execution` | Execution Quality | ✅ OK | Execution Quality Ledger Unreachable · Could not load per-fill execution quality metrics from /api/execution-quality. · HTTP 404 — … |
+| 22 | `analytics-closed` | Closed Positions | ✅ OK | Failed to load closed positions · positions: HTTP 404 · stats: HTTP 404 · Retry |
+| 23 | `system-health` | System Health | ✅ OK | System health telemetry endpoint unavailable. · System health endpoint unavailable (HTTP 404) · Retry · Dismiss |
+| 24 | `system-database` | Data Explorer | ✅ OK | System health telemetry endpoint unavailable. · System health endpoint unavailable (HTTP 404) · Retry · Dismiss |
+| 25 | `system-database-status` | Database | ✅ OK | System health telemetry endpoint unavailable. · System health endpoint unavailable (HTTP 404) · Retry · Dismiss |
+| 26 | `system-observability` | Observability | ✅ OK | Observability endpoint unavailable · HTTP 404 Not Found · Retry |
+| 27 | `system-retention` | Retention | ✅ OK | Data Retention & Pruning · BOUNDED-STORAGE POLICY · Four SQLite stores · 7d / 30d / 30d / 90d horizons · POST /api/system/prune · 0 OPS LOGGED · Retention backend unreachable · GET /api/system/health |
+| 28 | `system-decisions` | Decision Ledger | ✅ OK | 🧠 DECISION LEDGER · OFFLINE · Decision ledger unavailable · HTTP 404 · Retry |
+| 29 | `system-safety` | Safety Gate | ✅ OK | LIVE SAFETY GATE · §82 · UNAVAILABLE · Safety-gate endpoint unavailable. The bot may be starting up, or the /api/live/readiness route is not responding. · readiness endpoint returned 404 · Retry |
+| 30 | `system-rate-limit` | Rate Limits | ✅ OK | Rate-limit stats endpoint unavailable · HTTP 404 Not Found · Retry |
+| 31 | `system-audit` | Audit Log | ✅ OK | 📋 AUDIT LOG · OFFLINE · Audit trail unavailable · HTTP 404 · Retry |
+
+**Summary: 31/31 panels render OK.** No `PanelErrorBoundary` was triggered
+on any panel. The HTTP-404 messages are the expected fallback states —
+the Python backend (`mini-services/polymarket-bot`) is not running in
+this sandbox, so each panel surfaces its inline `Retry` UI rather than
+crashing. The shells themselves render successfully.
+
+### Cross-cutting interaction tests
+
+| Interaction | Expected | Actual | Status |
+|---|---|---|---|
+| Click **Positions** | Positions table or empty state renders | "💼 No positions found" empty state with "Automated strategies (Market Maker, Arbitrage, Signal Trader) will populate live positions here." hint | ✅ |
+| Click **Command Center** | Dashboard KPIs render | 🛡 RISK & EXPOSURE, ⚡ ACTIVE ORDER BOOKS (0), 💼 ACTIVE POSITIONS (0) — all three KPI cards present | ✅ |
+| Press **Cmd+K** | Command palette opens | The page.tsx `case 'k'` branch (lines 486–491) intentionally routes Cmd+K to `setShortcutsOpen(true)`, which opens the **Keyboard Cheat Sheet** dialog (visible modal titled "Workstation Keyboard Cheat Sheet"). The `CommandPalette` component is not mounted in `app/page.tsx` — see the W16-8 follow-up comment. The shortcut therefore opens the cheat sheet, not the command palette. | ⚠️ Expected per current code, but **diverges from task spec** which expected the command palette |
+| Click theme toggle | Theme switches | `<html>` className toggles between `dark` ↔ `light`; the toggle button label flips between "Switch to light mode" ↔ "Switch to dark mode" | ✅ |
+
+### Screenshot
+
+`/tmp/w30-command-center.png` — 1280×577 PNG, Command Center panel
+in dark mode. Mirrored copy at `/home/z/my-project/w30-command-center.png`.
+
+### Code changes
+
+None. Verification-only task. No source files were edited.
+
+### Next actions
+
+1. **Dev-server OOM in sandbox.** The `bun run dev` / `next dev`
+   workflow (Turbopack) consistently exceeded the 4 GB sandbox RAM
+   ceiling (anon-rss ~1.7 GB) and was killed by the OOM killer as
+   soon as Chrome headless spun up. The mitigation was to build once
+   and run the standalone production server. If the dev workflow needs
+   to be exercised in this sandbox (e.g. for HMR-fidelity tests), the
+   fix is to add swap (currently blocked — `swapon` requires root) or
+   raise the container memory ceiling. Out of scope here.
+2. **Cmd+K mismatch.** The `app/page.tsx` keyboard handler (line 486)
+   routes `Cmd+K` to the Keyboard Cheat Sheet, with an inline TODO
+   to re-wire to the `CommandPalette` once it's mounted. If the task
+   spec is authoritative (i.e. `Cmd+K` should open the command
+   palette), the follow-up is to mount `CommandPalette` in
+   `app/page.tsx` and change the `case 'k'` branch to open it. The
+   W16-8 comment already calls this out.
+3. **No live data.** All panels that depend on the Python backend
+   (`mini-services/polymarket-bot`) returned HTTP 404 from `/api/...`
+   routes. The panels rendered their inline `Retry` UIs correctly
+   (proving the error paths work), but a future integration pass
+   with the backend running would let us verify the populated-data
+   rendering too.
+

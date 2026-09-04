@@ -202,7 +202,6 @@ async def test_buy_fill_creates_execution_quality_record(unique_token):
 # ── 2. SELL fill that fully closes a position creates a closed_positions row ─
 
 
-@pytest.mark.skip(reason="Passes in isolation — fails in full suite due to shared store state ordering")
 async def test_closing_sell_fill_creates_closed_positions_record(unique_token):
     """A SELL fill that brings ``yes_shares`` from > 0 to exactly 0 must
     produce a row in ``closed_positions`` with the full round-trip
