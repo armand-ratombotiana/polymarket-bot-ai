@@ -321,6 +321,104 @@ async def _recovery_checkpoint_loop() -> None:
             log.debug("[recovery-checkpoint] loop error: %s", e)
 
 
+async def _strategy_health_loop() -> None:
+    """Periodic strategy health monitor sweep (W25-2).
+
+    W25-2 — wires ``core.strategy_health.strategy_health_monitor`` into the
+    server lifecycle as a background loop. Every 5 minutes the loop walks
+    every IMPLEMENTED strategy in ``strategy_registry.get_catalog()``,
+    fetches its recent closed positions from the SQLite-backed
+    ``closed_positions`` journal (one global fetch of the most recent N
+    rows, then filtered per-strategy in memory — cheaper than N per-
+    strategy DB round-trips + matches the W24-8 monitor's contract that
+    the CALLER supplies the trade list so the monitor stays decoupled
+    from the persistence layer), and invokes
+    ``strategy_health_monitor.check_strategy`` so the monitor recomputes
+    the win-rate / expectancy / max-drawdown / error-rate metrics and
+    auto-disables the strategy (via ``StrategyRegistry.disable``) if any
+    threshold is breached.
+
+    After the per-strategy sweep, the loop emits the
+    ``polymarket_alerts_active{severity=...}`` Prometheus gauge from the
+    monitor's ``get_summary()`` counts so a Grafana panel can alert on
+    "≥1 strategy auto-disabled" without scraping the API endpoint.
+
+    The loop is best-effort: a transient closed-positions / monitor /
+    prometheus failure is logged at error level but does NOT break the
+    loop (mirrors the defensive pattern in ``_recovery_checkpoint_loop``
+    / ``_reseed_loop`` — a background sweep must never tear down the
+    server). The first tick is delayed by 5 minutes so the bot has time
+    to seed markets + start its base strategies before the first health
+    evaluation runs (a strategy that hasn't yet traded is INACTIVE, not
+    DEGRADED — the monitor's ``check_strategy`` handles this case
+    natively).
+    """
+    while True:
+        await asyncio.sleep(300)  # 5 minutes
+        try:
+            # ── Lazy import so a broken closed_positions import never
+            # crashes the loop at call time (mirrors the lazy import
+            # discipline in ``StrategyHealthMonitor._disable``).
+            from core.closed_positions import closed_positions as _closed_positions_store
+            from strategies.registry import STATUS_IMPLEMENTED
+
+            # ── One global fetch of the most recent closed positions
+            # across every strategy (limit=200 so each IMPLEMENTED
+            # strategy has a reasonable chance of having ≥10 trades for
+            # the monitor to evaluate against the threshold). Filter
+            # per-strategy in memory to avoid N DB round-trips.
+            recent_positions = await _closed_positions_store.get_closed_positions(
+                limit=200,
+            )
+
+            for strategy_meta in strategy_registry.get_catalog():
+                if strategy_meta.get("status") != STATUS_IMPLEMENTED:
+                    continue
+                # The closed-positions ``strategy`` column stores the
+                # ``strategy_id`` (e.g. ``mm_avellaneda_stoikov``), not
+                # the display name — that's what
+                # ``StrategyRegistry.start_strategy`` passes through to
+                # the position when it's opened.
+                strategy_id = strategy_meta.get("strategy_id") or strategy_meta.get("name", "")
+                strategy_positions = [
+                    p for p in recent_positions
+                    if p.get("strategy") == strategy_id
+                ]
+                # ``check_strategy`` is SYNC (per the W24-8 contract) —
+                # the monitor's whole point is to be callable from a
+                # periodic sweep / sync test / CLI without an event
+                # loop, so we don't ``await`` it.
+                strategy_health_monitor.check_strategy(
+                    strategy_id, strategy_positions,
+                )
+
+            log.info(
+                "[strategy-health] sweep complete: %s",
+                strategy_health_monitor.get_summary(),
+            )
+
+            # ── Prometheus metrics — emit the per-severity counts so a
+            # Grafana panel can alert on "≥1 strategy auto-disabled".
+            # Best-effort: a missing ``alerts_active`` gauge (e.g. the
+            # prometheus_client registry failed to construct at import
+            # time) is swallowed so the sweep never breaks on the
+            # metrics layer.
+            try:
+                from core.prometheus_metrics import alerts_active
+
+                _summary = strategy_health_monitor.get_summary()
+                alerts_active.labels(severity="disabled").set(
+                    int(_summary.get("disabled", 0))
+                )
+                alerts_active.labels(severity="degraded").set(
+                    int(_summary.get("degraded", 0))
+                )
+            except Exception as e:  # noqa: BLE001 — metrics must never break the sweep
+                log.debug("[strategy-health] prometheus emit failed: %s", e)
+        except Exception as e:  # noqa: BLE001 — sweep must never break the loop
+            log.error("[strategy-health] sweep failed: %s", e)
+
+
 # ── Lifespan Manager ──────────────────────────────────────────────────────────
 
 @asynccontextmanager
@@ -663,6 +761,19 @@ async def lifespan(app: FastAPI):
         log.error("[reconciliation] startup pass failed: %s", e)
     recon_task = asyncio.create_task(_reconciliation_loop(), name="reconciliation-daily")
 
+    # W25-2 — start the periodic strategy health monitor sweep (every
+    # 5 min). The loop walks every IMPLEMENTED strategy in the registry,
+    # pulls its recent closed positions from the SQLite journal, calls
+    # ``strategy_health_monitor.check_strategy`` so the monitor's win-
+    # rate / expectancy / drawdown / error-rate thresholds are evaluated
+    # + auto-disables the strategy if any threshold is breached. See
+    # ``_strategy_health_loop`` docstring for the full rationale. The
+    # first tick is delayed 5 min so the bot has time to start its base
+    # strategies before the first evaluation runs.
+    strategy_health_task = asyncio.create_task(
+        _strategy_health_loop(), name="strategy-health"
+    )
+
     log.info("API server ready — 50+ Strategy Hub, Vector DB, and ML ensemble online")
     await store.log_event("✅ Polymarket Pro v3.0 Workstation Online 24/7")
 
@@ -678,6 +789,7 @@ async def lifespan(app: FastAPI):
     persist_task.cancel()
     recon_task.cancel()
     recovery_checkpoint_task.cancel()
+    strategy_health_task.cancel()
     store.save_to_disk()
 
     # W24-1 — final state-recovery checkpoint so the next restart sees the
@@ -7134,6 +7246,113 @@ async def get_paper_performance(
 
     metrics = await performance_reporter.get_paper_trading_metrics(limit=limit)
     return metrics.to_dict()
+
+
+# ── W25-6 — Honest performance reporter backtest summary endpoint ──────────
+# Additive: appends ONE read-only endpoint under ``/api/performance/backtest``
+# so an operator (or the ``AnalyticsPanel`` React component) can surface a
+# best-of-N backtest summary WITHOUT having to scan the full
+# ``GET /api/backtest/experiments`` listing. The summary intentionally exposes
+# only the headline metrics (``best_return`` / ``best_sharpe`` /
+# ``best_strategy`` / ``n_experiments``) — NOT the equity curve, NOT the trade
+# list, NOT the full config blob — so a dashboard polling every 30 s can't
+# accidentally pull a 30-MB experiment payload through the metrics path.
+#
+# The ``disclaimer`` field is always present (even when
+# ``n_experiments > 0``) and reiterates the cardinal rule: backtest
+# performance does NOT guarantee future results, may be overfit, and
+# should be cross-checked against the walk-forward + paper-trading metrics
+# for an honest assessment. Mirrors the disclaimer on
+# ``GET /api/performance/report`` (W24-5).
+#
+# Auth enforced by ``enforce_api_auth`` (path is NOT in ``PUBLIC_PATHS``).
+# Rate-limited by ``READ_LIMIT`` so a dashboard polling every 30 s can't
+# starve the trading path.
+@app.get(
+    "/api/performance/backtest",
+    tags=["analytics"],
+    summary="Backtest performance summary (best experiment + disclaimer)",
+    description=(
+        "Returns a best-of-N backtest summary derived from the W20-3 "
+        "experiment store. Surfaces only headline metrics "
+        "(``best_return`` / ``best_sharpe`` / ``best_strategy`` / "
+        "``n_experiments``) — NOT the full equity curve / trade list / "
+        "config blob — so a dashboard polling every 30 s doesn't pull "
+        "30 MB of experiment payload. The ``disclaimer`` field is "
+        "always present and reiterates that backtest performance does "
+        "NOT guarantee future results."
+    ),
+)
+@limiter.limit(READ_LIMIT)
+async def get_backtest_performance(
+    request: Request,  # noqa: ARG001 — slowapi requires the `request` arg
+):
+    """Get backtest performance summary.
+
+    Pulls the 10 most-recent experiments from the SQLite-backed
+    ``backtesting.experiment_store`` and returns the best one by
+    ``total_return``. When the store is empty (fresh deployment, no
+    backtest run yet), returns ``{"category": "backtest",
+    "n_experiments": 0, "message": "No backtest experiments yet"}``
+    so the dashboard renders the empty-state rather than crashing.
+
+    Shape (empty store)::
+
+        {
+          "category": "backtest",
+          "n_experiments": 0,
+          "message": "No backtest experiments yet"
+        }
+
+    Shape (non-empty store)::
+
+        {
+          "category": "backtest",
+          "n_experiments": 3,
+          "best_return": 0.123,
+          "best_sharpe": 1.85,
+          "best_strategy": "mm_avellaneda_stoikov",
+          "disclaimer": "Backtest performance does NOT guarantee future
+                         results. May be overfit. See walk-forward and
+                         paper-trading metrics for honest assessment."
+        }
+    """
+    from backtesting.experiment_store import experiment_store
+
+    # The singleton can be ``None`` when the on-disk DB path isn't
+    # writable (e.g. the read-only sandbox); surface the empty-state so
+    # the dashboard renders gracefully rather than 500-ing.
+    if experiment_store is None:
+        return {
+            "category": "backtest",
+            "n_experiments": 0,
+            "message": "Backtest experiment store unavailable",
+        }
+
+    experiments = experiment_store.list_experiments(limit=10)
+    if not experiments:
+        return {
+            "category": "backtest",
+            "n_experiments": 0,
+            "message": "No backtest experiments yet",
+        }
+    # Pick the best experiment by total_return. ``max`` with a default
+    # of 0 guards against an experiment whose ``total_return`` is missing
+    # (``BacktestExperiment`` always writes it, but a future schema-migration
+    # could regress that — the ``or 0`` keeps the route defensive).
+    best = max(experiments, key=lambda e: e.get("total_return", 0) or 0)
+    return {
+        "category": "backtest",
+        "n_experiments": len(experiments),
+        "best_return": best.get("total_return", 0),
+        "best_sharpe": best.get("sharpe", 0),
+        "best_strategy": best.get("strategy", "unknown"),
+        "disclaimer": (
+            "Backtest performance does NOT guarantee future results. "
+            "May be overfit. See walk-forward and paper-trading metrics "
+            "for honest assessment."
+        ),
+    }
 
 
 # ── W24-7 — API resilience layer health endpoint ─────────────────────────────

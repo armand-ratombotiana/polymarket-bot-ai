@@ -16,6 +16,8 @@
 //      a glance whether the rankings are real-time or lagged.
 'use client'
 
+import { useState, useEffect } from 'react'
+import { AlertTriangle, X } from 'lucide-react'
 import { useRealtimeData } from '@/hooks/useRealtimeData'
 import { Badge } from '@/components/ui/badge'
 
@@ -47,7 +49,7 @@ function isLeaderboardPayload(d: unknown): boolean {
 }
 
 export default function LeaderboardPanel() {
-  const { data, isLoading, isRealtime } = useRealtimeData<LeaderboardResponse>(
+  const { data, isLoading, isRealtime, error } = useRealtimeData<LeaderboardResponse>(
     '/api/leaderboard',
     {
       wsChannel: 'metrics',
@@ -58,6 +60,40 @@ export default function LeaderboardPanel() {
 
   const rows: StrategyRow[] = data?.ranked ?? []
 
+  // W22-1 backwards-compat — surface fetch failures via a dismissable
+  // inline banner so the trader knows the leaderboard fetch failed and
+  // the rankings are stale. useRealtimeData exposes the latest error
+  // string (or null when the last fetch succeeded); we mirror it into
+  // local state so we can track dismissal independently. The banner
+  // re-appears whenever a fresh error arrives.
+  const wrappedError = error ? `Leaderboard: ${error}` : null
+  const [dismissedError, setDismissedError] = useState<string | null>(null)
+  useEffect(() => {
+    if (wrappedError && wrappedError !== dismissedError) {
+      setDismissedError(null)
+    }
+  }, [wrappedError, dismissedError])
+  const showError = wrappedError && wrappedError !== dismissedError
+  const dismissError = () => setDismissedError(wrappedError)
+  const errorBanner = showError && (
+    <div
+      className="banner-danger text-[10.5px] mx-3 mt-2 py-1.5 px-2.5 flex items-center justify-between"
+      role="alert"
+    >
+      <span className="flex items-center gap-1.5">
+        <AlertTriangle className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+        <span>{wrappedError}</span>
+      </span>
+      <button
+        onClick={dismissError}
+        className="hover:underline text-xs flex items-center gap-0.5 shrink-0"
+        aria-label="Dismiss leaderboard error"
+      >
+        <X className="w-3 h-3" aria-hidden="true" /> Dismiss
+      </button>
+    </div>
+  )
+
   if (isLoading && rows.length === 0) {
     return (
       <div className="card p-3 flex flex-col justify-between bg-[#13161e] border border-[#1f2335]">
@@ -65,6 +101,7 @@ export default function LeaderboardPanel() {
           <span className="card-title text-xs font-bold text-[#dde1ed]">🏆 Strategy Leaderboard</span>
           <span className="badge badge-dim text-[9.5px]">Risk-Adjusted</span>
         </div>
+        {errorBanner}
         <div className="flex items-center justify-center py-6 text-xs text-[#7e8aaa]">
           <span className="spinner mr-2" aria-hidden="true" />
           Loading leaderboard…
@@ -87,6 +124,7 @@ export default function LeaderboardPanel() {
           </div>
           <span className="badge badge-dim text-[9.5px]">Risk-Adjusted</span>
         </div>
+        {errorBanner}
         <div className="flex flex-col items-center justify-center py-6 text-xs text-[#7e8aaa] text-center">
           <span className="text-xl mb-1" aria-hidden="true">🏆</span>
           <span>No closed trades yet</span>
@@ -109,6 +147,7 @@ export default function LeaderboardPanel() {
         </div>
         <span className="badge badge-amber text-[9.5px]">Ranked by Score</span>
       </div>
+      {errorBanner}
       <div className="p-2.5 space-y-1.5">
         {rows.map((r, i) => {
           const medal = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `${i + 1}.`

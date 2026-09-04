@@ -96,13 +96,22 @@ export default function SystemHealthView() {
               <AlertTriangle className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
               <span>{error}</span>
             </span>
-            <button
-              onClick={() => { setError(null); setLoading(true); fetchHealth() }}
-              className="hover:underline text-xs flex items-center gap-1 shrink-0"
-              aria-label="Retry health fetch"
-            >
-              <RefreshCw className="w-3 h-3" aria-hidden="true" /> Retry
-            </button>
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                onClick={() => { setError(null); setLoading(true); fetchHealth() }}
+                className="hover:underline text-xs flex items-center gap-1 shrink-0"
+                aria-label="Retry health fetch"
+              >
+                <RefreshCw className="w-3 h-3" aria-hidden="true" /> Retry
+              </button>
+              <button
+                onClick={() => setError(null)}
+                className="hover:underline text-xs flex items-center gap-0.5 shrink-0"
+                aria-label="Dismiss error"
+              >
+                <X className="w-3 h-3" aria-hidden="true" /> Dismiss
+              </button>
+            </div>
           </div>
         )}
       </div>

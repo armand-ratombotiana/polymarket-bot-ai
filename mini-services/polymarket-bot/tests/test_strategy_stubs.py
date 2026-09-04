@@ -149,19 +149,24 @@ def test_catalog_size_is_50(registry):
     assert len(catalog) == len(STRATEGY_CATALOG)
 
 
-def test_catalog_has_six_implemented_strategies(registry):
-    """3 (original concrete strategies) + 3 (W19-6 additions) = 6
-    IMPLEMENTED entries. The six documented ids are:
+def test_catalog_has_eleven_implemented_strategies(registry):
+    """3 (original concrete strategies) + 3 (W19-6 additions) + 5 (W22-3 additions) = 11
+    IMPLEMENTED entries. The eleven documented ids are:
       - mm_avellaneda_stoikov    → MarketMakerStrategy
       - arb_binary_dutch_book    → ArbScannerStrategy
       - ml_random_forest_quant   → SignalTraderStrategy
       - stat_ornstein_uhlenbeck  → MeanReversionStrategy (W19-6)
       - mom_macd_histogram       → MomentumStrategy      (W19-6)
       - ml_isotonic_calibrated   → ValueStrategy         (W19-6)
+      - arb_cross_correlation    → StatisticalArbitrage  (W22-3)
+      - event_news_sentiment     → EventDriven           (W22-3)
+      - event_resolution_sniper  → Convergence           (W22-3)
+      - mm_asymmetric_spread     → SpreadCapture         (W22-3)
+      - mm_grid_liquidity        → LiquidityProvision    (W22-3)
     """
     catalog = registry.get_catalog()
     implemented = [r for r in catalog if r["status"] == STATUS_IMPLEMENTED]
-    assert len(implemented) == 6
+    assert len(implemented) == 11
     implemented_ids = {r["strategy_id"] for r in implemented}
     assert implemented_ids == {
         "mm_avellaneda_stoikov",
@@ -170,29 +175,34 @@ def test_catalog_has_six_implemented_strategies(registry):
         "stat_ornstein_uhlenbeck",
         "mom_macd_histogram",
         "ml_isotonic_calibrated",
+        "arb_cross_correlation",
+        "event_news_sentiment",
+        "event_resolution_sniper",
+        "mm_asymmetric_spread",
+        "mm_grid_liquidity",
     }
 
 
-def test_catalog_has_44_planned_strategies(registry):
-    """50 − 6 = 44 PLANNED stubs. These remain no-op
-    ``QuantStrategyInstance`` wrappers — the W19-6 changes do NOT
+def test_catalog_has_39_planned_strategies(registry):
+    """50 − 11 = 39 PLANNED stubs. These remain no-op
+    ``QuantStrategyInstance`` wrappers — the W22-3 promotion did NOT
     promote any other stubs to IMPLEMENTED."""
     catalog = registry.get_catalog()
     planned = [r for r in catalog if r["status"] == STATUS_PLANNED]
-    assert len(planned) == 44
+    assert len(planned) == 39
     # Every planned entry must report ``implemented=False`` (the legacy
     # boolean must stay consistent with the new ``status`` field).
     for r in planned:
         assert r["implemented"] is False
 
 
-def test_catalog_implemented_only_filter_returns_six(registry):
-    """``get_catalog(implemented_only=True)`` returns exactly the six
+def test_catalog_implemented_only_filter_returns_eleven(registry):
+    """``get_catalog(implemented_only=True)`` returns exactly the eleven
     IMPLEMENTED rows, never any PLANNED ones."""
     full = registry.get_catalog()
     filtered = registry.get_catalog(implemented_only=True)
 
-    assert len(filtered) == 6
+    assert len(filtered) == 11
     for row in filtered:
         assert row["status"] == STATUS_IMPLEMENTED
         assert row["implemented"] is True
@@ -580,7 +590,7 @@ async def test_registry_marks_running_state_in_catalog():
         r for r in catalog
         if r["status"] == STATUS_IMPLEMENTED and r["strategy_id"] != "stat_ornstein_uhlenbeck"
     ]
-    assert len(other_implemented) == 5  # 6 implemented − 1 started
+    assert len(other_implemented) == 10  # 11 implemented − 1 started
     for r in other_implemented:
         assert r["is_running"] is False
 
@@ -624,16 +634,16 @@ def test_api_strategies_catalog_returns_full_50_entries():
     data = response.json()
     assert "catalog" in data and isinstance(data["catalog"], list)
     assert data["total"] == len(data["catalog"])
-    assert data["total"] == 50  # 6 implemented + 44 planned
+    assert data["total"] == 50  # 11 implemented + 39 planned
     # ``status`` field is present on every row.
     for row in data["catalog"]:
         assert "status" in row
         assert row["status"] in {STATUS_IMPLEMENTED, STATUS_PLANNED, "EXPERIMENTAL"}
 
 
-def test_api_strategies_catalog_implemented_only_returns_six():
+def test_api_strategies_catalog_implemented_only_returns_eleven():
     """``GET /api/strategies/catalog?implemented_only=true`` must return
-    only the six IMPLEMENTED strategies — every PLANNED stub is excluded
+    only the eleven IMPLEMENTED strategies — every PLANNED stub is excluded
     from the response."""
     from fastapi.testclient import TestClient
     from api.server import app
@@ -649,14 +659,14 @@ def test_api_strategies_catalog_implemented_only_returns_six():
         f"got {response.status_code}"
     )
     data = response.json()
-    assert data["total"] == 6, (
-        f"implemented_only filter must return exactly 6 entries; got {data['total']}"
+    assert data["total"] == 11, (
+        f"implemented_only filter must return exactly 11 entries; got {data['total']}"
     )
     for row in data["catalog"]:
         assert row["status"] == STATUS_IMPLEMENTED
         assert row["implemented"] is True
     # The response surfaces the implementation breakdown for the UI.
-    assert data["implemented_count"] == 6
+    assert data["implemented_count"] == 11
     assert data["filtered"] is True
 
 
@@ -672,6 +682,6 @@ def test_api_strategies_catalog_includes_status_breakdown():
     response = client.get("/api/strategies/catalog", headers=headers)
     assert response.status_code == 200
     data = response.json()
-    assert data["implemented_count"] == 6
-    assert data["planned_count"] == 44
+    assert data["implemented_count"] == 11
+    assert data["planned_count"] == 39
     assert data["filtered"] is False

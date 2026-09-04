@@ -72,11 +72,13 @@ def test_get_catalog_returns_one_entry_per_strategy(registry):
 
 # ── 2. get_catalog flags implemented set correctly ───────────────────────────
 def test_get_catalog_flags_implemented_set_correctly(registry):
-    """``implemented=True`` only for the six concrete-strategy catalog
+    """``implemented=True`` only for the eleven concrete-strategy catalog
     entries — the three original concrete strategies
     (mm_avellaneda_stoikov, arb_binary_dutch_book, ml_random_forest_quant)
     plus the three W19-6 additions (stat_ornstein_uhlenbeck,
-    mom_macd_histogram, ml_isotonic_calibrated)."""
+    mom_macd_histogram, ml_isotonic_calibrated) plus the five W22-3
+    additions (arb_cross_correlation, event_news_sentiment,
+    event_resolution_sniper, mm_asymmetric_spread, mm_grid_liquidity)."""
     catalog = registry.get_catalog()
     implemented = [row for row in catalog if row["implemented"]]
     implemented_ids = {row["strategy_id"] for row in implemented}
@@ -89,15 +91,21 @@ def test_get_catalog_flags_implemented_set_correctly(registry):
         "stat_ornstein_uhlenbeck",
         "mom_macd_histogram",
         "ml_isotonic_calibrated",
+        # W22-3 additions — promoted from PLANNED to IMPLEMENTED.
+        "arb_cross_correlation",
+        "event_news_sentiment",
+        "event_resolution_sniper",
+        "mm_asymmetric_spread",
+        "mm_grid_liquidity",
     }
-    assert len(implemented) == 6
+    assert len(implemented) == 11
 
 
 # ── 2b. get_catalog flags implemented_only filter ───────────────────────────
-def test_get_catalog_implemented_only_filter_returns_six(registry):
-    """``implemented_only=True`` returns only the six IMPLEMENTED rows."""
+def test_get_catalog_implemented_only_filter_returns_eleven(registry):
+    """``implemented_only=True`` returns only the eleven IMPLEMENTED rows."""
     catalog = registry.get_catalog(implemented_only=True)
-    assert len(catalog) == 6
+    assert len(catalog) == 11
     for row in catalog:
         assert row["status"] == "IMPLEMENTED"
         assert row["implemented"] is True
@@ -128,15 +136,16 @@ def test_get_catalog_flags_is_running_false_when_no_strategy_started(registry):
 
 # ── 4. get_catalog row schema carries all documented fields ─────────────────
 def test_get_catalog_row_schema_carries_all_documented_fields(registry):
-    """Each catalog row must carry exactly the nine documented fields —
+    """Each catalog row must carry exactly the ten documented fields —
     no missing, no extras. W19-6 added ``status`` and ``default_enabled``
-    to the row schema; the legacy ``implemented`` boolean is retained
-    for backward compatibility."""
+    to the row schema; W24-8 added ``is_disabled`` so the UI can surface
+    the strategy-health-monitor auto-disable state; the legacy
+    ``implemented`` boolean is retained for backward compatibility."""
     catalog = registry.get_catalog()
     expected_keys = {
         "strategy_id", "name", "category", "description",
         "risk_level", "status", "default_enabled",
-        "implemented", "is_running",
+        "implemented", "is_running", "is_disabled",
     }
     for row in catalog:
         assert set(row.keys()) == expected_keys

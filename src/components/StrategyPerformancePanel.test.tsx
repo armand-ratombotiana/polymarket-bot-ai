@@ -308,32 +308,38 @@ describe('StrategyPerformancePanel', () => {
       expect(cards).toHaveLength(3)
     })
     expect(
-      screen.getByText('Avellaneda-Stoikov Market Maker'),
-    ).toBeInTheDocument()
+      screen.getAllByText('Avellaneda-Stoikov Market Maker').length,
+    ).toBeGreaterThan(0)
     expect(
-      screen.getByText('Binary Dutch-Book Arbitrage'),
-    ).toBeInTheDocument()
+      screen.getAllByText('Binary Dutch-Book Arbitrage').length,
+    ).toBeGreaterThan(0)
     expect(
-      screen.getByText('Random Forest Quant Model'),
-    ).toBeInTheDocument()
+      screen.getAllByText('Random Forest Quant Model').length,
+    ).toBeGreaterThan(0)
     // PLANNED strategy with no trades isn't in the cards grid.
-    expect(
-      screen.queryByText('Bollinger Bands Reversion'),
-    ).not.toBeInTheDocument()
+    // Bollinger (PLANNED, no trades) is filtered OUT of the cards grid. The cards-grid
+    // container has 3 cards (data-testid="strategy-card"); Bollinger only appears
+    // in the comparison table below, not in the cards.
+    const cards = screen.getAllByTestId('strategy-card')
+    const cardTexts = cards.map((c) => c.textContent ?? '')
+    expect(cardTexts.some((t) => t.includes('Bollinger Bands Reversion'))).toBe(false)
   })
 
   it('renders the IMPLEMENTED status badge on the strategy card', async () => {
     vi.mocked(fetch).mockImplementation(mockFetchOk(sampleResponse))
     render(<StrategyPerformancePanel />)
     await waitFor(() => {
-      expect(
-        screen.getByText('Avellaneda-Stoikov Market Maker'),
-      ).toBeInTheDocument()
+      expect(screen.getAllByText('Avellaneda-Stoikov Market Maker').length).toBeGreaterThan(0)
     })
-    const badges = screen.getAllByTestId('strategy-status-badge')
     // Each card has one status badge; all 3 visible strategies are IMPLEMENTED.
-    expect(badges.length).toBeGreaterThanOrEqual(3)
-    for (const b of badges) {
+    // The comparison table ALSO renders a status badge per row (including
+    // Bollinger's PLANNED badge), so filter to badges inside strategy-card.
+    const cards = screen.getAllByTestId('strategy-card')
+    const cardBadges = cards.flatMap((c) =>
+      Array.from(c.querySelectorAll('[data-testid="strategy-status-badge"]')),
+    )
+    expect(cardBadges.length).toBe(3)
+    for (const b of cardBadges) {
       expect(b).toHaveTextContent('IMPLEMENTED')
     }
   })
@@ -342,43 +348,37 @@ describe('StrategyPerformancePanel', () => {
     vi.mocked(fetch).mockImplementation(mockFetchOk(sampleResponse))
     render(<StrategyPerformancePanel />)
     await waitFor(() => {
-      expect(
-        screen.getByText('Avellaneda-Stoikov Market Maker'),
-      ).toBeInTheDocument()
+      expect(screen.getAllByText('Avellaneda-Stoikov Market Maker').length).toBeGreaterThan(0)
     })
-    // mm_avelaneda_stoikov net_pnl=12.45 → "+$12.45" appears in the card.
-    expect(screen.getByText('+$12.45')).toBeInTheDocument()
-    // arb_binary_dutch_book net_pnl=4.20 → "+$4.20" appears in the card.
-    expect(screen.getByText('+$4.20')).toBeInTheDocument()
-    // ml_random_forest_quant net_pnl=-1.85 → "−$1.85" appears in the card.
-    expect(screen.getByText('−$1.85')).toBeInTheDocument()
+    // mm_avelaneda_stoikov net_pnl=12.45 → "+$12.45" appears in the card AND table.
+    expect(screen.getAllByText('+$12.45').length).toBeGreaterThan(0)
+    // arb_binary_dutch_book net_pnl=4.20 → "+$4.20" appears in the card AND table.
+    expect(screen.getAllByText('+$4.20').length).toBeGreaterThan(0)
+    // ml_random_forest_quant net_pnl=-1.85 → "−$1.85" appears in the card AND table.
+    expect(screen.getAllByText('−$1.85').length).toBeGreaterThan(0)
   })
 
   it('renders the Sharpe / Win Rate / Profit Factor / Expectancy stat tiles on each card', async () => {
     vi.mocked(fetch).mockImplementation(mockFetchOk(sampleResponse))
     render(<StrategyPerformancePanel />)
     await waitFor(() => {
-      expect(
-        screen.getByText('Avellaneda-Stoikov Market Maker'),
-      ).toBeInTheDocument()
+      expect(screen.getAllByText('Avellaneda-Stoikov Market Maker').length).toBeGreaterThan(0)
     })
     // mm_avelaneda_stoikov — win_rate 0.6316 → "63.2%"
-    expect(screen.getByText('63.2%')).toBeInTheDocument()
+    expect(screen.getAllByText('63.2%').length).toBeGreaterThan(0)
     // profit_factor 2.14 → "2.14"
     expect(screen.getAllByText('2.14').length).toBeGreaterThan(0)
     // Sharpe 1.847 → "1.85"
     expect(screen.getAllByText('1.85').length).toBeGreaterThan(0)
-    // closed_trades 38
-    expect(screen.getByText('38')).toBeInTheDocument()
+    // closed_trades 38 — appears in card stat tile AND table cell.
+    expect(screen.getAllByText('38').length).toBeGreaterThan(0)
   })
 
   it('renders the enabled/disabled Switch on each strategy card', async () => {
     vi.mocked(fetch).mockImplementation(mockFetchOk(sampleResponse))
     render(<StrategyPerformancePanel />)
     await waitFor(() => {
-      expect(
-        screen.getByText('Avellaneda-Stoikov Market Maker'),
-      ).toBeInTheDocument()
+      expect(screen.getAllByText('Avellaneda-Stoikov Market Maker').length).toBeGreaterThan(0)
     })
     const toggles = screen.getAllByTestId('strategy-toggle')
     // 3 active cards → 3 toggles (one per card)
@@ -395,9 +395,7 @@ describe('StrategyPerformancePanel', () => {
     vi.mocked(fetch).mockImplementation(impl)
     render(<StrategyPerformancePanel />)
     await waitFor(() => {
-      expect(
-        screen.getByText('Avellaneda-Stoikov Market Maker'),
-      ).toBeInTheDocument()
+      expect(screen.getAllByText('Avellaneda-Stoikov Market Maker').length).toBeGreaterThan(0)
     })
     const toggles = screen.getAllByTestId('strategy-toggle')
     // Click the first toggle (the mm_avelaneda_stoikov card's switch).
@@ -436,9 +434,7 @@ describe('StrategyPerformancePanel', () => {
     vi.mocked(fetch).mockImplementation(impl)
     render(<StrategyPerformancePanel />)
     await waitFor(() => {
-      expect(
-        screen.getByText('Avellaneda-Stoikov Market Maker'),
-      ).toBeInTheDocument()
+      expect(screen.getAllByText('Avellaneda-Stoikov Market Maker').length).toBeGreaterThan(0)
     })
     const toggles = screen.getAllByTestId('strategy-toggle')
     const button = toggles[0].closest('button') ?? toggles[0]
@@ -478,20 +474,19 @@ describe('StrategyPerformancePanel', () => {
     expect(
       screen.getByText('Bollinger Bands Reversion'),
     ).toBeInTheDocument()
-    // Headers are present.
-    expect(screen.getByText('Net P&L')).toBeInTheDocument()
-    expect(screen.getByText('Sharpe')).toBeInTheDocument()
-    expect(screen.getByText('Sortino')).toBeInTheDocument()
-    expect(screen.getByText('Calmar')).toBeInTheDocument()
+    // Headers are present. (Some labels also appear in the risk-adjusted
+    // ranking section / card stat tiles, so use getAllByText + length check.)
+    expect(screen.getAllByText('Net P&L').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('Sharpe').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('Sortino').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('Calmar').length).toBeGreaterThan(0)
   })
 
   it('sorts the table by net P&L descending by default (highest first)', async () => {
     vi.mocked(fetch).mockImplementation(mockFetchOk(sampleResponse))
     render(<StrategyPerformancePanel />)
     await waitFor(() => {
-      expect(
-        screen.getByText('Avellaneda-Stoikov Market Maker'),
-      ).toBeInTheDocument()
+      expect(screen.getAllByText('Avellaneda-Stoikov Market Maker').length).toBeGreaterThan(0)
     })
     const rows = screen.getAllByTestId('performance-table-row')
     // First row should be mm_avelaneda_stoikov (net_pnl +12.45, the highest).
@@ -656,16 +651,13 @@ describe('StrategyPerformancePanel', () => {
     await act(async () => {
       await vi.advanceTimersByTimeAsync(0)
     })
-    await waitFor(() => {
-      expect(screen.getByText('+$14.80')).toBeInTheDocument()
-    })
+    // After the initial fetch microtasks flush, the header total P&L is rendered.
+    expect(screen.getByText('+$14.80')).toBeInTheDocument()
     // Advance 30 s — the next poll fires.
     await act(async () => {
       await vi.advanceTimersByTimeAsync(30_000)
     })
-    await waitFor(() => {
-      expect(screen.getByText('+$22.50')).toBeInTheDocument()
-    })
+    expect(screen.getByText('+$22.50')).toBeInTheDocument()
     expect(callCount).toBeGreaterThanOrEqual(2)
   })
 
@@ -677,9 +669,7 @@ describe('StrategyPerformancePanel', () => {
     await act(async () => {
       await vi.advanceTimersByTimeAsync(0)
     })
-    await waitFor(() => {
-      expect(screen.getByText('Strategy Performance Dashboard')).toBeInTheDocument()
-    })
+    expect(screen.getByText('Strategy Performance Dashboard')).toBeInTheDocument()
     const initialCalls = impl.mock.calls.length
     // Hide the document.
     Object.defineProperty(document, 'hidden', {
@@ -700,10 +690,12 @@ describe('StrategyPerformancePanel', () => {
       configurable: true,
     })
     document.dispatchEvent(new Event('visibilitychange'))
-    // The visibilitychange handler triggers an immediate refresh.
-    await waitFor(() => {
-      expect(impl.mock.calls.length).toBeGreaterThan(initialCalls)
+    // The visibilitychange handler triggers an immediate refresh — flush
+    // microtasks so the fetch + setState resolve before assertion.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0)
     })
+    expect(impl.mock.calls.length).toBeGreaterThan(initialCalls)
   })
 
   it('clears the polling interval on unmount (no leaked setState)', async () => {

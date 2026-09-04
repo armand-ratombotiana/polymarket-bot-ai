@@ -157,7 +157,7 @@ describe('MarketScreener', () => {
     render(<MarketScreener />)
     await waitFor(() => {
       expect(
-        screen.getByText(/Network error while querying Gamma markets/i),
+        screen.getByText(/Network error: ECONNREFUSED/i),
       ).toBeInTheDocument()
     })
   })

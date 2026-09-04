@@ -16,9 +16,10 @@
 //      a glance whether the KPIs are real-time or lagged.
 'use client'
 
-import { memo } from 'react'
+import { memo, useEffect, useState } from 'react'
 import { fmtUsd, fmtPnl, fmtPct } from '@/lib/design-tokens'
 import { useRealtimeData } from '@/hooks/useRealtimeData'
+import { apiFetch } from '@/lib/api'
 import { Badge } from '@/components/ui/badge'
 
 interface Analytics {
@@ -276,6 +277,289 @@ function AnalyticsPanel() {
           <span className="kpi-sub">Risk-adjusted return</span>
         </div>
       </div>
+
+      {/* W25-6 — Honest Performance Report (per-category breakdown) +
+          disclaimer banner. Fetches /api/performance/report (paper +
+          walk-forward + live + disclaimer) and /api/performance/backtest
+          (best experiment summary) on mount. The disclaimer banner is
+          ALWAYS rendered (it's a static reminder); the per-category
+          breakdown is conditionally rendered only when the report fetch
+          succeeds AND the response shape matches the expected schema. */}
+      <PerformanceReportSection />
+    </div>
+  )
+}
+
+// ── W25-6 — Performance Report Section ─────────────────────────────────────
+// Honest per-category breakdown: paper / backtest / walk-forward / live,
+// each reported SEPARATELY (never combined) with its own 95% confidence
+// interval + binomial-test p-value vs the 50% coin-flip null. The
+// disclaimer banner is rendered unconditionally — even when the backend is
+// unreachable, the trader is still warned that backtest performance does
+// NOT guarantee future results.
+
+interface PaperMetrics {
+  category: string
+  win_rate: string
+  win_rate_ci_95: string
+  profit_factor: string
+  expectancy: string
+  max_drawdown: string
+  sharpe_ratio: string
+  sortino_ratio: string
+  open_exposure: string
+  capital_utilization: string
+  avg_slippage_bps: string
+  total_fees: string
+  n_trades: number
+  n_wins: number
+  n_losses: number
+  avg_win: string
+  avg_loss: string
+  avg_hold_time_hours: string
+  p_value: string
+  is_statistically_significant: boolean
+  period_start: number
+  period_end: number
+}
+
+interface PerformanceReport {
+  paper_trading: PaperMetrics
+  backtest: string
+  walk_forward: string
+  live: string
+  disclaimer: string
+}
+
+interface BacktestSummary {
+  category: 'backtest'
+  n_experiments: number
+  message?: string
+  best_return?: number
+  best_sharpe?: number
+  best_strategy?: string
+  disclaimer?: string
+}
+
+function isPerformanceReport(d: unknown): d is PerformanceReport {
+  if (!d || typeof d !== 'object') return false
+  const obj = d as Record<string, unknown>
+  return (
+    typeof obj.disclaimer === 'string' &&
+    typeof obj.backtest === 'string' &&
+    typeof obj.walk_forward === 'string' &&
+    typeof obj.live === 'string' &&
+    typeof obj.paper_trading === 'object' &&
+    obj.paper_trading !== null
+  )
+}
+
+function isBacktestSummary(d: unknown): d is BacktestSummary {
+  if (!d || typeof d !== 'object') return false
+  const obj = d as Record<string, unknown>
+  return obj.category === 'backtest' && typeof obj.n_experiments === 'number'
+}
+
+function PerformanceReportSection() {
+  const [report, setReport] = useState<PerformanceReport | null>(null)
+  const [backtest, setBacktest] = useState<BacktestSummary | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    const fetchAll = async () => {
+      try {
+        const [reportRes, backtestRes] = await Promise.all([
+          apiFetch('/api/performance/report'),
+          apiFetch('/api/performance/backtest'),
+        ])
+        if (cancelled) return
+        if (reportRes.ok) {
+          const json = await reportRes.json()
+          if (isPerformanceReport(json)) setReport(json)
+        }
+        if (backtestRes.ok) {
+          const json = await backtestRes.json()
+          if (isBacktestSummary(json)) setBacktest(json)
+        }
+      } catch {
+        // Silent failure — the disclaimer banner still renders so the
+        // trader is always warned even when the backend is unreachable.
+      }
+    }
+    fetchAll()
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  const paper = report?.paper_trading
+  const backtestReady =
+    backtest != null &&
+    backtest.n_experiments > 0 &&
+    backtest.best_return != null
+
+  return (
+    <div
+      className="border-t border-[#1f2335] p-3 space-y-2 text-[11px]"
+      data-testid="performance-report-section"
+    >
+      <div className="flex items-center justify-between">
+        <span className="text-xs font-bold text-[#dde1ed]">
+          📈 Honest Performance Report
+        </span>
+        <span className="badge badge-amber text-[9px]">Per-Category</span>
+      </div>
+
+      {/* Disclaimer banner — ALWAYS rendered (even when fetch failed) */}
+      <div
+        className="banner-warning py-1.5 px-2.5 text-[10.5px] space-y-0.5"
+        data-testid="performance-disclaimer"
+        aria-label="Performance Metrics Disclaimer"
+      >
+        <div className="font-semibold">
+          ⚠ Performance Metrics Disclaimer
+        </div>
+        <div>
+          Backtest results may be overfit and do not guarantee future performance.
+        </div>
+        <div>
+          Only paper-trading and live metrics reflect actual system behavior.
+        </div>
+        <div>Win rate target (95%) is aspirational, not guaranteed.</div>
+      </div>
+
+      {/* Per-category breakdown — conditionally rendered when the
+          report fetch succeeded AND the response shape validated. */}
+      {report && paper && (
+        <div className="grid grid-cols-2 gap-2">
+          {/* Paper Trading metrics */}
+          <div className="kpi-card col-span-2">
+            <div className="flex items-center justify-between mb-1">
+              <span className="kpi-label">Paper Trading</span>
+              <span className="text-[10px] text-[#4ade80]">
+                Real-time · honest
+              </span>
+            </div>
+            <div className="grid grid-cols-3 gap-1.5">
+              <div>
+                <span className="text-[10px] text-[#7e8aaa] uppercase">
+                  Win Rate (paper)
+                </span>
+                <div className="text-[#4ade80] font-semibold">
+                  {paper.win_rate}
+                </div>
+                <div className="text-[9px] text-[#7e8aaa]">
+                  95% CI: {paper.win_rate_ci_95}
+                </div>
+              </div>
+              <div>
+                <span className="text-[10px] text-[#7e8aaa] uppercase">
+                  Profit Factor (paper)
+                </span>
+                <div className="text-[#60a5fa] font-semibold">
+                  {paper.profit_factor}
+                </div>
+              </div>
+              <div>
+                <span className="text-[10px] text-[#7e8aaa] uppercase">
+                  Expectancy (paper)
+                </span>
+                <div className="text-[#dde1ed] font-semibold">
+                  {paper.expectancy}
+                </div>
+              </div>
+              <div>
+                <span className="text-[10px] text-[#7e8aaa] uppercase">
+                  Sharpe (paper)
+                </span>
+                <div className="text-[#dde1ed] font-semibold">
+                  {paper.sharpe_ratio}
+                </div>
+              </div>
+              <div>
+                <span className="text-[10px] text-[#7e8aaa] uppercase">
+                  Max DD (paper)
+                </span>
+                <div className="text-[#f87171] font-semibold">
+                  {paper.max_drawdown}
+                </div>
+              </div>
+              <div>
+                <span className="text-[10px] text-[#7e8aaa] uppercase">
+                  Trades (paper)
+                </span>
+                <div className="text-[#dde1ed] font-semibold">
+                  {paper.n_trades}
+                </div>
+                <div className="text-[9px] text-[#7e8aaa]">
+                  p={paper.p_value}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Backtest summary */}
+          <div className="kpi-card">
+            <div className="flex items-center justify-between mb-1">
+              <span className="kpi-label">Backtest Summary</span>
+              <span className="text-[10px] text-amber-400">⚠ Overfit risk</span>
+            </div>
+            {backtestReady && backtest ? (
+              <div className="space-y-0.5 text-[10.5px]">
+                <div>
+                  Best Return:{' '}
+                  <span className="text-[#4ade80] font-semibold">
+                    {((backtest.best_return ?? 0) * 100).toFixed(2)}%
+                  </span>
+                </div>
+                <div>
+                  Best Sharpe:{' '}
+                  <span className="text-[#60a5fa] font-semibold">
+                    {(backtest.best_sharpe ?? 0).toFixed(2)}
+                  </span>
+                </div>
+                <div>
+                  Strategy:{' '}
+                  <span className="text-[#dde1ed]">
+                    {backtest.best_strategy ?? 'unknown'}
+                  </span>
+                </div>
+                <div>
+                  Experiments:{' '}
+                  <span className="text-[#dde1ed]">{backtest.n_experiments}</span>
+                </div>
+              </div>
+            ) : (
+              <div className="text-[10.5px] text-[#7e8aaa]">
+                No backtest experiments yet — run a backtest to populate this
+                section.
+              </div>
+            )}
+          </div>
+
+          {/* Walk-forward summary */}
+          <div className="kpi-card">
+            <div className="flex items-center justify-between mb-1">
+              <span className="kpi-label">Walk-Forward</span>
+              <span className="text-[10px] text-[#4ade80]">Out-of-sample</span>
+            </div>
+            <div className="text-[10.5px] text-[#7e8aaa] leading-tight">
+              {report.walk_forward}
+            </div>
+          </div>
+
+          {/* Live status */}
+          <div className="kpi-card col-span-2">
+            <div className="flex items-center justify-between mb-1">
+              <span className="kpi-label">Live Status</span>
+              <span className="text-[10px] text-amber-400">Paper mode</span>
+            </div>
+            <div className="text-[10.5px] text-[#7e8aaa] leading-tight">
+              {report.live}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

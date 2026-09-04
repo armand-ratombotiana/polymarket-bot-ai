@@ -1,7 +1,7 @@
 // components/ui/VirtualTable.tsx — High-performance virtualized table
 //
 // W16-6 — Virtual scrolling for large lists (100+ rows). Built on top of
-// `react-window`'s `FixedSizeList` so only the visible window of rows is
+// `react-window`'s `List` (v2 API) so only the visible window of rows is
 // mounted in the DOM at any time. This keeps the TradesPanel (up to 100
 // fills), ClosedPositionsPanel (up to 500 closed positions) and
 // AuditLogPanel (up to 100 audit events) responsive even under load.
@@ -19,11 +19,21 @@
 //   • Rows + cells carry `role="row"` / `role="cell"` (and the header
 //     carries `role="columnheader"`) so screen readers + the testing
 //     suite can navigate the table semantically without `<table>`.
+//
+// react-window v2 notes:
+//   • v2 replaced `FixedSizeList` with `List` and changed the props:
+//     `itemCount` → `rowCount`, `itemSize` → `rowHeight`,
+//     `children` (render-prop) → `rowComponent` + `rowProps`,
+//     `ref` → `listRef`, `width`/`height` → `style` (or `defaultHeight`).
+//   • `RowComponent` receives `{ index, style, ariaAttributes }` from
+//     the List, plus whatever's in `rowProps` (here: `columns`, `data`,
+//     `onRowClick`). We use `rowProps` so the row component can be
+//     memoized externally and react-window can skip re-rendering rows
+//     whose `rowProps` reference is stable.
 'use client'
 
-// react-window v2 exports `List` (v1 used `FixedSizeList`).
-import { List } from 'react-window'
-import { ReactNode, useRef, useCallback, useMemo } from 'react'
+import { List, useListRef } from 'react-window'
+import { ReactNode, useMemo, useCallback } from 'react'
 
 export interface Column {
   key: string
@@ -43,6 +53,60 @@ interface VirtualTableProps {
   loading?: boolean
 }
 
+// Row component is defined at module scope (outside VirtualTable) so it
+// has a stable reference across renders. react-window v2 re-renders rows
+// when the `rowComponent` reference changes; a module-scope component
+// prevents needless row re-mounts.
+interface RowComponentProps {
+  columns: Column[]
+  data: any[]
+  onRowClick?: (row: any) => void
+}
+
+function RowComponent({
+  index,
+  style,
+  columns,
+  data,
+  onRowClick,
+}: RowComponentProps & { index: number; style: React.CSSProperties }) {
+  const row = data[index]
+  return (
+    <div
+      role="row"
+      style={{
+        ...style,
+        display: 'flex',
+        alignItems: 'center',
+        borderBottom: '1px solid var(--border, #1f2335)',
+        cursor: onRowClick ? 'pointer' : 'default',
+      }}
+      onClick={() => onRowClick?.(row)}
+      data-row-index={index}
+    >
+      {columns.map((col) => (
+        <div
+          role="cell"
+          key={col.key}
+          style={{
+            width: col.width,
+            minWidth: col.width,
+            padding: '0 8px',
+            textAlign: col.align || 'left',
+            fontSize: '12px',
+            fontFamily: 'JetBrains Mono, monospace',
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap',
+          }}
+        >
+          {col.render ? col.render(row) : String(row[col.key] ?? '')}
+        </div>
+      ))}
+    </div>
+  )
+}
+
 export default function VirtualTable({
   columns,
   data,
@@ -53,65 +117,27 @@ export default function VirtualTable({
   loading,
 }: VirtualTableProps) {
   // The list ref is hoisted so callers (or future extensions) can drive
-  // `scrollToItem` programmatically — e.g. to surface a freshly filled
+  // `scrollToRow` programmatically — e.g. to surface a freshly filled
   // trade at the top of the TradesPanel.
-  const listRef = useRef<List>(null)
+  const listRef = useListRef(null)
 
   const totalWidth = useMemo(
     () => columns.reduce((sum, c) => sum + c.width, 0),
     [columns],
   )
 
-  // Render a single row. `react-window` calls this with the absolute
-  // `index` into `data` + a `style` object that positions the row inside
-  // the scrollable viewport. We MUST spread `style` onto the root row
-  // element — otherwise react-window can't position the row correctly
-  // and the list will appear empty.
-  //
-  // The callback is memoized on [columns, data, onRowClick] so react-window
-  // doesn't tear down + re-mount the row component on every parent render
-  // (a known react-window perf pitfall when the child render prop is
-  // re-created each render).
-  const Row = useCallback(
-    ({ index, style }: { index: number; style: React.CSSProperties }) => {
-      const row = data[index]
-      return (
-        <div
-          role="row"
-          style={{
-            ...style,
-            display: 'flex',
-            alignItems: 'center',
-            borderBottom: '1px solid var(--border, #1f2335)',
-            cursor: onRowClick ? 'pointer' : 'default',
-          }}
-          onClick={() => onRowClick?.(row)}
-          data-row-index={index}
-        >
-          {columns.map((col) => (
-            <div
-              role="cell"
-              key={col.key}
-              style={{
-                width: col.width,
-                minWidth: col.width,
-                padding: '0 8px',
-                textAlign: col.align || 'left',
-                fontSize: '12px',
-                fontFamily: 'JetBrains Mono, monospace',
-                overflow: 'hidden',
-                textOverflow: 'ellipsis',
-                whiteSpace: 'nowrap',
-              }}
-            >
-              {col.render ? col.render(row) : String(row[col.key] ?? '')}
-            </div>
-          ))}
-        </div>
-      )
-    },
+  // Memoize rowProps so the object reference is stable across renders
+  // (when columns/data/onRowClick don't change). react-window v2 uses
+  // this to skip row re-renders — a new object every render would
+  // force every visible row to re-render on every parent update.
+  const rowProps = useMemo<RowComponentProps>(
+    () => ({ columns, data, onRowClick }),
     [columns, data, onRowClick],
   )
+
+  // The row component is stable (module-scope). No useCallback needed
+  // since RowComponent is already a stable reference.
+  const rowComponent = RowComponent
 
   // Loading state — surface BEFORE the empty check so a freshly-mounted
   // panel that's still fetching doesn't briefly flash "No data".
@@ -195,14 +221,14 @@ export default function VirtualTable({
           outer `overflow: auto` wrapper lets the trader scroll
           horizontally. */}
       <List
-        ref={listRef}
-        height={height}
-        itemCount={data.length}
-        itemSize={rowHeight}
-        width={totalWidth}
-      >
-        {Row}
-      </List>
+        listRef={listRef}
+        defaultHeight={height}
+        rowCount={data.length}
+        rowHeight={rowHeight}
+        rowComponent={rowComponent}
+        rowProps={rowProps}
+        style={{ width: totalWidth, height }}
+      />
     </div>
   )
 }
