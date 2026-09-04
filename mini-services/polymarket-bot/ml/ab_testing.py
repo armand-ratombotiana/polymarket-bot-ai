@@ -119,6 +119,18 @@ class ABTestManager:
         self._db_path = db_path
         self._init_db()
         self._current_experiment = self._load_active_experiment()
+        # W19-8 — challenger-model registry. Maps a challenger_version
+        # string to a callable with the same shape as
+        # ``MarketMLModel.predict`` — ``fn(features, token_id) ->
+        # tuple[float, float]``. The signal trader consults this map
+        # after ``assign_model(token_id)`` returns the challenger
+        # version; if no callable is registered for the version, the
+        # trader falls back to the champion ``ml_model`` (defensive —
+        # operator started an experiment without seeding the challenger
+        # callable). The champion version always falls back to
+        # ``ml_model`` (champion is never in this registry — its
+        # identity is implicit).
+        self._challenger_models: dict[str, Any] = {}
 
     # ── Schema / state bootstrap ────────────────────────────────────────────
     def _init_db(self) -> None:
@@ -267,6 +279,101 @@ class ABTestManager:
             use_challenger = np.random.random() < exp.traffic_split
 
         return exp.challenger_version if use_challenger else exp.champion_version
+
+    # ── W19-8 — Challenger model registry ────────────────────────────────────
+    def register_challenger_model(
+        self,
+        version: str,
+        predict_fn: Any,
+    ) -> None:
+        """Register a challenger-model callable for an A/B test version.
+
+        W19-8 — wires a candidate model into the live predict path. The
+        ``predict_fn`` must have the same call shape as
+        ``MarketMLModel.predict(features, token_id=...) -> tuple[float,
+        float]`` so the signal trader can invoke either arm uniformly.
+
+        Idempotent: re-registering the same ``version`` overwrites the
+        previous callable. A ``None`` / non-callable ``predict_fn`` is
+        silently rejected (defensive — operator config errors must not
+        crash startup).
+
+        Parameters
+        ----------
+        version : str
+            Challenger version identifier — MUST match the
+            ``challenger_version`` of the currently-active (or
+            about-to-be-started) experiment for the model to actually
+            receive traffic.
+        predict_fn : callable
+            ``fn(features, token_id=...) -> tuple[float, float]`` matching
+            ``MarketMLModel.predict``'s signature. The signal trader
+            calls this directly when ``assign_model(token_id)`` returns
+            ``version``.
+        """
+        if not version or not callable(predict_fn):
+            logger.debug(
+                "[ab_test] rejected challenger-model registration version=%r "
+                "callable=%s", version, callable(predict_fn),
+            )
+            return
+        self._challenger_models[version] = predict_fn
+        logger.info(
+            "[ab_test] registered challenger model for version=%r "
+            "(%d challenger(s) registered)", version, len(self._challenger_models),
+        )
+
+    def get_model_for_version(self, version: str, default: Any) -> Any:
+        """Look up the challenger model for ``version``; fall back to ``default``.
+
+        W19-8 — called by the signal trader after ``assign_model``.
+        Returns the registered challenger callable when ``version``
+        matches a registered challenger; otherwise returns ``default``
+        (typically the production ``ml_model``). The default path covers:
+
+          * No experiment active (``assign_model`` returned
+            ``"champion"`` — the sentinel).
+          * Experiment active but ``version`` is the experiment's
+            champion version (champion is never registered as a
+            challenger — its identity is implicit).
+          * Experiment active, ``version`` is the challenger version,
+            but the operator did NOT register a callable for it
+            (defensive — log a warning the first time per version so
+            the operator notices).
+
+        Parameters
+        ----------
+        version : str
+            Version string returned by ``assign_model``.
+        default : Any
+            Object to return when no challenger is registered for
+            ``version`` (typically the global ``ml_model`` singleton).
+
+        Returns
+        -------
+        Any
+            Either the registered challenger callable or ``default``.
+        """
+        if version in self._challenger_models:
+            return self._challenger_models[version]
+        # Defensive one-shot warning when an experiment is running and
+        # the assigned version is the challenger but no callable is
+        # registered — operator config error that would otherwise
+        # silently route all traffic to the champion.
+        if (
+            self._current_experiment
+            and version == self._current_experiment.challenger_version
+            and version not in getattr(self, "_warned_missing_challenger", set())
+        ):
+            logger.warning(
+                "[ab_test] challenger model not registered for version=%r "
+                "(experiment=%s) — routing to champion fallback",
+                version, self._current_experiment.name,
+            )
+            if not hasattr(self, "_warned_missing_challenger"):
+                self._warned_missing_challenger: set[str] = set()
+            self._warned_missing_challenger.add(version)
+        return default
 
     def record_prediction(
         self,

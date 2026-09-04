@@ -5,16 +5,33 @@ Links every stage of the trading pipeline via a single ``decision_id`` so the
 full lifecycle of any prediction → order → fill (or rejection along the way)
 can be reconstructed for any token or strategy:
 
-    PREDICTION → SIGNAL → RISK_APPROVED | RISK_REJECTED → ORDER → FILL
+    MARKET_SNAPSHOT → INTELLIGENCE_SNAPSHOT → FEATURE_SNAPSHOT →
+    PREDICTION → SIGNAL → RISK_APPROVED | RISK_REJECTED → ORDER → FILL →
+    POSITION → OUTCOME → P&L
 
-Stages are emitted by the strategy / risk / paper-sim layers:
+W19-3 — the ledger now records all 12 canonical stages from the God Mode §51
+"complete decision chain" requirement. The original 6 stages
+(PREDICTION / SIGNAL / RISK_APPROVED / RISK_REJECTED / ORDER / FILL) are
+preserved verbatim; the 6 new stages (MARKET_SNAPSHOT, INTELLIGENCE_SNAPSHOT,
+FEATURE_SNAPSHOT, POSITION, OUTCOME, PNL) are ADDITIVE — recorded as
+fire-and-forget best-effort writes alongside the existing chain so the system
+can finally answer "Why did the bot make this trade?" for the full chain
+from market data to realized P&L.
 
-  - ``strategies/signal_trader.py::_ml_signal``  → PREDICTION + SIGNAL
+Stages are emitted by the strategy / risk / paper-sim / settlement layers:
+
+  - ``strategies/signal_trader.py::_ml_signal``  → MARKET_SNAPSHOT +
+                                                    INTELLIGENCE_SNAPSHOT +
+                                                    FEATURE_SNAPSHOT +
+                                                    PREDICTION + SIGNAL
                                                     (or RISK_REJECTED via
                                                     ``record_rejection()`` on
                                                     any early-exit path)
   - ``strategies/base.py::submit_order``         → RISK_APPROVED / RISK_REJECTED
-  - ``paper/simulator.py::_execute_fill``        → FILL (with realised P&L)
+  - ``paper/simulator.py::_execute_fill``        → FILL (with realised P&L) +
+                                                    POSITION
+  - ``core/settlement.py::_process_resolved_market``
+                                                → OUTCOME + PNL
 
 Schema (additive — independent SQLite db so the audit trail's immutability
 contract is not perturbed):
@@ -28,8 +45,9 @@ contract is not perturbed):
 The HTTP layer (``api/server.py``) calls ``register_routes(app)`` at startup
 to expose:
 
-  GET /api/decision/{token_id}     recent decision events for a token
-  GET /api/decisions/rejected      recent rejected decisions
+  GET /api/decision/{token_id}                     recent decision events for a token
+  GET /api/decisions/rejected                      recent rejected decisions
+  GET /api/decision/{correlation_id}/full-chain   full 12-stage chain keyed by stage
 """
 from __future__ import annotations
 
@@ -108,12 +126,56 @@ def timed_query(func):
 # ── Canonical stage names ───────────────────────────────────────────────────
 # Single source of truth across the pipeline — every emitter references these
 # so the spelling is stable in queries / dashboards.
+#
+# W19-3 — the 6 new stages extend the original 6-stage chain into the full
+# 12-stage lifecycle described in God Mode §51:
+#
+#   MARKET_SNAPSHOT → INTELLIGENCE_SNAPSHOT → FEATURE_SNAPSHOT →
+#   PREDICTION → SIGNAL → RISK_APPROVED | RISK_REJECTED → ORDER → FILL →
+#   POSITION → OUTCOME → PNL
+#
+# The original 6 stages are preserved verbatim below; the 6 new stages
+# follow. Together they answer the full "Why did the bot make this trade?"
+# chain from raw market data through to realised P&L.
 STAGE_PREDICTION = "PREDICTION"
 STAGE_SIGNAL = "SIGNAL"
 STAGE_RISK_APPROVED = "RISK_APPROVED"
 STAGE_RISK_REJECTED = "RISK_REJECTED"
 STAGE_ORDER = "ORDER"
 STAGE_FILL = "FILL"
+
+# W19-3 — the 6 new stages that close the gaps surfaced by the God Mode §51
+# assessment. Each is recorded as a fire-and-forget best-effort write at its
+# canonical point in the trading pipeline (see the module docstring for the
+# full stage→emitter map). All 12 stages share the same ``decision_id``
+# correlation key so a single ``get_full_chain(decision_id)`` call
+# reconstructs the complete decision lifecycle.
+STAGE_MARKET_SNAPSHOT = "MARKET_SNAPSHOT"
+STAGE_INTELLIGENCE_SNAPSHOT = "INTELLIGENCE_SNAPSHOT"
+STAGE_FEATURE_SNAPSHOT = "FEATURE_SNAPSHOT"
+STAGE_POSITION = "POSITION"
+STAGE_OUTCOME = "OUTCOME"
+STAGE_PNL = "PNL"
+
+# Canonical 12-stage ordering — the dashboard's "decision timeline" view sorts
+# events against this list so a chain with all 12 stages renders in
+# chronological-business-order (not insertion order, which can vary when
+# POSITION is recorded after FILL but OUTCOME lands hours/days later via
+# settlement). Stages absent from a chain are simply skipped by the renderer.
+CANONICAL_STAGE_ORDER: tuple[str, ...] = (
+    STAGE_MARKET_SNAPSHOT,
+    STAGE_INTELLIGENCE_SNAPSHOT,
+    STAGE_FEATURE_SNAPSHOT,
+    STAGE_PREDICTION,
+    STAGE_SIGNAL,
+    STAGE_RISK_APPROVED,  # one of RISK_APPROVED / RISK_REJECTED
+    STAGE_RISK_REJECTED,
+    STAGE_ORDER,
+    STAGE_FILL,
+    STAGE_POSITION,
+    STAGE_OUTCOME,
+    STAGE_PNL,
+)
 
 # Rejection reason vocabulary (mirrors the early-exit branches in
 # ``signal_trader._ml_signal``). Centralised here so the API / dashboards can
@@ -373,6 +435,209 @@ class DecisionLedger:
 
         await asyncio.to_thread(_insert_rej)
 
+    # ── W19-3: 6 new stage-recording helpers ──────────────────────────────
+    #
+    # Each helper is a thin wrapper over ``record()`` that:
+    #   1. Filters out any reserved-key collision (``decision_id`` / ``stage``
+    #      / ``token_id`` / ``strategy`` / ``pnl``) from the caller-supplied
+    #      payload dict before ``**`` expansion so a snapshot dict that
+    #      happens to carry a ``token_id`` key (e.g. an order-book snapshot
+    #      that records its own ``token_id`` field) doesn't raise
+    #      ``TypeError: got multiple values for keyword argument``.
+    #   2. Forwards the filtered payload as ``**data`` so the snapshot is
+    #      stored as top-level keys in ``data_json`` (queryable by the
+    #      dashboard without a nested-dict hop).
+    #   3. Defaults ``strategy`` + ``pnl`` to sensible no-op values so the
+    #      caller only has to supply ``correlation_id`` + ``token_id`` +
+    #      ``snapshot``.
+    #
+    # ``correlation_id`` is the W19-3 spec name for the cross-stage trace
+    # key. In this codebase it is identical to the existing ``decision_id``
+    # (the spec uses the two names interchangeably); the helpers below
+    # accept ``correlation_id`` as the param name to match the spec, then
+    # pass it through to ``record()`` as ``decision_id``.
+
+    async def record_market_snapshot(
+        self,
+        correlation_id: str,
+        token_id: str,
+        snapshot: dict[str, Any],
+        strategy: str | None = None,
+    ) -> None:
+        """Record the market state at decision time.
+
+        Captures the order-book snapshot (best_bid / best_ask / mid / spread
+        / top-of-book depth) at the moment the strategy began evaluating the
+        token — the first stage of the 12-stage chain. Emitted by
+        ``signal_trader._ml_signal`` before ``ml_model.predict`` is called.
+        """
+        if not correlation_id:
+            return
+        await self.record(
+            decision_id=correlation_id,
+            stage=STAGE_MARKET_SNAPSHOT,
+            token_id=token_id,
+            strategy=strategy,
+            pnl=0.0,
+            **_strip_reserved_keys(snapshot),
+        )
+
+    async def record_intelligence_snapshot(
+        self,
+        correlation_id: str,
+        token_id: str,
+        snapshot: dict[str, Any],
+        strategy: str | None = None,
+    ) -> None:
+        """Record news/sentiment/intelligence at decision time.
+
+        Captures the market metadata available at decision time (slug,
+        volume24hr, liquidity, outstanding shares, active/closed flags,
+        end_date, sentiment scores if available, etc.). Emitted by
+        ``signal_trader._ml_signal`` alongside ``record_market_snapshot``.
+        """
+        if not correlation_id:
+            return
+        await self.record(
+            decision_id=correlation_id,
+            stage=STAGE_INTELLIGENCE_SNAPSHOT,
+            token_id=token_id,
+            strategy=strategy,
+            pnl=0.0,
+            **_strip_reserved_keys(snapshot),
+        )
+
+    async def record_feature_snapshot(
+        self,
+        correlation_id: str,
+        token_id: str,
+        features: dict[str, Any],
+        strategy: str | None = None,
+    ) -> None:
+        """Record the ML features at prediction time.
+
+        Captures the feature vector (and any feature-store metadata like
+        ``feature_set_version`` / ``n_features``) that was fed to
+        ``ml_model.predict``. Emitted by ``signal_trader._ml_signal`` right
+        before the PREDICTION stage. The features dict is the single source
+        of truth for "what the model saw" when reconstructing a trade
+        decision post-hoc — without it, a SHAP / drift investigation would
+        have to re-derive features from the market snapshot, which is
+        lossy (feature engineering is non-reversible).
+        """
+        if not correlation_id:
+            return
+        await self.record(
+            decision_id=correlation_id,
+            stage=STAGE_FEATURE_SNAPSHOT,
+            token_id=token_id,
+            strategy=strategy,
+            pnl=0.0,
+            **_strip_reserved_keys(features),
+        )
+
+    async def record_position(
+        self,
+        correlation_id: str,
+        token_id: str,
+        position: dict[str, Any],
+        strategy: str | None = None,
+    ) -> None:
+        """Record the position state after fill.
+
+        Captures the post-fill Position snapshot (yes_shares /
+        avg_entry_price / total_invested / opened_at / strategy / paper
+        flag) so the chain shows the actual exposure the bot took on this
+        decision. Emitted by ``paper_sim._execute_fill`` immediately after
+        the FILL stage.
+        """
+        if not correlation_id:
+            return
+        # The position dict may carry a ``pnl`` key (e.g. when the fill
+        # realised P&L on a closing SELL) — promote it to the dedicated
+        # ``pnl`` column rather than letting it land in ``data_json``.
+        pnl_value = 0.0
+        payload = dict(position)
+        if "pnl" in payload:
+            try:
+                pnl_value = float(payload.pop("pnl") or 0.0)
+            except (TypeError, ValueError):
+                pnl_value = 0.0
+        await self.record(
+            decision_id=correlation_id,
+            stage=STAGE_POSITION,
+            token_id=token_id,
+            strategy=strategy,
+            pnl=pnl_value,
+            **_strip_reserved_keys(payload),
+        )
+
+    async def record_outcome(
+        self,
+        correlation_id: str,
+        token_id: str,
+        outcome: dict[str, Any],
+        strategy: str | None = None,
+    ) -> None:
+        """Record the market resolution outcome.
+
+        Captures the resolved market outcome (``resolved_yes`` bool,
+        resolution_price, market slug, resolution timestamp) when a market
+        settles. Emitted by ``settlement._process_resolved_market`` after
+        the YES/NO position is settled in DataStore. Pairs with
+        ``record_pnl`` — the OUTCOME event records what the market
+        resolved to; the PNL event records the realised P&L that resulted.
+        """
+        if not correlation_id:
+            return
+        await self.record(
+            decision_id=correlation_id,
+            stage=STAGE_OUTCOME,
+            token_id=token_id,
+            strategy=strategy,
+            pnl=0.0,
+            **_strip_reserved_keys(outcome),
+        )
+
+    async def record_pnl(
+        self,
+        correlation_id: str,
+        token_id: str,
+        pnl: dict[str, Any],
+        strategy: str | None = None,
+    ) -> None:
+        """Record the realized P&L.
+
+        Captures the realised P&L that resulted from the market resolution
+        (realized_pnl, payout, invested_cost, shares, exit_price). Emitted
+        by ``settlement._process_resolved_market`` immediately after
+        ``record_outcome``. The ``pnl`` column on the row is populated
+        from the dict's ``realized_pnl`` (or ``pnl``) key so the
+        dashboard's "P&L per decision" aggregation query (``SELECT
+        SUM(pnl) FROM decision_events WHERE stage='PNL'``) works
+        out-of-the-box.
+        """
+        if not correlation_id:
+            return
+        pnl_value = 0.0
+        payload = dict(pnl)
+        # Promote the realised-pnl scalar to the dedicated column.
+        for key in ("realized_pnl", "pnl", "pnl_amount"):
+            if key in payload:
+                try:
+                    pnl_value = float(payload.pop(key) or 0.0)
+                except (TypeError, ValueError):
+                    pnl_value = 0.0
+                break
+        await self.record(
+            decision_id=correlation_id,
+            stage=STAGE_PNL,
+            token_id=token_id,
+            strategy=strategy,
+            pnl=pnl_value,
+            **_strip_reserved_keys(payload),
+        )
+
     # ── Reads ──────────────────────────────────────────────────────────────
 
     @timed_query
@@ -443,6 +708,121 @@ class DecisionLedger:
             for r in rows:
                 r["data"] = _safe_json(r.get("data_json"))
             return rows
+
+        return await asyncio.to_thread(_fetch)
+
+    @timed_query
+    async def get_full_chain(
+        self, correlation_id: str
+    ) -> dict[str, dict[str, Any]]:
+        """Reconstruct the complete 12-stage decision chain.
+
+        Returns a ``{stage_name: stage_event}`` dict for the supplied
+        ``correlation_id`` (a.k.a. ``decision_id`` in this codebase — the
+        two names are interchangeable per the W19-3 spec). The 12 canonical
+        stages are:
+
+            MARKET_SNAPSHOT → INTELLIGENCE_SNAPSHOT → FEATURE_SNAPSHOT →
+            PREDICTION → SIGNAL → RISK_APPROVED | RISK_REJECTED → ORDER →
+            FILL → POSITION → OUTCOME → PNL
+
+        Stages that have not yet been recorded for this ``correlation_id``
+        are simply absent from the returned dict — callers that want to
+        assert a "complete 12-stage chain" should compare the returned
+        dict's key set against ``CANONICAL_STAGE_ORDER`` (or the subset of
+        stages they care about; e.g. a rejected decision legitimately
+        lacks ORDER / FILL / POSITION / OUTCOME / PNL).
+
+        When the same stage name appears multiple times in the chain
+        (unusual but possible — e.g. a strategy that re-records
+        MARKET_SNAPSHOT after a partial fill to capture the post-fill
+        book state), the LAST event wins (later timestamp). The
+        chronological order is preserved by ``get_chain`` (ASC by
+        timestamp, tiebroken by ``id ASC``), so iterating the dict values
+        gives insertion order.
+
+        Args:
+            correlation_id: The cross-stage trace key (``decision_id``).
+                An empty / falsy input returns an empty dict (no rows
+                fetched, no error raised).
+
+        Returns:
+            ``dict`` keyed by stage name. Each value is the full row dict
+            (``timestamp`` / ``decision_id`` / ``stage`` / ``token_id`` /
+            ``strategy`` / ``pnl`` / ``data_json`` / ``data``). Empty
+            dict on any persistence error or when no events exist for
+            ``correlation_id``.
+        """
+        if not correlation_id:
+            return {}
+        stages = await self.get_chain(correlation_id)
+        chain: dict[str, dict[str, Any]] = {}
+        for stage in stages:
+            # Last-write-wins for repeated stage names. The underlying
+            # ``get_chain`` returns events in chronological order so the
+            # latest event for any given stage overwrites earlier ones —
+            # matching the dashboard's "show me the latest snapshot for
+            # each stage" rendering expectation.
+            chain[stage["stage"]] = stage
+        return chain
+
+    @timed_query
+    async def get_latest_decision_id_for_token(
+        self, token_id: str, stage: str | None = None
+    ) -> str | None:
+        """Return the most recent ``decision_id`` recorded for ``token_id``.
+
+        W19-3 — used by ``core/settlement._process_resolved_market`` to
+        look up the originating decision chain for a settled position
+        (settlement receives only ``token_id`` from the Gamma API; the
+        originating ``decision_id`` lives in this ledger). Optionally
+        filtered by ``stage`` so callers can pin the lookup to a specific
+        stage (e.g. ``stage=STAGE_FILL`` to find the decision chain that
+        actually resulted in a filled position, ignoring earlier
+        PREDICTION-only chains that never traded).
+
+        Args:
+            token_id: Polymarket condition token id.
+            stage: Optional stage filter. ``None`` searches all stages.
+
+        Returns:
+            The most recent ``decision_id`` string for the token (or
+            ``None`` if no events exist or the query fails). The lookup
+            is best-effort: any SQLite error is logged and ``None``
+            returned so the settlement pipeline never blocks on a
+            ledger hiccup.
+        """
+        if not token_id:
+            return None
+
+        def _fetch() -> str | None:
+            try:
+                with sqlite3.connect(self._db_path) as conn:
+                    cursor = conn.cursor()
+                    if stage:
+                        cursor.execute(
+                            "SELECT decision_id FROM decision_events "
+                            "WHERE token_id = ? AND stage = ? "
+                            "ORDER BY timestamp DESC, id DESC LIMIT 1",
+                            (token_id, stage),
+                        )
+                    else:
+                        cursor.execute(
+                            "SELECT decision_id FROM decision_events "
+                            "WHERE token_id = ? "
+                            "ORDER BY timestamp DESC, id DESC LIMIT 1",
+                            (token_id,),
+                        )
+                    row = cursor.fetchone()
+                    return row[0] if row else None
+            except Exception as e:
+                log.error(
+                    "[decision_ledger] get_latest_decision_id_for_token "
+                    "failed token=%s: %s",
+                    token_id,
+                    e,
+                )
+                return None
 
         return await asyncio.to_thread(_fetch)
 
@@ -624,6 +1004,12 @@ def register_routes(app: Any) -> None:
 
       GET /api/decisions/rejected
           Recent rejected decisions (most recent first).
+
+      GET /api/decision/{correlation_id}/full-chain
+          Full 12-stage decision chain keyed by stage name
+          (W19-3 — MARKET_SNAPSHOT → INTELLIGENCE_SNAPSHOT →
+          FEATURE_SNAPSHOT → PREDICTION → SIGNAL → RISK_* → ORDER → FILL →
+          POSITION → OUTCOME → PNL). 404 if no events recorded.
     """
     from fastapi import HTTPException, Query  # local import — FastAPI is optional at module load
 
@@ -644,6 +1030,35 @@ def register_routes(app: Any) -> None:
             raw = row.get("data_json")
             row["data"] = _safe_json(raw)
         return {"token_id": token_id, "count": len(chain), "events": chain}
+
+    @app.get("/api/decision/{correlation_id}/full-chain", tags=["decisions"])
+    async def _decision_full_chain_for_correlation_id(correlation_id: str):
+        """Return the complete 12-stage decision chain keyed by stage name.
+
+        W19-3 — closes the God Mode §51 "Why did the bot make this trade?"
+        gap. Surfaces every stage recorded against ``correlation_id`` as a
+        ``{stage_name: stage_event}`` dict so the caller can answer
+        end-to-end questions about a decision without chaining 6+ separate
+        ``get_chain`` + filter calls.
+
+        Stages absent from the chain (e.g. POSITION / OUTCOME / PNL for a
+        decision that hasn't yet filled / settled) are simply absent from
+        the returned dict.
+        """
+        chain = await decision_ledger.get_full_chain(correlation_id)
+        if not chain:
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    f"no decision chain recorded for correlation_id "
+                    f"{correlation_id}"
+                ),
+            )
+        return {
+            "correlation_id": correlation_id,
+            "count": len(chain),
+            "stages": chain,
+        }
 
     @app.get("/api/decisions/rejected", tags=["decisions"])
     async def _rejected_decisions(
@@ -685,6 +1100,49 @@ def _safe_json(raw: str | None) -> Any:
         return json.loads(raw)
     except Exception:
         return None
+
+
+# Reserved-key set for the W19-3 ``_strip_reserved_keys`` helper. These
+# are the kwargs that ``DecisionLedger.record()`` accepts by name — if a
+# caller-supplied snapshot dict happens to carry one of these keys, the
+# ``**`` expansion would raise
+# ``TypeError: got multiple values for keyword argument``. The helper
+# defensively drops them so a snapshot that (legitimately) carries its own
+# ``token_id`` field (e.g. an order-book snapshot) doesn't crash the
+# caller. The caller's intent (the snapshot) is preserved verbatim
+# through the ``token_id`` positional arg on every ``record_*`` helper.
+_RESERVED_PAYLOAD_KEYS: frozenset[str] = frozenset(
+    {"decision_id", "stage", "token_id", "strategy", "pnl"}
+)
+
+
+def _strip_reserved_keys(payload: dict[str, Any] | None) -> dict[str, Any]:
+    """Return a shallow copy of ``payload`` with reserved keys dropped.
+
+    Used by the W19-3 ``record_market_snapshot`` /
+    ``record_intelligence_snapshot`` / ``record_feature_snapshot`` /
+    ``record_position`` / ``record_outcome`` / ``record_pnl`` helpers
+    before ``**`` expansion into :meth:`DecisionLedger.record`. Defensive
+    only — typical caller payloads don't carry these keys, but
+    order-book / position snapshots routinely include ``token_id`` /
+    ``strategy`` / ``pnl`` as data fields, and the resulting
+    ``TypeError`` would propagate out of the helper and (without the
+    strip) break the calling pipeline. With the strip, the snapshot's
+    own copy is silently dropped in favour of the explicit positional
+    args passed to ``record()``.
+
+    Args:
+        payload: The caller-supplied snapshot dict (or ``None``).
+
+    Returns:
+        A fresh dict with the same key/value pairs as ``payload`` minus
+        any reserved keys. ``None`` / non-dict input returns an empty
+        dict so the ``**`` expansion downstream is a no-op (no kwargs
+        forwarded) rather than a ``TypeError``.
+    """
+    if not payload or not isinstance(payload, dict):
+        return {}
+    return {k: v for k, v in payload.items() if k not in _RESERVED_PAYLOAD_KEYS}
 
 
 def _resolve_active_model_version() -> str:
@@ -741,6 +1199,15 @@ __all__ = [
     "STAGE_RISK_REJECTED",
     "STAGE_ORDER",
     "STAGE_FILL",
+    # W19-3 — 6 new stages that close the God Mode §51 "complete decision
+    # chain" gap.
+    "STAGE_MARKET_SNAPSHOT",
+    "STAGE_INTELLIGENCE_SNAPSHOT",
+    "STAGE_FEATURE_SNAPSHOT",
+    "STAGE_POSITION",
+    "STAGE_OUTCOME",
+    "STAGE_PNL",
+    "CANONICAL_STAGE_ORDER",
     "REASON_LOW_CONFIDENCE",
     "REASON_WIDE_SPREAD",
     "REASON_NEUTRAL_ZONE",

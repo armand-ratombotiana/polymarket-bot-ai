@@ -154,8 +154,87 @@ class SettlementEngine:
                         holding_seconds=time.time() - getattr(pos_yes, 'opened_at', time.time()),
                         model_version=getattr(ml_model, '_last_trained', 'unknown'),
                     )
+                    # W19-4 — Mirror the settled YES position into the ML
+                    # economic-value tracker (God Mode §16 closure).
+                    # Fire-and-forget: the tracker swallows its own
+                    # persistence errors so the trading pipeline never
+                    # breaks on a recorder failure. Defaults to 0 for
+                    # confidence / predicted_edge when the position
+                    # wasn't ML-driven.
+                    from ml.economic_value import ml_value_tracker
+                    ml_value_tracker.record_trade(
+                        trade_id=f"settle-yes-{yes_token[:8]}",
+                        token_id=yes_token,
+                        model_version=getattr(ml_model, '_last_trained', 'unknown'),
+                        prediction=0.5,
+                        confidence=0.0,
+                        predicted_edge=0.0,
+                        actual_pnl=pnl,
+                        metadata={
+                            "strategy": getattr(pos_yes, 'strategy', 'settlement'),
+                            "resolved_yes": resolved_yes,
+                            "shares": shares,
+                            "settlement": True,
+                        },
+                    )
                 except Exception:
                     pass
+
+                # W19-3 — record the OUTCOME + PNL stages against the
+                # originating decision chain so the 12-stage ledger chain
+                # terminates with the market resolution + realised P&L.
+                # The originating ``decision_id`` is looked up from this
+                # ledger's FILL-stage event for the token (the position was
+                # just deleted from ``store.positions`` above so we can't
+                # read the decision_id off the Position object directly).
+                # ADDITIVE: best-effort try/except so a ledger hiccup never
+                # breaks the settlement flow. The lookup + recording is
+                # safe to run inside ``store._lock`` because
+                # ``decision_ledger`` uses its own SQLite db (no nested
+                # ``store._lock`` acquisition — mirrors the safety profile
+                # of the ``closed_positions`` / ``ml_value_tracker`` calls
+                # above).
+                try:
+                    from core.decision_ledger import (
+                        STAGE_FILL,
+                        decision_ledger,
+                    )
+                    originating_dec_id = await decision_ledger.get_latest_decision_id_for_token(
+                        yes_token, stage=STAGE_FILL
+                    )
+                    if originating_dec_id:
+                        await decision_ledger.record_outcome(
+                            correlation_id=originating_dec_id,
+                            token_id=yes_token,
+                            strategy=getattr(pos_yes, 'strategy', 'settlement'),
+                            outcome={
+                                "resolved_yes": bool(resolved_yes),
+                                "resolution_price": 1.0 if resolved_yes else 0.0,
+                                "slug": slug,
+                                "shares_at_settlement": float(shares),
+                                "settled_at": time.time(),
+                                "settlement_strategy": "settlement",
+                            },
+                        )
+                        await decision_ledger.record_pnl(
+                            correlation_id=originating_dec_id,
+                            token_id=yes_token,
+                            strategy=getattr(pos_yes, 'strategy', 'settlement'),
+                            pnl={
+                                "realized_pnl": float(pnl),
+                                "payout": float(payout),
+                                "invested_cost": float(pos_yes.total_invested),
+                                "shares": float(shares),
+                                "exit_price": 1.0 if resolved_yes else 0.0,
+                                "entry_price": float(pos_yes.avg_entry_price),
+                                "resolution": "WINNER" if resolved_yes else "ZERO",
+                            },
+                        )
+                except Exception as e:
+                    log.debug(
+                        "[settlement] W19-3 OUTCOME/PNL record failed for %s: %s",
+                        yes_token, e,
+                    )
 
             # 2. Settle NO token (if present)
             if no_token:
@@ -210,8 +289,78 @@ class SettlementEngine:
                             holding_seconds=time.time() - getattr(pos_no, 'opened_at', time.time()),
                             model_version=getattr(ml_model, '_last_trained', 'unknown'),
                         )
+                        # W19-4 — Mirror the settled NO position into the ML
+                        # economic-value tracker (mirrors the YES branch
+                        # above). Fire-and-forget.
+                        from ml.economic_value import ml_value_tracker
+                        ml_value_tracker.record_trade(
+                            trade_id=f"settle-no-{no_token[:8]}",
+                            token_id=no_token,
+                            model_version=getattr(ml_model, '_last_trained', 'unknown'),
+                            prediction=0.5,
+                            confidence=0.0,
+                            predicted_edge=0.0,
+                            actual_pnl=pnl_no,
+                            metadata={
+                                "strategy": getattr(pos_no, 'strategy', 'settlement'),
+                                "resolved_no": resolved_no,
+                                "shares": shares_no,
+                                "settlement": True,
+                            },
+                        )
                     except Exception:
                         pass
+
+                    # W19-3 — record the OUTCOME + PNL stages for the NO
+                    # token's originating decision chain (mirrors the YES
+                    # branch above). The market outcome ``resolved_yes`` is
+                    # recorded alongside the per-token ``resolution``
+                    # ("WINNER" / "ZERO") so the audit trail is unambiguous:
+                    # the OUTCOME event captures the MARKET's resolution,
+                    # and the PNL event captures THIS token's realized P&L
+                    # given that market resolution.
+                    try:
+                        from core.decision_ledger import (
+                            STAGE_FILL,
+                            decision_ledger,
+                        )
+                        originating_dec_id_no = await decision_ledger.get_latest_decision_id_for_token(
+                            no_token, stage=STAGE_FILL
+                        )
+                        if originating_dec_id_no:
+                            await decision_ledger.record_outcome(
+                                correlation_id=originating_dec_id_no,
+                                token_id=no_token,
+                                strategy=getattr(pos_no, 'strategy', 'settlement'),
+                                outcome={
+                                    "resolved_yes": bool(resolved_yes),
+                                    "resolved_no": bool(resolved_no),
+                                    "resolution_price": 1.0 if resolved_no else 0.0,
+                                    "slug": slug,
+                                    "shares_at_settlement": float(shares_no),
+                                    "settled_at": time.time(),
+                                    "settlement_strategy": "settlement",
+                                },
+                            )
+                            await decision_ledger.record_pnl(
+                                correlation_id=originating_dec_id_no,
+                                token_id=no_token,
+                                strategy=getattr(pos_no, 'strategy', 'settlement'),
+                                pnl={
+                                    "realized_pnl": float(pnl_no),
+                                    "payout": float(payout_no),
+                                    "invested_cost": float(pos_no.total_invested),
+                                    "shares": float(shares_no),
+                                    "exit_price": 1.0 if resolved_no else 0.0,
+                                    "entry_price": float(pos_no.avg_entry_price),
+                                    "resolution": "WINNER" if resolved_no else "ZERO",
+                                },
+                            )
+                    except Exception as e:
+                        log.debug(
+                            "[settlement] W19-3 OUTCOME/PNL record failed for %s: %s",
+                            no_token, e,
+                        )
 
         # X8 — Lock has been released; now safe to call store.log_event(),
         # which re-acquires store._lock internally. Emit any captured messages.

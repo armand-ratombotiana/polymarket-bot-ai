@@ -33,7 +33,7 @@ from core.gamma_client import gamma_client
 from ml.features import extract_features
 from ml.model import ml_model
 from risk.manager import MAX_POSITION_PER_MARKET
-from strategies.base import BaseStrategy
+from strategies.base import BaseStrategy, Signal
 
 log = logging.getLogger(__name__)
 
@@ -264,7 +264,140 @@ class SignalTraderStrategy(BaseStrategy):
             decision_ledger = None  # type: ignore[assignment]
             dec_id = ""
 
-        p_yes, confidence = ml_model.predict(features, token_id=token_id)
+        # W19-8 — A/B test assignment. Consult ``ab_test.assign_model`` to
+        # decide which model version to invoke for this token, then look up
+        # the actual callable via ``get_model_for_version``. When no
+        # experiment is active OR the assigned version is the champion,
+        # ``get_model_for_version`` falls back to the global ``ml_model``
+        # (no behaviour change vs the pre-W19-8 path). When the assigned
+        # version is a registered challenger, the challenger callable is
+        # invoked INSTEAD — its prediction is what drives the downstream
+        # signal + Kelly sizing + order submission. The prediction is then
+        # recorded against its version via ``record_prediction`` so the A/B
+        # framework can evaluate the arm once outcomes resolve. Bare
+        # try/except so any A/B-framework hiccup falls back to the
+        # champion path (zero production impact).
+        model_version = "champion"
+        try:
+            from ml.ab_testing import ab_test
+            model_version = ab_test.assign_model(token_id)
+            active_model = ab_test.get_model_for_version(model_version, default=ml_model)
+        except Exception as e:
+            log.debug("[signal_trader] A/B test assign failed — champion fallback: %s", e)
+            active_model = ml_model
+
+        # W19-3 — record the pre-prediction snapshots (market / intelligence /
+        # ML features) against the same ``dec_id`` so the 12-stage decision
+        # chain can be reconstructed end-to-end. ADDITIVE: each emit is wrapped
+        # in try/except (the existing ``_emit_ledger`` helper already
+        # swallows fire-and-forget failures) so a ledger hiccup can never
+        # break the strategy scan. These snapshots are the only record of
+        # "what the model saw" at decision time — without them, a post-hoc
+        # investigation of a bad trade would only have the PREDICTION stage's
+        # p_yes/confidence fields, which are downstream of (lossy) feature
+        # engineering.
+        if decision_ledger is not None and dec_id:
+            try:
+                # MARKET_SNAPSHOT — the order-book state at decision time.
+                self._emit_ledger(
+                    decision_ledger.record_market_snapshot(
+                        correlation_id=dec_id,
+                        token_id=token_id,
+                        strategy=self.name,
+                        snapshot={
+                            "mid": float(book.mid or 0.5),
+                            "spread": float(book.spread or 0.0),
+                            "best_bid": float(book.best_bid) if book.best_bid is not None else None,
+                            "best_ask": float(book.best_ask) if book.best_ask is not None else None,
+                            "bid_depth_top3": [
+                                {"price": float(lv.price), "size": float(lv.size)}
+                                for lv in (book.bids or [])[:3]
+                            ],
+                            "ask_depth_top3": [
+                                {"price": float(lv.price), "size": float(lv.size)}
+                                for lv in (book.asks or [])[:3]
+                            ],
+                        },
+                    )
+                )
+                # INTELLIGENCE_SNAPSHOT — the market metadata available at
+                # decision time (slug / volume / liquidity / outstanding
+                # shares / active / closed / end_date). Captured here as a
+                # best-effort "what we knew about the market" snapshot so
+                # post-hoc attribution can correlate P&L with market
+                # conditions.
+                self._emit_ledger(
+                    decision_ledger.record_intelligence_snapshot(
+                        correlation_id=dec_id,
+                        token_id=token_id,
+                        strategy=self.name,
+                        snapshot={
+                            "slug": slug,
+                            "market_slug": mkt.get("slug"),
+                            "volume24hr": mkt.get("volume24hr"),
+                            "volume_num": mkt.get("volumeNum"),
+                            "liquidity": mkt.get("liquidity"),
+                            "liquidity_num": mkt.get("liquidityNum"),
+                            "outstanding_shares": mkt.get("outstandingShares"),
+                            "active": mkt.get("active"),
+                            "closed": mkt.get("closed"),
+                            "end_date": mkt.get("endDate"),
+                            "startDate": mkt.get("startDate"),
+                        },
+                    )
+                )
+                # FEATURE_SNAPSHOT — the ML feature vector at prediction time.
+                # Convert numpy array → list (json.dumps can't serialise
+                # ndarrays directly) and capture summary stats so a SHAP /
+                # drift investigation can reconstruct "what the model saw".
+                feat_list: list[float] | None = None
+                n_features = 0
+                try:
+                    if hasattr(features, "tolist"):
+                        feat_list = [float(x) for x in features.tolist()]
+                        n_features = len(feat_list)
+                    elif hasattr(features, "__iter__"):
+                        feat_list = [float(x) for x in features]
+                        n_features = len(feat_list)
+                    elif features is not None:
+                        n_features = 1
+                except Exception:
+                    feat_list = None
+                self._emit_ledger(
+                    decision_ledger.record_feature_snapshot(
+                        correlation_id=dec_id,
+                        token_id=token_id,
+                        strategy=self.name,
+                        snapshot={
+                            "features": feat_list,
+                            "n_features": n_features,
+                            "feature_set_version": getattr(
+                                ml_model, "feature_set_version", "unknown"
+                            ),
+                            "ab_model_version": model_version,
+                        },
+                    )
+                )
+            except Exception as e:
+                log.debug(
+                    "[signal_trader] W19-3 pre-prediction snapshot emit failed: %s", e
+                )
+
+        p_yes, confidence = active_model.predict(features, token_id=token_id)
+
+        # W19-8 — record the prediction against its assigned arm. Defensive
+        # try/except so a SQLite hiccup in the A/B store never blocks the
+        # signal path; the prediction still propagates downstream.
+        if model_version != "champion":
+            try:
+                from ml.ab_testing import ab_test as _ab_for_record
+                _ab_for_record.record_prediction(
+                    model_version=model_version,
+                    prediction=float(p_yes),
+                    token_id=token_id,
+                )
+            except Exception as e:
+                log.debug("[signal_trader] A/B record_prediction skipped: %s", e)
 
         mid = book.mid or 0.5
         spread = book.spread or 0.01
@@ -480,3 +613,278 @@ class SignalTraderStrategy(BaseStrategy):
             await store.log_event(
                 f"📚 ML model updated with resolved outcome for {store.market_slugs.get(token_id, token_id[:12])}"
             )
+
+    # ── W19-2 — Unified Strategy Contract (God Mode §26) ────────────────────
+    # The 9 contract methods below are SYNC wrappers over the existing async
+    # scan / signal / act machinery. They expose the strategy's signal-
+    # generation, sizing, entry-decision, exit-decision, and diagnostics
+    # surface to operators / dashboards / backtest engines without requiring
+    # an event loop. The async ``_run`` / ``_scan_markets`` / ``_act_on_signal``
+    # path remains the canonical live-trading loop; the contract methods are
+    # the *introspection* surface.
+
+    def metadata(self) -> dict:
+        """Return strategy metadata for the catalog / dashboard."""
+        return {
+            "name": self.name,
+            "version": "1.0.0",
+            "description": (
+                "ML-Powered Directional Signal Trader with fractional Kelly "
+                "sizing, online learning from market resolution, and "
+                "capital-allocator-aware position sizing."
+            ),
+            "author": "polymarket-bot",
+            "category": "machine_learning",
+            "sizing": "fractional_kelly_via_capital_allocator",
+        }
+
+    def configure(self, config: dict) -> None:
+        """Apply runtime config overrides (min_confidence, base_order_size, ...).
+
+        Recognised keys (all optional — unrecognised keys are stored in
+        ``self.config`` for downstream introspection but not applied to
+        typed strategy fields):
+
+          * ``min_confidence`` (float ∈ [0, 1]) — overrides ``_min_confidence``.
+          * ``base_order_size`` (float > 0)    — overrides ``_base_order_size``.
+          * ``kelly_fraction`` (float ∈ (0, 1]) — overrides the module-level
+            ``KELLY_FRACTION`` (used by ``_ml_signal``). NOTE: this is a
+            module-level constant, so the override is recorded in
+            ``self.config`` for visibility but NOT actually mutated on the
+            module global — callers should not rely on it changing the live
+            trade sizing; use ``base_order_size`` instead for sizing control.
+        """
+        super().configure(config)
+        if "min_confidence" in config:
+            mc = float(config["min_confidence"])
+            # Clamp to [0, 1] so a misconfigured caller can't flip the gate
+            # to a value > 1 (always-fire) or < 0 (always-reject).
+            self._min_confidence = max(0.0, min(1.0, mc))
+        if "base_order_size" in config:
+            bos = float(config["base_order_size"])
+            if bos > 0.0:
+                self._base_order_size = bos
+
+    def validate(self) -> tuple[bool, str]:
+        """Validate strategy configuration post-construction.
+
+        ``SignalTraderStrategy`` is valid when:
+          * ``_min_confidence ∈ [0, 1]`` (a gate outside this range either
+            always-fires or always-rejects — both are misconfigurations).
+          * ``_base_order_size > 0`` (a non-positive base size would
+            silently zero out every order).
+          * The module-level ``KELLY_FRACTION ∈ (0, 1]`` (a zero or
+            negative Kelly fraction would zero the size after capping).
+        """
+        if not (0.0 <= self._min_confidence <= 1.0):
+            return False, (
+                f"_min_confidence={self._min_confidence} outside [0, 1]"
+            )
+        if self._base_order_size <= 0.0:
+            return False, (
+                f"_base_order_size={self._base_order_size} must be > 0"
+            )
+        if not (0.0 < KELLY_FRACTION <= 1.0):
+            return False, (
+                f"KELLY_FRACTION={KELLY_FRACTION} outside (0, 1]"
+            )
+        return True, "OK"
+
+    def generate_signal(self, market_context: dict) -> Signal | None:
+        """Build a contract ``Signal`` from a pre-computed market context.
+
+        ``market_context`` is a caller-provided dict (NOT the live Gamma
+        catalog). Recognised keys:
+
+          * ``token_id`` (str, required)
+          * ``slug`` (str, optional — defaults to ``token_id[:12]``)
+          * ``direction`` (Side.BUY | Side.SELL, optional — defaults to
+            BUY; real signals are produced by ``_ml_signal`` in the
+            async scan path)
+          * ``confidence`` (float ∈ [0, 1], optional — defaults to 0.0)
+          * ``target_price`` (float ∈ (0, 1), optional — defaults to 0.5)
+          * ``size_usdc`` (float > 0, optional — defaults to
+            ``self._base_order_size``)
+          * ``edge`` (float, optional — defaults to 0.0; the Kelly numerator
+            from ``_ml_signal`` is the canonical edge estimate)
+          * ``reason`` (str, optional — defaults to "manual")
+          * ``decision_id`` (str, optional — propagated to ``metadata``
+            so the contract Signal can be cross-referenced with the
+            decision-ledger chain produced by the async scan path)
+
+        Returns ``None`` when ``token_id`` is missing. The signal is
+        marked ``action="HOLD"`` when confidence is below
+        ``_min_confidence`` so callers can still observe (and dashboard)
+        sub-threshold signals without acting on them.
+        """
+        token_id = market_context.get("token_id")
+        if not token_id:
+            return None
+
+        slug = market_context.get("slug") or str(token_id)[:12]
+        direction = market_context.get("direction", Side.BUY)
+        confidence = float(market_context.get("confidence", 0.0))
+        target_price = float(market_context.get("target_price", 0.5))
+        size_usdc = float(
+            market_context.get("size_usdc", self._base_order_size)
+        )
+        edge = float(market_context.get("edge", 0.0))
+        reason = market_context.get("reason", "manual")
+        decision_id = market_context.get("decision_id", "")
+
+        # W19-2 — bump the signals counter so diagnostics() surfaces
+        # how many contract-level signals have been produced.
+        self._stats["signals"] = self._stats.get("signals", 0) + 1
+
+        action = (
+            direction.value if hasattr(direction, "value") else str(direction)
+        ) if confidence >= self._min_confidence else "HOLD"
+
+        return Signal(
+            action=action,
+            token_id=token_id,
+            size=size_usdc,
+            price=target_price,
+            confidence=confidence,
+            edge=edge,
+            reason=reason,
+            metadata={
+                "slug": slug,
+                "source": "ml",
+                "decision_id": decision_id,
+                "ml_score": market_context.get("ml_score", 0.0),
+                "kelly_f": market_context.get("kelly_f", 0.0),
+            },
+        )
+
+    def estimate_edge(self, signal: Signal) -> float:
+        """Estimate expected P&L per dollar for the signal.
+
+        For an ML directional trade, the edge is the Kelly numerator
+        ``p * b - (1 - p)`` stored on the signal by ``generate_signal``.
+        When the signal carries no pre-computed edge (e.g. a manual
+        dashboard signal), we fall back to the confidence-weighted
+        price deviation from 0.5 — a coarse but non-zero proxy.
+        """
+        if signal is None:
+            return 0.0
+        if signal.edge != 0.0:
+            return signal.edge
+        # Coarse fallback: confidence * |price - 0.5| — a noisy but
+        # non-zero estimate for dashboard use only.
+        price = signal.price if signal.price is not None else 0.5
+        return signal.confidence * abs(price - 0.5)
+
+    def size_position(self, signal: Signal, capital: float, risk_params: dict) -> float:
+        """Size the position using fractional Kelly + capital allocator.
+
+        The canonical live-trading sizing path is in ``_ml_signal`` (which
+        calls ``core.capital_allocator.allocate_capital`` with full portfolio
+        context). This contract method is a *deterministic* sync fallback
+        for dashboards / backtests: it applies quarter-Kelly sizing
+        (``KELLY_FRACTION``) capped at ``risk_params.max_position_per_market``
+        (default ``MAX_POSITION_PER_MARKET``) and floored at $0.50 to avoid
+        dust trades.
+
+        ``risk_params`` recognised keys (all optional):
+          * ``max_position_per_market`` (float > 0)
+          * ``kelly_fraction`` (float ∈ (0, 1])
+          * ``bankroll_baseline`` (float > 0) — defaults to
+            ``BANKROLL_BASELINE``.
+        """
+        if signal is None or signal.action == "HOLD":
+            return 0.0
+        max_pos = float(
+            risk_params.get("max_position_per_market", MAX_POSITION_PER_MARKET)
+        )
+        kelly_frac = float(risk_params.get("kelly_fraction", KELLY_FRACTION))
+        bankroll = float(
+            risk_params.get("bankroll_baseline", BANKROLL_BASELINE)
+        )
+        # Quarter-Kelly sizing: f* = edge * kelly_fraction, capped at 30%.
+        edge = signal.edge if signal.edge > 0 else 0.02  # floor so a no-edge signal still sizes
+        kelly_f = max(0.0, edge * kelly_frac)
+        kelly_f = min(0.30, kelly_f)
+        size = bankroll * kelly_f
+        # Floor at $0.50 (avoid dust), cap at max_position_per_market.
+        size = max(0.50, min(max_pos, size))
+        # Never exceed available capital.
+        return min(size, capital)
+
+    def entry_logic(self, signal: Signal, market_context: dict) -> dict:
+        """Return entry execution parameters mirroring ``_act_on_signal``.
+
+        ``_act_on_signal`` constructs an ``OrderArgs`` with:
+          * ``token_id`` = signal.token_id
+          * ``price``    = signal.target_price
+          * ``side``     = signal.direction
+          * ``size``     = max(1.0, size_usdc / target_price)
+
+        This contract method returns the same fields as a plain dict
+        (plus ``time_in_force="GTC"`` and ``order_type="limit"``) so the
+        dashboard / API / backtest engine can introspect the intended
+        execution without re-implementing the math.
+        """
+        if signal is None or signal.action == "HOLD":
+            return {"skip": True, "reason": "signal action is HOLD or None"}
+        target_price = signal.price if signal.price is not None else 0.5
+        # Shares = max(1.0, size_usdc / price) — matches _act_on_signal.
+        size_shares = max(1.0, signal.size / max(target_price, 0.01))
+        return {
+            "token_id": signal.token_id,
+            "price": target_price,
+            "side": signal.action,  # "BUY" / "SELL"
+            "size": size_shares,
+            "type": "limit",
+            "time_in_force": "GTC",
+            "decision_id": signal.metadata.get("decision_id", "") if signal.metadata else "",
+        }
+
+    def exit_logic(self, position: dict, market_context: dict) -> dict | None:
+        """Determine whether to exit a position.
+
+        ``SignalTraderStrategy``'s exit policy is encoded in
+        ``_recycle_stale_orders`` (cancels unfilled signal orders after
+        ``STALE_ORDER_SECONDS = 180``). This contract method surfaces the
+        same rule as a plain dict so a dashboard / external trade manager
+        can drive exits without poking the async loop.
+
+        Returns ``{"action": "cancel", "order_id": ..., "reason": ...}``
+        when the position's ``created_at`` is older than the stale window,
+        ``None`` otherwise.
+        """
+        if not position:
+            return None
+        created_at = position.get("created_at")
+        order_id = position.get("order_id")
+        if created_at is None or order_id is None:
+            return None
+        now = market_context.get("now") or time.time()
+        age_seconds = now - created_at
+        if age_seconds > STALE_ORDER_SECONDS:
+            return {
+                "action": "cancel",
+                "order_id": order_id,
+                "reason": f"stale_order_age={age_seconds:.0f}s>{STALE_ORDER_SECONDS}s",
+            }
+        return None
+
+    def diagnostics(self) -> dict:
+        """Return strategy state + stats + model readiness.
+
+        Surfaces the contract base fields (name / running / stats /
+        last_error) plus the signal-trader-specific state: feature-cache
+        size, market-cache size, active-signal count, ML model fitted
+        flag, and the configured min_confidence / base_order_size.
+        """
+        base = super().diagnostics()
+        base.update({
+            "active_signals": len(self._active_signals),
+            "feature_cache_size": len(self._feature_cache),
+            "market_cache_size": len(self._market_cache),
+            "min_confidence": self._min_confidence,
+            "base_order_size": self._base_order_size,
+            "model_is_fitted": getattr(ml_model, "is_fitted", False),
+            "paper_mode": self._paper,
+        })
+        return base

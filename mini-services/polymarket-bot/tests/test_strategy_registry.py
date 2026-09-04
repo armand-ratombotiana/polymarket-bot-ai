@@ -72,8 +72,11 @@ def test_get_catalog_returns_one_entry_per_strategy(registry):
 
 # ── 2. get_catalog flags implemented set correctly ───────────────────────────
 def test_get_catalog_flags_implemented_set_correctly(registry):
-    """``implemented=True`` only for the three documented concrete strategy
-    ids (mm_avellaneda_stoikov, arb_binary_dutch_book, ml_random_forest_quant)."""
+    """``implemented=True`` only for the six concrete-strategy catalog
+    entries — the three original concrete strategies
+    (mm_avellaneda_stoikov, arb_binary_dutch_book, ml_random_forest_quant)
+    plus the three W19-6 additions (stat_ornstein_uhlenbeck,
+    mom_macd_histogram, ml_isotonic_calibrated)."""
     catalog = registry.get_catalog()
     implemented = [row for row in catalog if row["implemented"]]
     implemented_ids = {row["strategy_id"] for row in implemented}
@@ -82,8 +85,36 @@ def test_get_catalog_flags_implemented_set_correctly(registry):
         "mm_avellaneda_stoikov",
         "arb_binary_dutch_book",
         "ml_random_forest_quant",
+        # W19-6 additions.
+        "stat_ornstein_uhlenbeck",
+        "mom_macd_histogram",
+        "ml_isotonic_calibrated",
     }
-    assert len(implemented) == 3
+    assert len(implemented) == 6
+
+
+# ── 2b. get_catalog flags implemented_only filter ───────────────────────────
+def test_get_catalog_implemented_only_filter_returns_six(registry):
+    """``implemented_only=True`` returns only the six IMPLEMENTED rows."""
+    catalog = registry.get_catalog(implemented_only=True)
+    assert len(catalog) == 6
+    for row in catalog:
+        assert row["status"] == "IMPLEMENTED"
+        assert row["implemented"] is True
+
+
+# ── 2c. get_catalog status field matches implemented flag ────────────────────
+def test_get_catalog_status_field_matches_implemented_flag(registry):
+    """The new ``status`` field is consistent with the legacy ``implemented``
+    boolean: ``implemented`` is True iff ``status == "IMPLEMENTED"``."""
+    catalog = registry.get_catalog()
+    for row in catalog:
+        if row["status"] == "IMPLEMENTED":
+            assert row["implemented"] is True
+        else:
+            assert row["implemented"] is False
+        # Status is one of the three documented values.
+        assert row["status"] in {"IMPLEMENTED", "PLANNED", "EXPERIMENTAL"}
 
 
 # ── 3. get_catalog flags is_running=False when no strategy started ──────────
@@ -97,12 +128,15 @@ def test_get_catalog_flags_is_running_false_when_no_strategy_started(registry):
 
 # ── 4. get_catalog row schema carries all documented fields ─────────────────
 def test_get_catalog_row_schema_carries_all_documented_fields(registry):
-    """Each catalog row must carry exactly the seven documented fields —
-    no missing, no extras."""
+    """Each catalog row must carry exactly the nine documented fields —
+    no missing, no extras. W19-6 added ``status`` and ``default_enabled``
+    to the row schema; the legacy ``implemented`` boolean is retained
+    for backward compatibility."""
     catalog = registry.get_catalog()
     expected_keys = {
         "strategy_id", "name", "category", "description",
-        "risk_level", "implemented", "is_running",
+        "risk_level", "status", "default_enabled",
+        "implemented", "is_running",
     }
     for row in catalog:
         assert set(row.keys()) == expected_keys
@@ -194,10 +228,11 @@ async def test_stop_strategy_on_running_stub_returns_true_and_removes(registry):
     assert stub_id not in registry.get_active_instances()
 
 
-# ── 12. StrategyMeta dataclass exposes all six documented fields ────────────
+# ── 12. StrategyMeta dataclass exposes all documented fields ────────────────
 def test_strategy_meta_dataclass_carries_all_documented_fields():
-    """``StrategyMeta`` must expose all six documented fields: strategy_id,
-    name, category, description, risk_level, default_enabled."""
+    """``StrategyMeta`` must expose all documented fields: strategy_id,
+    name, category, description, risk_level, default_enabled, status
+    (W19-6 addition — defaults to ``PLANNED``)."""
     meta = StrategyMeta(
         strategy_id="test_id",
         name="Test Strategy",
@@ -205,6 +240,7 @@ def test_strategy_meta_dataclass_carries_all_documented_fields():
         description="A test strategy for unit testing",
         risk_level="Medium",
         default_enabled=False,
+        status="IMPLEMENTED",
     )
     assert meta.strategy_id == "test_id"
     assert meta.name == "Test Strategy"
@@ -212,7 +248,11 @@ def test_strategy_meta_dataclass_carries_all_documented_fields():
     assert meta.description == "A test strategy for unit testing"
     assert meta.risk_level == "Medium"
     assert meta.default_enabled is False
+    assert meta.status == "IMPLEMENTED"
 
-    # Default for default_enabled is False (the dataclass default).
+    # Defaults: ``default_enabled`` is False and ``status`` is PLANNED
+    # (W19-6 — honest default; a new entry is assumed to be a stub
+    # until explicitly marked IMPLEMENTED).
     meta2 = StrategyMeta("x", "y", "z", "w", "Low")
     assert meta2.default_enabled is False
+    assert meta2.status == "PLANNED"

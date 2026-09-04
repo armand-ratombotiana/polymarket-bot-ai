@@ -473,6 +473,27 @@ async def lifespan(app: FastAPI):
         )
     except Exception:
         pass
+    # W19-8 — Warm the meta-learner from already-resolved labeled feature
+    # vectors so the first prediction the bot makes after startup uses the
+    # Level-2 stacking blend (not the adaptive Brier-inverse fallback).
+    # Safe no-op when the labeled-sample store is empty (e.g. fresh deploy)
+    # or the meta-learner cannot warm (single-class buffer). Wrapped in
+    # try/except so a meta-learner warmup failure never blocks startup.
+    try:
+        from ml.model import ml_model as _ml_model_for_warmup
+        _warmup_summary = _ml_model_for_warmup.warmup()
+        if _warmup_summary.get("is_warm"):
+            await store.log_event(
+                f"🧠 Meta-learner warmed with {_warmup_summary.get('n_loaded', 0)} "
+                f"labeled samples (buffer={_warmup_summary.get('buffer_size', 0)})"
+            )
+        else:
+            await store.log_event(
+                "🧠 Meta-learner warmup deferred — stacking will activate once "
+                f"live outcomes accumulate ({_warmup_summary.get('error', 'unknown')})"
+            )
+    except Exception as e:
+        log.warning("[lifespan] Meta-learner warmup failed: %s", e)
     watchdog.beat("label_backfill")
     await store.log_event("🏷️  Label Backfill Service active (45s startup grace → daily cycle, retrain ≥50 labels)")
 
@@ -1708,22 +1729,41 @@ async def get_leaderboard():
     description=(
         "Returns the full catalog of 50+ registered strategies with "
         "metadata (category, description, default parameters, risk "
-        "profile) and their current running state."
+        "profile) and their current running state. Use "
+        "``?implemented_only=true`` to filter out PLANNED / EXPERIMENTAL "
+        "entries (i.e. no-op stubs) so the catalog only shows strategies "
+        "with real trading loops."
     ),
 )
-async def get_strategy_catalog():
-    """Return all 50 strategies with metadata, category, and running state."""
+async def get_strategy_catalog(implemented_only: bool = False):
+    """Return the strategy catalog.
+
+    ``implemented_only=true`` excludes PLANNED / EXPERIMENTAL rows so the
+    UI can render only strategies that actually execute a trading loop.
+    """
     # W11-2 — cache the strategy catalog for 5 min (markets_cache's
     # default TTL). Strategy metadata is static — the only thing that
     # changes is the running state, which ``POST /api/strategies/toggle``
     # invalidates explicitly.
-    cache_key = "strategies_catalog"
+    # W19-6 — the cache key includes the ``implemented_only`` flag so the
+    # filtered view doesn't get shadowed by an unfiltered cached response
+    # (and vice-versa).
+    cache_key = "strategies_catalog:impl" if implemented_only else "strategies_catalog"
     cached = markets_cache.get(cache_key)
     if cached is not None:
         return cached
+    catalog = strategy_registry.get_catalog(implemented_only=implemented_only)
     result = {
-        "catalog": strategy_registry.get_catalog(),
-        "total": len(strategy_registry._catalog),
+        "catalog": catalog,
+        "total": len(catalog),
+        # W19-6 — surface the implementation-status breakdown so the
+        # UI can render "6 implemented, 44 planned" headers without a
+        # second round-trip.
+        "implemented_count": sum(1 for s in catalog if s.get("status") == "IMPLEMENTED"),
+        "planned_count": sum(
+            1 for s in catalog if s.get("status") not in ("IMPLEMENTED",)
+        ),
+        "filtered": implemented_only,
     }
     markets_cache.set(cache_key, result)
     return result
@@ -1750,13 +1790,17 @@ async def toggle_strategy(req: StrategyToggleRequest):
         # W11-2 — invalidate markets_cache (which holds the strategy
         # catalog, including per-strategy ``is_running`` flags) so the
         # next ``GET /api/strategies/catalog`` reflects the new state.
+        # W19-6 — both the filtered and unfiltered cache views must be
+        # invalidated since either could shadow the other.
         markets_cache.invalidate("strategies_catalog")
+        markets_cache.invalidate("strategies_catalog:impl")
         return {"status": "started", "strategy": strat_id}
     else:
         ok = await strategy_registry.stop_strategy(strat_id)
         await store.log_event(f"⏸ Strategy [{strat_id}] stopped via API")
         # W11-2 — same invalidation as the start branch above.
         markets_cache.invalidate("strategies_catalog")
+        markets_cache.invalidate("strategies_catalog:impl")
         return {"status": "stopped" if ok else "not_running", "strategy": strat_id}
 
 
@@ -3614,6 +3658,125 @@ async def generate_backtest_report_pdf(request: Request, req: BacktestRequest):
     )
 
 
+# ── W19-1 — Historical replay backtest ───────────────────────────────────────
+# Unlike the three routes above (``/api/backtest/run`` / ``/report`` /
+# ``/report/pdf``), which all delegate to the synthetic Monte-Carlo
+# archetype simulator in ``backtesting/engine.py``, this route loads
+# REAL order book snapshots from the SQLite ``market_snapshots`` /
+# ``orderbook_ticks`` tables and replays them through the
+# :class:`HistoricalReplayEngine`. The response shape mirrors the
+# engine's :class:`ReplayResult` dataclass (``n_snapshots``,
+# ``n_trades``, ``total_return``, ``sharpe``, ``max_drawdown``,
+# ``win_rate``, ``profit_factor``, ``trades``, ``equity_curve``).
+#
+# Rate-limited at ``HEAVY_LIMIT`` (5/min) — same ceiling as the other
+# backtest routes — and the synchronous SQLite scan + replay loop is
+# wrapped in ``asyncio.to_thread`` so the event loop never blocks on
+# disk I/O.
+
+class HistoricalReplayRequest(BaseModel):
+    """Request body for ``POST /api/backtest/historical-replay``.
+
+    The ``token_id`` is the Polymarket CLOB token to replay; ``start_time``
+    / ``end_time`` are epoch-seconds bounds on the snapshot window. The
+    optional ``strategy`` field lets a future caller plug in a named
+    strategy adapter (default ``"simple"`` → :class:`SimpleStrategy`
+    mean-reversion rule). ``initial_capital`` is the USD starting cash
+    for the replay (default $100, matching ``BANKROLL_BASELINE``).
+    """
+
+    token_id: str = Field(..., min_length=1, description="Polymarket CLOB token ID")
+    start_time: float = Field(..., description="Replay start timestamp (epoch s)")
+    end_time: float = Field(..., description="Replay end timestamp (epoch s)")
+    initial_capital: float = Field(default=100.0, ge=1.0, le=1_000_000.0)
+    strategy: str = Field(default="simple", description="Strategy name (only 'simple' supported)")
+
+
+@app.post("/api/backtest/historical-replay", tags=["backtesting"])
+@limiter.limit(HEAVY_LIMIT)
+async def historical_replay(request: Request, req: HistoricalReplayRequest):
+    """Run a historical replay backtest over real recorded market snapshots.
+
+    Loads rows from the ``market_snapshots`` / ``orderbook_ticks`` SQLite
+    tables for the given ``token_id`` and ``[start_time, end_time]`` window,
+    then replays each snapshot through the strategy's
+    ``generate_signal(context)`` hook. The default ``strategy="simple"``
+    plugs in the :class:`backtesting.historical_replay.SimpleStrategy`
+    mean-reversion rule (BUYs when ``mid`` drops below the rolling
+    average, SELLs when it reverts back).
+
+    Returns the :class:`ReplayResult` payload with headline risk metrics
+    (total return, annualised Sharpe, max drawdown, win rate, profit
+    factor) plus the trade list (capped at 100) and a downsampled
+    equity curve (≤ 200 points).
+
+    The replay is wrapped in ``asyncio.to_thread`` so the SQLite scan +
+    Python replay loop never blocks the FastAPI event loop.
+    """
+    from backtesting.historical_replay import (
+        HistoricalReplayEngine,
+        SimpleStrategy,
+    )
+
+    if req.start_time > req.end_time:
+        raise HTTPException(
+            status_code=400,
+            detail="start_time must be <= end_time",
+        )
+
+    engine = HistoricalReplayEngine(settings.market_db_path)
+
+    # Only the default "simple" strategy is wired right now. A future
+    # caller could pass ``strategy="signal_trader"`` / ``"market_maker"``
+    # — the dispatch table for those is a follow-up.
+    strategy_name = (req.strategy or "simple").strip().lower()
+    if strategy_name != "simple":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown strategy {req.strategy!r}; only 'simple' is supported.",
+        )
+    strategy = SimpleStrategy()
+
+    result = await asyncio.to_thread(
+        engine.replay,
+        token_id=req.token_id,
+        strategy=strategy,
+        start_time=req.start_time,
+        end_time=req.end_time,
+        initial_capital=req.initial_capital,
+    )
+
+    # Downsample the equity curve to ≤ 200 points so the JSON response
+    # stays compact even for 24h × 1-second-snapshot replays (86400 pts).
+    step = max(1, len(result.equity_curve) // 200)
+    downsampled_curve = result.equity_curve[::step]
+    # Always include the final point so the curve's tail is exact.
+    if downsampled_curve and downsampled_curve[-1] != result.equity_curve[-1]:
+        downsampled_curve.append(result.equity_curve[-1])
+
+    return {
+        "status": "completed",
+        "synthetic": False,
+        "engine": "historical_replay",
+        "disclaimer": (
+            "Historical replay over recorded market_snapshots rows — "
+            "actual market history, NOT a Monte-Carlo archetype draw."
+        ),
+        "token_id": req.token_id,
+        "start_time": req.start_time,
+        "end_time": req.end_time,
+        "n_snapshots": result.n_snapshots,
+        "n_trades": len(result.trades),
+        "total_return": result.total_return,
+        "sharpe": result.sharpe,
+        "max_drawdown": result.max_drawdown,
+        "win_rate": result.win_rate,
+        "profit_factor": result.profit_factor,
+        "trades": result.trades[:100],
+        "equity_curve": downsampled_curve,
+    }
+
+
 @app.get("/api/audit/logs", tags=["audit"])
 async def get_audit_logs(
     limit: int = Query(100, ge=1, le=1000),
@@ -5150,3 +5313,66 @@ _register_explainability_routes(app)
 from core.sentiment import register_routes as _register_sentiment_routes
 
 _register_sentiment_routes(app)
+
+
+# (W19-8) ml.shadow_inference — Shadow model challenger inspection +
+# promotion-gate evaluation. Additive wiring appended at end of file
+# per the W19-8 task spec. Adds two endpoints under ``/api/ml/shadow``
+# so an operator can audit the shadow registry + trigger a
+# champion-vs-challenger evaluation:
+#
+#   GET  /api/ml/shadow              shadow-inference registry snapshot —
+#                                   registered challenger list (name /
+#                                   description / calls / mean-abs-delta
+#                                   vs production / outcome-stamped
+#                                   count / last comparison record),
+#                                   aggregate counters, and the W19-8
+#                                   promotion ledger
+#   POST /api/ml/shadow/evaluate    run ``evaluate_and_promote`` against
+#                                   every registered challenger; return
+#                                   per-challenger Brier / paired-t-test
+#                                   / promotion verdict
+#
+# Same registration pattern as the sibling ``register_routes`` blocks
+# above (alias imported under ``_register_*`` to avoid shadowing other
+# modules' ``register_routes`` symbol). Auth enforced by
+# ``enforce_api_auth`` (neither path is in ``PUBLIC_PATHS``).
+from ml.shadow_inference import register_routes as _register_shadow_inference_routes
+
+_register_shadow_inference_routes(app)
+
+
+# (W19-4) ml.economic_value — ML economic value tracker (P&L by model
+# version / confidence / predicted-edge + with-AI vs without-AI
+# counterfactual). Additive wiring appended at end of file per the W19-4
+# task spec. Adds three endpoints under
+# ``/api/ml/economic-value`` so an operator can answer the God Mode §16
+# question "is the ML model actually adding economic value?":
+#
+#   GET /api/ml/economic-value                full summary (3 roll-ups +
+#                                             counterfactual)
+#   GET /api/ml/economic-value/by-model       P&L grouped by model
+#                                             version (most profitable
+#                                             first) with win/loss counts
+#   GET /api/ml/economic-value/counterfactual  with-AI vs without-AI
+#                                             counterfactual P&L +
+#                                             ml_value + ml_value_per_trade
+#
+# Same registration pattern as the sibling ``register_routes`` blocks
+# above (alias imported under ``_register_*`` to avoid shadowing other
+# modules' ``register_routes`` symbol). Auth enforced by
+# ``enforce_api_auth`` (none of the three paths are in ``PUBLIC_PATHS``).
+#
+# The singleton ``ml_value_tracker`` is constructed at module-import time
+# against ``ML_VALUE_DB`` (env-overridable, redirected to
+# ``/tmp/pmbot_conftest_isolation/ml_economic_value.db`` by conftest) so
+# the production ``/app/data/ml_economic_value.db`` sandbox path is
+# never touched by the test suite. Trade-recording call sites in
+# ``paper/simulator.py`` (paper-fill close) and ``core/settlement.py``
+# (market-resolution YES + NO branches) drop in a fire-and-forget
+# ``ml_value_tracker.record_trade(...)`` alongside the existing
+# ``closed_positions.record_closed_position(...)`` call so every closed
+# round-trip is mirrored into the ML economic-value tracker.
+from ml.economic_value import register_routes as _register_ml_economic_value_routes
+
+_register_ml_economic_value_routes(app)

@@ -23,7 +23,7 @@ from config import settings
 from core.clob_client import OrderArgs
 from core.data_store import Side, store
 from core.gamma_client import gamma_client
-from strategies.base import BaseStrategy
+from strategies.base import BaseStrategy, Signal
 
 log = logging.getLogger(__name__)
 
@@ -406,3 +406,304 @@ class MarketMakerStrategy(BaseStrategy):
             )
             return True
         return False
+
+    # ── W19-2 — Unified Strategy Contract (God Mode §26) ────────────────────
+    # The 9 contract methods below are SYNC wrappers over the existing async
+    # Avellaneda-Stoikov quote-placement machinery. They expose the strategy's
+    # signal-generation / sizing / entry-decision / exit-decision /
+    # diagnostics surface to operators / dashboards / backtest engines without
+    # requiring an event loop. The async ``_run`` / ``_review_quotes`` /
+    # ``_place_skewed_quotes`` path remains the canonical live-trading loop.
+
+    def metadata(self) -> dict:
+        """Return strategy metadata for the catalog / dashboard."""
+        return {
+            "name": self.name,
+            "version": "1.0.0",
+            "description": (
+                "Avellaneda-Stoikov Market Maker with inventory skewing, "
+                "volatility-adjusted spreads, ML-driven reservation skew, "
+                "and 60-second stale-inventory flush."
+            ),
+            "author": "polymarket-bot",
+            "category": "market_making",
+            "model": "avellaneda_stoikov",
+        }
+
+    def configure(self, config: dict) -> None:
+        """Apply runtime config overrides (spread, quote_size, max_inv, ...).
+
+        Recognised keys (all optional — unrecognised keys are stored in
+        ``self.config`` for introspection but not applied to typed fields):
+
+          * ``base_spread_frac`` (float > 0)   — overrides ``_base_spread_frac``.
+          * ``quote_size`` (float > 0)        — overrides ``_quote_size``.
+          * ``max_inventory`` (float > 0)     — overrides ``_max_inv``.
+          * ``gamma_risk_aversion`` (float > 0) — overrides
+            ``_gamma_risk_aversion``.
+        """
+        super().configure(config)
+        if "base_spread_frac" in config:
+            v = float(config["base_spread_frac"])
+            if v > 0.0:
+                self._base_spread_frac = v
+        if "quote_size" in config:
+            v = float(config["quote_size"])
+            if v > 0.0:
+                self._quote_size = v
+        if "max_inventory" in config:
+            v = float(config["max_inventory"])
+            if v > 0.0:
+                self._max_inv = v
+        if "gamma_risk_aversion" in config:
+            v = float(config["gamma_risk_aversion"])
+            if v > 0.0:
+                self._gamma_risk_aversion = v
+
+    def validate(self) -> tuple[bool, str]:
+        """Validate strategy configuration post-construction.
+
+        ``MarketMakerStrategy`` is valid when:
+          * ``_base_spread_frac > 0`` (a non-positive spread would make
+            the half-spread formula produce NaN / Inf).
+          * ``_quote_size > 0`` (a non-positive quote size would zero the
+            submitted order).
+          * ``_max_inv > 0`` and ``_max_inv >= _quote_size`` (the
+            inventory cap must be reachable by at least one quote).
+          * ``_gamma_risk_aversion > 0`` (a non-positive gamma would
+            degenerate the A-S reservation-price formula).
+        """
+        if self._base_spread_frac <= 0.0:
+            return False, (
+                f"_base_spread_frac={self._base_spread_frac} must be > 0"
+            )
+        if self._quote_size <= 0.0:
+            return False, (
+                f"_quote_size={self._quote_size} must be > 0"
+            )
+        if self._max_inv <= 0.0:
+            return False, (
+                f"_max_inv={self._max_inv} must be > 0"
+            )
+        if self._max_inv < self._quote_size:
+            return False, (
+                f"_max_inv={self._max_inv} < _quote_size={self._quote_size} "
+                f"(no quote would fit under the inventory cap)"
+            )
+        if self._gamma_risk_aversion <= 0.0:
+            return False, (
+                f"_gamma_risk_aversion={self._gamma_risk_aversion} must be > 0"
+            )
+        return True, "OK"
+
+    def generate_signal(self, market_context: dict) -> Signal | None:
+        """Build a contract ``Signal`` representing the desired quote.
+
+        For a market maker, a "signal" is the reservation-price-derived
+        bid/ask pair the strategy would place around the current mid.
+        ``market_context`` is a caller-provided dict (NOT the live store).
+        Recognised keys:
+
+          * ``token_id`` (str, required)
+          * ``mid`` (float ∈ (0, 1), required — the current market mid)
+          * ``spread`` (float > 0, optional — defaults to
+            ``self._base_spread_frac``)
+          * ``inventory`` (float, optional — YES shares held, defaults to 0)
+          * ``side`` (str, optional — ``"BUY"`` or ``"SELL"``; when omitted,
+            the signal action defaults to ``"BUY"`` — a quote on the bid side
+            — which is the canonical "make a market" intent)
+
+        Returns ``None`` when ``token_id`` or ``mid`` is missing. The
+        signal's ``price`` is the reservation-price-skewed bid (for BUY)
+        or ask (for SELL); ``edge`` is the half-spread (the expected per-
+        side capture when the quote fills and the mid reverts).
+        """
+        token_id = market_context.get("token_id")
+        mid = market_context.get("mid")
+        if not token_id or mid is None:
+            return None
+
+        spread = float(market_context.get("spread", self._base_spread_frac))
+        inventory = float(market_context.get("inventory", 0.0))
+        side = str(market_context.get("side", "BUY")).upper()
+        # A-S reservation price (skews down with long inventory).
+        reservation = mid - (inventory * self._gamma_risk_aversion * (spread ** 2) / 2.0)
+        reservation = max(0.02, min(0.98, reservation))
+        half_spread = max(self._base_spread_frac / 2.0, spread / 2.0)
+
+        if side == "SELL":
+            price = round(min(0.99, reservation + half_spread), 4)
+            action = "SELL"
+        else:
+            price = round(max(0.01, reservation - half_spread), 4)
+            action = "BUY"
+
+        # W19-2 — bump signals counter.
+        self._stats["signals"] = self._stats.get("signals", 0) + 1
+
+        return Signal(
+            action=action,
+            token_id=token_id,
+            size=self._quote_size,
+            price=price,
+            confidence=0.5,  # MM confidence is structural, not predictive
+            edge=half_spread,  # expected per-side capture (half-spread)
+            reason=f"A-S reservation={reservation:.4f}, half_spread={half_spread:.4f}",
+            metadata={
+                "mid": mid,
+                "spread": spread,
+                "inventory": inventory,
+                "reservation_price": reservation,
+                "half_spread": half_spread,
+                "model": "avellaneda_stoikov",
+            },
+        )
+
+    def estimate_edge(self, signal: Signal) -> float:
+        """Estimate expected P&L per dollar for the quote.
+
+        For a market maker, the edge is the half-spread captured when a
+        quote fills and the mid reverts — i.e. ``signal.edge`` set by
+        ``generate_signal`` (the half-spread). When the signal carries no
+        pre-computed edge, we fall back to ``_base_spread_frac / 2`` so
+        a dashboard can still surface an approximate capture estimate.
+        """
+        if signal is None:
+            return 0.0
+        if signal.edge != 0.0:
+            return signal.edge
+        return self._base_spread_frac / 2.0
+
+    def size_position(self, signal: Signal, capital: float, risk_params: dict) -> float:
+        """Size the quote using ``_quote_size`` bounded by ``_max_inv``.
+
+        ``MarketMakerStrategy`` sizes every quote at the configured
+        ``_quote_size`` (USDC notional) but caps the total per-token
+        inventory at ``_max_inv``. This contract method mirrors that
+        policy: it returns the smaller of (a) the configured quote size,
+        (b) the remaining inventory headroom under ``_max_inv``, and
+        (c) the available capital.
+
+        ``risk_params`` recognised keys (all optional):
+          * ``current_inventory_usdc`` (float >= 0) — the existing
+            invested capital on this token, used to compute headroom.
+          * ``quote_size_override`` (float > 0) — overrides ``_quote_size``.
+          * ``max_inventory_override`` (float > 0) — overrides ``_max_inv``.
+        """
+        if signal is None or signal.action == "HOLD":
+            return 0.0
+        quote_size = float(
+            risk_params.get("quote_size_override", self._quote_size)
+        )
+        max_inv = float(
+            risk_params.get("max_inventory_override", self._max_inv)
+        )
+        current_inv = float(risk_params.get("current_inventory_usdc", 0.0))
+        headroom = max(0.0, max_inv - current_inv)
+        # Bound by quote_size, inventory headroom, and capital.
+        return min(quote_size, headroom, capital)
+
+    def entry_logic(self, signal: Signal, market_context: dict) -> dict:
+        """Return entry execution parameters mirroring ``_place_skewed_quotes``.
+
+        ``_place_skewed_quotes`` constructs an ``OrderArgs`` per side with:
+          * ``token_id`` = signal.token_id
+          * ``price``    = bid_price or ask_price
+          * ``side``     = Side.BUY or Side.SELL
+          * ``size``     = max(1.0, quote_size / price) (BUY) or
+                            min(max(1.0, quote_size/price), q) (SELL, bounded
+                            by held shares)
+
+        This contract method returns the BUY-side entry params as a plain
+        dict. The SELL side is symmetric (callers can flip the ``side``
+        field and recompute the size bound against their held inventory).
+        """
+        if signal is None or signal.action == "HOLD":
+            return {"skip": True, "reason": "signal action is HOLD or None"}
+        price = signal.price if signal.price is not None else 0.5
+        # BUY-side shares = max(1.0, quote_size / price) — matches
+        # _place_skewed_quotes' bid_size formula.
+        size_shares = max(1.0, signal.size / max(price, 0.01))
+        return {
+            "token_id": signal.token_id,
+            "price": price,
+            "side": signal.action,  # "BUY" / "SELL"
+            "size": size_shares,
+            "type": "limit",
+            "time_in_force": "GTC",
+            "post_only": False,
+        }
+
+    def exit_logic(self, position: dict, market_context: dict) -> dict | None:
+        """Determine whether to flush stale inventory.
+
+        ``MarketMakerStrategy``'s exit policy is encoded in
+        ``_flush_stale_inventory`` (dumps YES inventory held > 60s via a
+        marketable SELL at best_bid). This contract method surfaces the
+        same rule as a plain dict so a dashboard / external trade
+        manager can drive flushes without poking the async loop.
+
+        ``position`` recognised keys:
+          * ``yes_shares`` (float > 0, required for flush consideration)
+          * ``inventory_since`` (float epoch seconds, required — the
+            first epoch-second at which non-zero YES inventory was
+            observed; mirrors ``self._inventory_since[token_id]``)
+
+        ``market_context`` recognised keys:
+          * ``now`` (float epoch seconds, optional — defaults to
+            ``time.time()``)
+          * ``best_bid`` (float > 0, optional — when missing, the flush
+            cannot be priced and the method returns ``None``)
+
+        Returns ``{"action": "flush_sell", "price": best_bid, "size": ...,
+        "reason": "..."}`` when inventory is held > 60s and a marketable
+        best_bid is available; ``None`` otherwise.
+        """
+        if not position:
+            return None
+        yes_shares = position.get("yes_shares")
+        inventory_since = position.get("inventory_since")
+        if yes_shares is None or yes_shares <= 0.0 or inventory_since is None:
+            return None
+        now = market_context.get("now") or time.time()
+        held_seconds = now - inventory_since
+        if held_seconds <= 60.0:
+            return None
+        best_bid = market_context.get("best_bid")
+        if best_bid is None or best_bid <= 0.01:
+            return None
+        # Flush size bounded by actual inventory — matches _flush_stale_inventory.
+        flush_size = min(max(1.0, self._quote_size / best_bid), yes_shares)
+        return {
+            "action": "flush_sell",
+            "price": best_bid,
+            "size": flush_size,
+            "reason": f"inventory_held={held_seconds:.0f}s>60s",
+        }
+
+    def diagnostics(self) -> dict:
+        """Return strategy state + stats + quote / market count.
+
+        Surfaces the contract base fields (name / running / stats /
+        last_error) plus the MM-specific state: number of quoted tokens,
+        number of resting quotes, number of tokens with non-zero
+        inventory, and the configured spread / quote_size / max_inv.
+        """
+        base = super().diagnostics()
+        active_quotes = sum(
+            1 for q in self._quotes.values() if any(q.get(s) for s in ("BUY", "SELL"))
+        )
+        tokens_with_inventory = sum(
+            1 for t in self._inventory_since
+        )
+        base.update({
+            "quoted_tokens": len(self._token_ids),
+            "active_quotes": active_quotes,
+            "tokens_with_inventory": tokens_with_inventory,
+            "base_spread_frac": self._base_spread_frac,
+            "quote_size": self._quote_size,
+            "max_inventory": self._max_inv,
+            "gamma_risk_aversion": self._gamma_risk_aversion,
+            "paper_mode": self._paper,
+        })
+        return base

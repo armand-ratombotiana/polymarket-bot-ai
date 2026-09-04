@@ -78,6 +78,7 @@ from core.data_store import Order, OrderBook, PriceLevel, Side, store
 from core.decision_ledger import (
     STAGE_FILL,
     STAGE_ORDER,
+    STAGE_POSITION,
     STAGE_PREDICTION,
     STAGE_RISK_APPROVED,
     STAGE_SIGNAL,
@@ -333,9 +334,14 @@ async def test_e2e_decision_chain(fresh_store, mock_book, deterministic_predict)
     await paper_sim._try_fill_orders()
 
     chain = await decision_ledger.get_chain(decision_id)
-    assert len(chain) == 5, (
-        f"expected the full 5-stage chain after FILL, got {len(chain)}: "
-        f"{[r['stage'] for r in chain]}"
+    # W19-3 — the FILL stage is now followed by a POSITION stage (additive —
+    # captured by ``paper_sim._execute_fill`` immediately after the FILL
+    # event records the post-fill position state for the decision chain).
+    # Total chain length is 6: PREDICTION → SIGNAL → RISK_APPROVED →
+    # ORDER → FILL → POSITION.
+    assert len(chain) == 6, (
+        f"expected the full 6-stage chain (5 originals + W19-3 POSITION) "
+        f"after FILL, got {len(chain)}: {[r['stage'] for r in chain]}"
     )
     assert chain[4]["stage"] == STAGE_FILL
     # Opening BUY → realised P&L is 0.0 (paper_sim only computes P&L on SELL
@@ -351,13 +357,26 @@ async def test_e2e_decision_chain(fresh_store, mock_book, deterministic_predict)
     assert fill_data["side"] == "BUY"
     assert fill_data["order_id"] == paper_order.order_id
     assert fill_data["paper"] is True
+
+    # W19-3 — POSITION stage is recorded immediately after FILL.
+    assert chain[5]["stage"] == STAGE_POSITION
+    assert chain[5]["decision_id"] == decision_id
+    assert chain[5]["token_id"] == TOKEN
+    # Opening BUY → realised P&L is 0.0; promoted to the dedicated ``pnl`` column.
+    assert chain[5]["pnl"] == pytest.approx(0.0)
+    pos_data = chain[5]["data"]
+    assert pos_data is not None
+    assert pos_data["yes_shares"] > 0
+    assert pos_data["avg_entry_price"] > 0
+    assert pos_data["paper"] is True
+
     # The fill should have moved the order out of the open-orders store.
     assert paper_order.order_id not in store.open_orders
     # And the position should now exist on the store.
     assert TOKEN in store.positions
     assert store.positions[TOKEN].yes_shares > 0
 
-    # ─── (6) Verify the full 5-stage chain ───────────────────────────────
+    # ─── (6) Verify the full 6-stage chain ───────────────────────────────
     stages = [row["stage"] for row in chain]
     assert stages == [
         STAGE_PREDICTION,
@@ -365,6 +384,7 @@ async def test_e2e_decision_chain(fresh_store, mock_book, deterministic_predict)
         STAGE_RISK_APPROVED,
         STAGE_ORDER,
         STAGE_FILL,
+        STAGE_POSITION,
     ], f"unexpected chain stage order: {stages}"
 
     # Every row carries the same decision_id + token_id.
@@ -381,11 +401,12 @@ async def test_e2e_decision_chain(fresh_store, mock_book, deterministic_predict)
         f"chain timestamps are not in chronological order: {timestamps}"
     )
 
-    # Token-level feed surfaces all 5 events (most recent first).
+    # Token-level feed surfaces all 6 events (most recent first).
     token_chain = await decision_ledger.get_chain_by_token(TOKEN, limit=50)
-    assert len(token_chain) >= 5, (
-        f"token-level feed should surface all 5 events, got {len(token_chain)}"
+    assert len(token_chain) >= 6, (
+        f"token-level feed should surface all 6 events, got {len(token_chain)}"
     )
-    # newest first → FILL must be the first row.
-    assert token_chain[0]["stage"] == STAGE_FILL
+    # newest first → POSITION (W19-3) must be the first row, since it was
+    # recorded immediately after the FILL event.
+    assert token_chain[0]["stage"] == STAGE_POSITION
     assert token_chain[0]["decision_id"] == decision_id

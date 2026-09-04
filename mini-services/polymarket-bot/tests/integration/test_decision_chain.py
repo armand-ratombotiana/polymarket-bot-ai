@@ -41,6 +41,7 @@ from core.data_store import Order, OrderBook, PriceLevel, Side, store
 from core.decision_ledger import (
     STAGE_FILL,
     STAGE_ORDER,
+    STAGE_POSITION,
     STAGE_PREDICTION,
     STAGE_RISK_APPROVED,
     STAGE_SIGNAL,
@@ -265,9 +266,14 @@ async def test_full_decision_chain_records_all_five_stages(
     await paper_sim._try_fill_orders()
 
     chain = await decision_ledger.get_chain(decision_id)
-    assert len(chain) == 5, (
-        f"expected 5-stage chain; got {len(chain)}: "
-        f"{[r['stage'] for r in chain]}"
+    # W19-3 — the FILL stage is now followed by a POSITION stage (additive —
+    # captured by ``paper_sim._execute_fill`` immediately after the FILL
+    # event records the post-fill position state for the decision chain).
+    # Total chain length is 6: PREDICTION → SIGNAL → RISK_APPROVED →
+    # ORDER → FILL → POSITION.
+    assert len(chain) == 6, (
+        f"expected 6-stage chain (5 originals + W19-3 POSITION); "
+        f"got {len(chain)}: {[r['stage'] for r in chain]}"
     )
     assert chain[4]["stage"] == STAGE_FILL
     fill_data = chain[4]["data"]
@@ -279,11 +285,23 @@ async def test_full_decision_chain_records_all_five_stages(
     assert fill_data["order_id"] == paper_order.order_id
     assert fill_data["paper"] is True
 
+    # W19-3 — POSITION stage is recorded immediately after FILL.
+    assert chain[5]["stage"] == STAGE_POSITION
+    assert chain[5]["decision_id"] == decision_id
+    assert chain[5]["token_id"] == TOKEN
+    # Opening BUY → realised P&L is 0.0; promoted to the dedicated ``pnl`` column.
+    assert chain[5]["pnl"] == pytest.approx(0.0)
+    pos_data = chain[5]["data"]
+    assert pos_data is not None
+    assert pos_data["yes_shares"] > 0
+    assert pos_data["avg_entry_price"] > 0
+    assert pos_data["paper"] is True
+
     # Position now exists on the store.
     assert TOKEN in store.positions
     assert store.positions[TOKEN].yes_shares > 0
 
-    # ── (6) Verify the full 5-stage chain in canonical order ─────────────
+    # ── (6) Verify the full 6-stage chain in canonical order ─────────────
     stages = [row["stage"] for row in chain]
     assert stages == [
         STAGE_PREDICTION,
@@ -291,6 +309,7 @@ async def test_full_decision_chain_records_all_five_stages(
         STAGE_RISK_APPROVED,
         STAGE_ORDER,
         STAGE_FILL,
+        STAGE_POSITION,
     ], f"unexpected chain stage order: {stages}"
 
     # Every row carries the same decision_id + token_id — the chain is

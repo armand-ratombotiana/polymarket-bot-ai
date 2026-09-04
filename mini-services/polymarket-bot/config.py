@@ -83,6 +83,21 @@ class Settings(BaseSettings):
     dashboard_refresh_ms: int = 500
     log_level: str = "INFO"
 
+    # ── Historical data path ───────────────────────────────────────────
+    # W19-1 — Historical Replay Backtest Engine. The canonical path of
+    # the SQLite ``market_snapshots`` / ``orderbook_ticks`` DB (created by
+    # ``core/timescale_db.py::_init_sqlite_fallback`` and
+    # ``core/market_db.py::_init_db``). The env-var override
+    # ``MARKET_DB_PATH`` is the same one ``core/timescale_db.py`` reads,
+    # so the API route's ``settings.market_db_path`` resolves to the
+    # exact path the snapshot recorder wrote to.
+    market_db_path: str = Field(
+        default=os.environ.get(
+            "MARKET_DB_PATH", "/app/data/market_intelligence.db"
+        ),
+        description="SQLite path for the market_snapshots / orderbook_ticks DB",
+    )
+
     # ── Computed helpers ───────────────────────────────────────────────
     @property
     def has_credentials(self) -> bool:

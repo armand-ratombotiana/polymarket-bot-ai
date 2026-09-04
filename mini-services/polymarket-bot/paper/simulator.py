@@ -389,6 +389,40 @@ class PaperSimulator:
                 )
             except Exception as e:
                 log.debug("[paper_sim] ledger FILL record failed: %s", e)
+            # W19-3 — record the POSITION stage immediately after the FILL
+            # so the chain shows the actual exposure the bot took on this
+            # decision. The Position object was mutated in place by
+            # ``store.record_fill`` above; we snapshot the post-fill state
+            # here so the dashboard can answer "what position did this
+            # decision result in?" without a separate query against
+            # ``store.positions``. ADDITIVE: best-effort try/except so a
+            # ledger hiccup never breaks the fill flow.
+            try:
+                from core.decision_ledger import decision_ledger
+                pos_snapshot = store.positions.get(order.token_id)
+                if pos_snapshot is not None:
+                    await decision_ledger.record_position(
+                        correlation_id=order.decision_id,
+                        token_id=order.token_id,
+                        strategy=order.strategy,
+                        position={
+                            "yes_shares": float(getattr(pos_snapshot, "yes_shares", 0.0)),
+                            "avg_entry_price": float(getattr(pos_snapshot, "avg_entry_price", 0.0)),
+                            "total_invested": float(getattr(pos_snapshot, "total_invested", 0.0)),
+                            "opened_at": float(getattr(pos_snapshot, "opened_at", 0.0)),
+                            "strategy": getattr(pos_snapshot, "strategy", "") or order.strategy,
+                            "paper": True,
+                            "fill_price": float(fill_price),
+                            "fill_size": float(fill_size),
+                            "side": order.side.value,
+                            # The closing-SELL realised P&L for this fill
+                            # (0.0 for opening BUYs) — promoted to the row's
+                            # ``pnl`` column by record_position.
+                            "pnl": float(pnl or 0.0),
+                        },
+                    )
+            except Exception as e:
+                log.debug("[paper_sim] ledger POSITION record failed: %s", e)
         await store.log_event(
             f"✅ Paper fill: {order.side.value} {fill_size:.2f} @ {fill_price:.4f} "
             f"[P&L: ${pnl:+.2f}] [{order.token_id[:8]}…]"
@@ -461,6 +495,35 @@ class PaperSimulator:
                         exit_order_id=order.order_id,
                         exit_trade_id=trade.trade_id,
                         paper=True,
+                    )
+                    # W19-4 — Mirror the closed round-trip into the ML
+                    # economic-value tracker so God Mode §16's "ML value
+                    # is unmeasured" gap closes. Fire-and-forget (the
+                    # tracker swallows its own persistence errors), best-
+                    # effort (defaults to 0 for confidence / predicted_edge
+                    # when the entry decision didn't capture them — paper
+                    # fills don't always carry an ML signal). Synchronous
+                    # SQLite write mirrors the closed_positions contract;
+                    # blocks the event loop for one indexed INSERT (~µs).
+                    from ml.economic_value import ml_value_tracker
+                    from ml.model import ml_model
+                    ml_value_tracker.record_trade(
+                        trade_id=f"fill-{order.order_id}",
+                        token_id=order.token_id,
+                        model_version=getattr(
+                            ml_model, "_last_trained", "unknown"
+                        ) or "unknown",
+                        prediction=0.5,
+                        confidence=0.0,
+                        predicted_edge=0.0,
+                        actual_pnl=pnl,
+                        metadata={
+                            "strategy": _entry_strategy,
+                            "exit_strategy": order.strategy,
+                            "holding_seconds": holding_seconds,
+                            "decision_id": order.decision_id or "",
+                            "paper": True,
+                        },
                     )
         except Exception as e:
             log.debug("[paper_sim] closed_positions record failed: %s", e)

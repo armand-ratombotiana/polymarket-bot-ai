@@ -892,13 +892,31 @@ class MarketMLModel:
             except Exception:
                 log.debug("[ml_model] feature-store record skipped", exc_info=True)
 
-            # T13: run shadow challenger model(s) in parallel with production.
-            # The challenger output NEVER affects `p_yes` / `confidence` — it
-            # is recorded in the shadow-inference ring buffer for offline
-            # disagreement analysis. Bare try/except so a missing or raising
-            # challenger cannot degrade the production predict() path.
+            # T13 / W19-8 — run shadow challenger model(s) in parallel
+            # with production. The challenger output NEVER affects
+            # ``p_yes`` / ``confidence`` — it is recorded in the
+            # shadow-inference ring buffer for offline disagreement
+            # analysis and (W19-8) for ``evaluate_and_promote``.
+            #
+            # W19-8 — predict path now uses the split
+            # ``predict_all`` + ``record_predictions`` API so the
+            # champion prediction and the shadow predictions are
+            # placed on the same logical comparison record without
+            # re-invoking any challenger. The previous single-shot
+            # ``run_shadow(features, token_id, p_yes)`` call is preserved
+            # as a convenience wrapper that delegates to these two
+            # methods (see ``ml/shadow_inference.py``). Bare try/except
+            # so a missing / raising challenger cannot degrade the
+            # production predict path.
             try:
-                from ml.shadow_inference import shadow_inference; shadow_inference.run_shadow(features, token_id, p_yes)
+                from ml.shadow_inference import shadow_inference
+                shadow_preds = shadow_inference.predict_all(features)
+                if shadow_preds:
+                    shadow_inference.record_predictions(
+                        token_id=token_id,
+                        champion_pred=p_yes,
+                        shadow_preds=shadow_preds,
+                    )
             except Exception:
                 log.debug("[ml_model] shadow inference skipped", exc_info=True)
 
@@ -960,6 +978,49 @@ class MarketMLModel:
             )
         except Exception as e:
             log.error("[ml_model] Online update failed: %s", e)
+
+    def warmup(self) -> dict:
+        """Warm the meta-learner from already-resolved labeled feature vectors.
+
+        W19-8 — wires ``ensemble_meta_learner.warm_from_labeled_samples``
+        into the production startup path. The meta-learner is the Level-2
+        stacking blender that sits over the four base learners; without
+        warming it stays cold until ≥30 live market resolutions drip-feed
+        labels through ``update()`` over hours / days. Pre-warming from
+        the durable labeled-sample store activates the meta-learner
+        IMMEDIATELY (cold-start bypass) so the first prediction the bot
+        makes after a restart uses the calibrated stacked blend rather
+        than the adaptive Brier-inverse fallback.
+
+        Safe to call at any time after ``fit_initial()`` — the underlying
+        ``warm_from_labeled_samples`` is idempotent (each call back-fills
+        the rolling buffer + force-refits the meta-model). Returns the
+        summary dict from the meta-learner (``n_loaded`` / ``n_skipped``
+        / ``buffer_size`` / ``is_warm`` / ``error``) so the lifespan
+        startup hook can log the headline. Defensive try/except — a
+        meta-learner warmup failure MUST NOT block server startup (the
+        production predict path falls back to adaptive-weight blending
+        when the meta-learner is not warm).
+        """
+        try:
+            summary = ensemble_meta_learner.warm_from_labeled_samples()
+            if summary.get("is_warm"):
+                log.info(
+                    "[ml_model] Meta-learner warmed with %d samples "
+                    "(buffer=%d, skipped=%d)",
+                    summary.get("n_loaded", 0),
+                    summary.get("buffer_size", 0),
+                    summary.get("n_skipped", 0),
+                )
+            else:
+                log.warning(
+                    "[ml_model] Meta-learner warmup did not activate "
+                    "stacking: %s", summary.get("error", "unknown"),
+                )
+            return summary
+        except Exception as e:
+            log.warning("[ml_model] Meta-learner warmup failed: %s", e)
+            return {"error": str(e), "is_warm": False}
 
     def save(self) -> None:
         MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)

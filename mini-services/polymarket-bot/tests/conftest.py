@@ -114,6 +114,12 @@ _ENV_REDIRECTS: dict[str, str] = {
     # sandbox) and crash the import — same defensive pattern as the
     # other *_DB env redirects above.
     "JOB_QUEUE_DB": str(_TMP_ROOT / "job_queue.db"),
+    # W19-4 — ML economic value tracker SQLite db. Module-level singleton
+    # ``ml.economic_value.ml_value_tracker`` is constructed at import
+    # time and would otherwise try to mkdir ``/app/data`` (read-only in
+    # the sandbox) and crash the import — same defensive pattern as the
+    # other *_DB env redirects above.
+    "ML_VALUE_DB": str(_TMP_ROOT / "ml_economic_value.db"),
     # Force the canonical trading mode to paper + live disabled so risk-gate
     # tests don't short-circuit at the shadow / live-trading gates inside
     # ``InstitutionalRiskEngine.check_order``.

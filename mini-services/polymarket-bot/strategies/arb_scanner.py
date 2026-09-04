@@ -20,7 +20,7 @@ from core.book_poller import book_poller
 from core.clob_client import OrderArgs
 from core.data_store import Side, store
 from core.gamma_client import gamma_client
-from strategies.base import BaseStrategy
+from strategies.base import BaseStrategy, Signal
 
 log = logging.getLogger(__name__)
 
@@ -289,3 +289,262 @@ class ArbScannerStrategy(BaseStrategy):
                 f"✅ ARB [{arb_type}] executed on {slug}: Locked in ${est_pnl:.2f} expected profit"
             )
             log.info("[arb_scanner] ARB [%s] executed on %s — profit: $%.2f", arb_type, slug, est_pnl)
+
+    # ── W19-2 — Unified Strategy Contract (God Mode §26) ────────────────────
+    # The 9 contract methods below are SYNC wrappers over the existing async
+    # arbitrage-scan / execute machinery. They expose the strategy's signal-
+    # generation / sizing / entry-decision / exit-decision / diagnostics
+    # surface to operators / dashboards / backtest engines without requiring
+    # an event loop. The async ``_run`` / ``_scan_for_arb`` / ``_execute_arb``
+    # path remains the canonical live-trading loop.
+
+    def metadata(self) -> dict:
+        """Return strategy metadata for the catalog / dashboard."""
+        return {
+            "name": self.name,
+            "version": "1.0.0",
+            "description": (
+                "High-Frequency Binary Arbitrage Scanner. Detects long-side "
+                "Dutch Book (Ask(YES) + Ask(NO) < 1.00) and short-side "
+                "overpriced (Bid(YES) + Bid(NO) > 1.00) mispricing on "
+                "Polymarket binary prediction markets, with ML quality "
+                "filtering and depth / staleness guards."
+            ),
+            "author": "polymarket-bot",
+            "category": "arbitrage",
+            "model": "binary_dutch_book",
+        }
+
+    def configure(self, config: dict) -> None:
+        """Apply runtime config overrides (min_profit, scan_interval, ...).
+
+        Recognised keys (all optional — unrecognised keys are stored in
+        ``self.config`` for introspection but not applied to typed fields):
+
+          * ``min_profit_frac`` (float > 0) — overrides ``_min_profit_frac``.
+          * ``scan_interval`` (float > 0)  — overrides ``_scan_interval``.
+          * ``order_size`` (float > 0)     — overrides ``_order_size``.
+        """
+        super().configure(config)
+        if "min_profit_frac" in config:
+            v = float(config["min_profit_frac"])
+            if v > 0.0:
+                self._min_profit_frac = v
+        if "scan_interval" in config:
+            v = float(config["scan_interval"])
+            if v > 0.0:
+                self._scan_interval = v
+        if "order_size" in config:
+            v = float(config["order_size"])
+            if v > 0.0:
+                self._order_size = v
+
+    def validate(self) -> tuple[bool, str]:
+        """Validate strategy configuration post-construction.
+
+        ``ArbScannerStrategy`` is valid when:
+          * ``_min_profit_frac > 0`` (a non-positive floor would either
+            always-fire or always-reject — both are misconfigurations).
+          * ``_scan_interval > 0`` (a non-positive interval would
+            busy-loop the scanner).
+          * ``_order_size > 0`` (a non-positive order size would zero
+            every submitted leg).
+        """
+        if self._min_profit_frac <= 0.0:
+            return False, (
+                f"_min_profit_frac={self._min_profit_frac} must be > 0"
+            )
+        if self._scan_interval <= 0.0:
+            return False, (
+                f"_scan_interval={self._scan_interval} must be > 0"
+            )
+        if self._order_size <= 0.0:
+            return False, (
+                f"_order_size={self._order_size} must be > 0"
+            )
+        return True, "OK"
+
+    def generate_signal(self, market_context: dict) -> Signal | None:
+        """Build a contract ``Signal`` representing an arb opportunity.
+
+        ``market_context`` is a caller-provided dict (NOT the live store).
+        Recognised keys:
+
+          * ``yes_token`` (str, required) — the YES token id
+          * ``no_token`` (str, required)  — the NO token id
+          * ``yes_price`` (float > 0, required) — ask(YES) for long arb /
+            bid(YES) for short arb
+          * ``no_price`` (float > 0, required)  — ask(NO) for long arb /
+            bid(NO) for short arb
+          * ``arb_type`` (str, optional — defaults to ``"long_dutch_book"``;
+            valid values: ``"long_dutch_book"`` (buy both sides),
+            ``"short_overpriced"`` (sell both sides))
+          * ``profit_per_share`` (float, optional — pre-computed profit;
+            defaults to ``1.00 - (yes_price + no_price)`` for long /
+            ``(yes_price + no_price) - 1.00`` for short)
+
+        Returns ``None`` when any required key is missing, or when the
+        computed profit is below ``_min_profit_frac`` (the contract method
+        mirrors the production min-profit gate so callers don't have to
+        re-derive it).
+        """
+        yes_token = market_context.get("yes_token")
+        no_token = market_context.get("no_token")
+        yes_price = market_context.get("yes_price")
+        no_price = market_context.get("no_price")
+        if not yes_token or not no_token or yes_price is None or no_price is None:
+            return None
+
+        arb_type = str(market_context.get("arb_type", "long_dutch_book"))
+        if arb_type == "long_dutch_book":
+            profit = float(
+                market_context.get("profit_per_share",
+                                   1.00 - (yes_price + no_price))
+            )
+            action = "BUY"  # Buy both sides
+        elif arb_type == "short_overpriced":
+            profit = float(
+                market_context.get("profit_per_share",
+                                   (yes_price + no_price) - 1.00)
+            )
+            action = "SELL"  # Sell both sides
+        else:
+            return None
+
+        # Mirror the production min-profit gate so the contract method
+        # never returns a sub-threshold opportunity.
+        if profit < self._min_profit_frac:
+            return None
+
+        # W19-2 — bump signals counter.
+        self._stats["signals"] = self._stats.get("signals", 0) + 1
+
+        # Use the YES token as the canonical signal token_id (the NO leg
+        # is recorded in metadata so callers can recover both legs).
+        return Signal(
+            action=action,
+            token_id=yes_token,
+            size=self._order_size,
+            price=yes_price,
+            confidence=1.0,  # Arb is risk-free by construction
+            edge=profit,  # Per-share profit (expected P&L per $1 notional)
+            reason=f"{arb_type}: YES@{yes_price:.4f} + NO@{no_price:.4f} → profit {profit*100:.2f}%",
+            metadata={
+                "arb_type": arb_type,
+                "yes_token": yes_token,
+                "no_token": no_token,
+                "yes_price": yes_price,
+                "no_price": no_price,
+                "profit_per_share": profit,
+                "order_type": "FOK",  # Fill-or-Kill — both legs must fill or none
+            },
+        )
+
+    def estimate_edge(self, signal: Signal) -> float:
+        """Estimate expected P&L per dollar for the arb.
+
+        For a binary arbitrage, the edge is the per-share profit stored on
+        the signal by ``generate_signal``. The contract method surfaces
+        that pre-computed value so callers don't need to know each
+        strategy's edge formula.
+        """
+        if signal is None:
+            return 0.0
+        return signal.edge
+
+    def size_position(self, signal: Signal, capital: float, risk_params: dict) -> float:
+        """Size the arb using ``_order_size`` bounded by capital.
+
+        ``ArbScannerStrategy`` sizes every arb at the configured
+        ``_order_size`` (USDC notional). This contract method mirrors
+        that policy: it returns the smaller of (a) the configured order
+        size, (b) the available capital, and (c) the optional
+        ``risk_params.max_position_per_market`` cap.
+
+        ``risk_params`` recognised keys (all optional):
+          * ``order_size_override`` (float > 0) — overrides ``_order_size``.
+          * ``max_position_per_market`` (float > 0) — additional cap.
+        """
+        if signal is None or signal.action == "HOLD":
+            return 0.0
+        order_size = float(
+            risk_params.get("order_size_override", self._order_size)
+        )
+        # Bound by order_size, optional per-market cap, and capital.
+        size = order_size
+        max_pos = risk_params.get("max_position_per_market")
+        if max_pos is not None:
+            size = min(size, float(max_pos))
+        return min(size, capital)
+
+    def entry_logic(self, signal: Signal, market_context: dict) -> dict:
+        """Return entry execution parameters mirroring ``_execute_arb``.
+
+        ``_execute_arb`` constructs an ``OrderArgs`` per leg with:
+          * ``token_id`` = yes_token / no_token
+          * ``price``    = yes_price / no_price
+          * ``side``     = Side.BUY (long arb) or Side.SELL (short arb)
+          * ``size``     = max(1.0, order_size / max(yes_price, 0.05))
+          * ``order_type`` = "FOK" (Fill-or-Kill — both legs must fill or none)
+
+        This contract method returns the YES-leg entry params as a plain
+        dict. The NO-leg params are returned in ``metadata.no_leg`` so
+        callers have both legs' execution parameters in one call.
+        """
+        if signal is None or signal.action == "HOLD":
+            return {"skip": True, "reason": "signal action is HOLD or None"}
+        yes_price = signal.price if signal.price is not None else 0.5
+        # Shares = max(1.0, order_size / max(yes_price, 0.05)) — matches
+        # _execute_arb's size formula (the 0.05 floor protects against
+        # divide-by-zero on a sub-penny price).
+        size_shares = max(1.0, signal.size / max(yes_price, 0.05))
+        meta = signal.metadata or {}
+        no_token = meta.get("no_token", "")
+        no_price = meta.get("no_price", yes_price)
+        return {
+            "token_id": signal.token_id,  # YES token
+            "price": yes_price,
+            "side": signal.action,  # "BUY" / "SELL"
+            "size": size_shares,
+            "type": "FOK",  # Fill-or-Kill — both legs must fill or none
+            "no_leg": {
+                "token_id": no_token,
+                "price": no_price,
+                "side": signal.action,
+                "size": max(1.0, signal.size / max(no_price, 0.05)),
+                "type": "FOK",
+            },
+            "arb_type": meta.get("arb_type", "long_dutch_book"),
+        }
+
+    def exit_logic(self, position: dict, market_context: dict) -> dict | None:
+        """Determine whether to exit a position.
+
+        ``ArbScannerStrategy`` executes Fill-or-Kill orders that resolve
+        immediately — there is no held position to exit. Returns ``None``
+        unconditionally because the strategy's arb legs either fill (and
+        resolve at market close) or never execute (FOK rejection). The
+        contract method exists for parity with the other strategies so a
+        dashboard can call ``exit_logic`` uniformly without knowing the
+        concrete class.
+        """
+        # Arb positions resolve at market close; no async exit policy.
+        return None
+
+    def diagnostics(self) -> dict:
+        """Return strategy state + stats + pair count.
+
+        Surfaces the contract base fields (name / running / stats /
+        last_error) plus the arb-scanner-specific state: number of
+        YES/NO token pairs being scanned, the configured min-profit
+        floor, scan interval, and order size.
+        """
+        base = super().diagnostics()
+        base.update({
+            "pairs_scanned": len(self._pairs),
+            "min_profit_frac": self._min_profit_frac,
+            "scan_interval": self._scan_interval,
+            "order_size": self._order_size,
+            "paper_mode": self._paper,
+        })
+        return base
