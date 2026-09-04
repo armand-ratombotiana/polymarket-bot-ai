@@ -142,6 +142,11 @@ const MLValidationPanel = lazyPanel(() => import('@/components/MLValidationPanel
 const AttributionPanel = lazyPanel(() => import('@/components/AttributionPanel'), 'Loading Attribution…')
 const ExecutionQualityPanel = lazyPanel(() => import('@/components/ExecutionQualityPanel'), 'Loading Execution Quality…')
 const ClosedPositionsPanel = lazyPanel(() => import('@/components/ClosedPositionsPanel'), 'Loading Closed Positions…')
+// W26-2 — Honest Performance Report: per-category metrics (backtest /
+// walk-forward / paper / live) with confidence intervals + disclaimer.
+// Loaded with `next/dynamic` + `ssr: false` so the Recharts equity-curve
+// chunk stays out of the initial bundle.
+const PerformanceReportPanel = lazyPanel(() => import('@/components/PerformanceReportPanel'), 'Loading Performance Report…')
 
 // Capital — Wave 8
 const CapitalAllocatorPanel = lazyPanel(() => import('@/components/CapitalAllocatorPanel'), 'Loading Capital Allocator…')
@@ -884,6 +889,15 @@ export default function Dashboard() {
                 <div style={{ overflow: 'auto' }} className="scrollbar-thin">
                   <LeaderboardPanel />
                 </div>
+              </div>
+              </PanelErrorBoundary>
+            )}
+
+            {/* ── Analytics — Performance Report (W26-2) ─────────────── */}
+            {activeSection === 'analytics-performance-report' && (
+              <PanelErrorBoundary label="Performance Report">
+              <div style={{ height: '100%', overflow: 'auto' }} className="scrollbar-thin">
+                <PerformanceReportPanel />
               </div>
               </PanelErrorBoundary>
             )}

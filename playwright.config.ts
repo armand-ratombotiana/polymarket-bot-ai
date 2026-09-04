@@ -66,7 +66,24 @@ export default defineConfig({
     },
   ],
   webServer: {
-    command: 'bun run dev',
+    // `bun run dev` resolves to `next dev -p 3000 2>&1 | tee dev.log`
+    // (package.json). The `tee` pipe works for the sandbox's
+    // auto-running dev server (the agent reads dev.log to monitor
+    // it), but it breaks Playwright's `webServer` spawn tracking:
+    // Playwright spawns the wrapper shell, the shell exits once the
+    // pipe is set up, and Playwright reports "Process from
+    // config.webServer exited early" — preventing the e2e suite from
+    // auto-booting the dev server when the sandbox's auto-runner
+    // hasn't started it yet (e.g. on a fresh sandbox, after a host
+    // reboot, or when another agent's run killed it).
+    //
+    // Spawning `next dev` directly (no `bun run`, no `tee`) lets
+    // Playwright track the actual Next.js child process so it can
+    // reliably spawn + kill the server. The `reuseExistingServer:
+    // !process.env.CI` flag still picks up the sandbox's auto-running
+    // dev server when one is already up, so this command only runs
+    // in the no-server branch (Playwright's own spawn).
+    command: 'next dev -p 3000',
     url: 'http://localhost:3000',
     reuseExistingServer: !process.env.CI,
     // 120s — generous because the dev server's first compile can take

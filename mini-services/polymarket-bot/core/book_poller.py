@@ -9,6 +9,7 @@ Polls Polymarket CLOB REST API:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 
@@ -230,30 +231,62 @@ class BookPoller:
                 )
             return
 
-        # Ingest into TimescaleDB / PostgreSQL asynchronously (W21-5 —
-        # pass the full bid / ask ladders through to ``record_snapshot``
-        # so the JSON columns (``bids_json`` / ``asks_json``) and the
-        # depth-10 summaries (``bid_depth_10`` / ``ask_depth_10``) are
-        # persisted on both the PostgreSQL hypertable and the SQLite
-        # fallback. The ladders are converted from ``PriceLevel``
-        # dataclass instances to plain ``{"price": float, "size":
-        # float}`` dicts — the shape
-        # ``database_manager.get_order_book_depth`` parses back out of
-        # the JSON column on read.)
-        slug = store.market_slugs.get(token_id, token_id[:16])
-        from core.timescale_db import timescale_db
+        # Ingest into TimescaleDB / PostgreSQL asynchronously. W26-3 —
+        # the call now routes through the unified ``db_manager`` facade
+        # (W21-1 — "all data access goes through this layer; no direct
+        # PG/SQLite calls at the call sites") instead of bypassing it
+        # with a direct ``timescale_db.record_snapshot`` call. The
+        # facade handles PG-primary / SQLite-fallback routing itself,
+        # so a transient PG blip is transparently retried on the
+        # SQLite fallback without losing the row.
+        #
+        # The full bid / ask ladders are JSON-encoded to strings here
+        # (the ``record_snapshot`` signature accepts ``Optional[str]``
+        # for ``bids_json`` / ``asks_json``). On the PG path,
+        # ``DatabaseManager._pg_record_snapshot`` JSON-parses them back
+        # to dicts before forwarding to ``timescale_db.record_snapshot``
+        # (which expects dicts). On the SQLite fallback path,
+        # ``_sqlite_record_snapshot`` writes the JSON string as-is into
+        # the ``bids_json`` / ``asks_json`` TEXT columns — the shape
+        # ``database_manager.get_order_book_depth`` parses back out on
+        # read.
+        #
+        # W26-3 also closes the W21-5 step-4 gap: the previous call site
+        # passed only ``best_bid`` / ``best_ask`` / ``mid`` / ``spread``
+        # / ``bids_json`` / ``asks_json`` and dropped ``bid_size`` /
+        # ``ask_size`` / ``volume`` / ``bid_depth_10`` /
+        # ``ask_depth_10``. The SQLite fallback INSERT wrote ``NULL`` /
+        # ``0`` into those columns for every row produced by the live
+        # poller. The new call site computes the depth-10 summaries
+        # from the parsed ``PriceLevel`` ladder (sum of the top 10
+        # ``size`` values) and the top-of-book sizes from the first
+        # ladder level, so the depth columns are populated on every
+        # snapshot — the W21-5 read API + HTTP endpoints return real
+        # numbers, not zeroes.
+        norm = result.normalized_data
         bids_payload = [{"price": b.price, "size": b.size} for b in bids]
         asks_payload = [{"price": a.price, "size": a.size} for a in asks]
+        bid_size = bids[0].size if bids else 0.0
+        ask_size = asks[0].size if asks else 0.0
+        bid_depth_10 = float(sum(b["size"] for b in bids_payload[:10]))
+        ask_depth_10 = float(sum(a["size"] for a in asks_payload[:10]))
+
+        from core.database_manager import db_manager
+
         asyncio.create_task(
-            timescale_db.record_snapshot(
+            db_manager.record_snapshot(
                 token_id=token_id,
-                slug=slug,
-                best_bid=book.best_bid,
-                best_ask=book.best_ask,
-                mid=book.mid,
-                spread=book.spread,
-                bids_json=bids_payload,
-                asks_json=asks_payload,
+                best_bid=float(norm.get("best_bid") or 0.0),
+                best_ask=float(norm.get("best_ask") or 0.0),
+                mid=float(norm["mid"]) if norm.get("mid") is not None else 0.0,
+                spread=float(norm["spread"]) if norm.get("spread") is not None else 0.0,
+                bid_size=bid_size,
+                ask_size=ask_size,
+                volume=0.0,  # CLOB /book response carries no volume field
+                bids_json=json.dumps(bids_payload) if bids_payload else None,
+                asks_json=json.dumps(asks_payload) if asks_payload else None,
+                bid_depth_10=bid_depth_10,
+                ask_depth_10=ask_depth_10,
             )
         )
         if bids and asks:
@@ -261,6 +294,8 @@ class BookPoller:
             best_a_size = asks[0].size
             ofi = (best_b_size - best_a_size) / max(best_b_size + best_a_size, 1.0)
             micro_p = (book.best_bid * best_a_size + book.best_ask * best_b_size) / max(best_b_size + best_a_size, 1.0) if (book.best_bid and book.best_ask) else (book.mid or 0.5)
+            from core.timescale_db import timescale_db
+
             asyncio.create_task(
                 timescale_db.record_tick(
                     token_id=token_id,

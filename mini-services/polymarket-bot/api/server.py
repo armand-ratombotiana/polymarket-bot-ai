@@ -7485,3 +7485,70 @@ async def get_recovery_report(
     from core.state_recovery import report_to_dict, state_recovery
     return report_to_dict(state_recovery.get_last_report())
 
+
+# ── W26-4 — Soak test endpoint ────────────────────────────────────────────────
+# Additive: appends a single POST endpoint under ``/api/system`` so an
+# operator (or an automated CI soak job) can kick off a timed health check.
+# The runner is deliberately self-contained: it probes the live singletons
+# (``immutable_audit`` / ``db_manager`` / ``dedup_registry`` /
+# ``observability``) rather than spinning up its own pipeline, so a 60 s
+# soak test against an idle server still produces a meaningful report.
+#
+# Auth enforced by ``enforce_api_auth`` (path is NOT in ``PUBLIC_PATHS``);
+# rate-limited by ``WRITE_LIMIT`` because the endpoint blocks for the
+# supplied duration (default 60 s) and a misbehaving client could starve
+# the trading path by stacking concurrent soak requests.
+@app.post(
+    "/api/system/soak-test",
+    tags=["system"],
+    summary="Run a soak test for the specified duration (W26-4)",
+    description=(
+        "Runs the W26-4 soak test runner for ``duration_seconds`` "
+        "(default 60 s, max 86 400 s = 24 h). The runner probes the live "
+        "singletons (immutable_audit / db_manager / dedup_registry / "
+        "observability) every 60 s and returns the final report. "
+        "Pass/fail per check + overall verdict."
+    ),
+)
+@limiter.limit(WRITE_LIMIT)
+async def run_soak_test(
+    request: Request,  # noqa: ARG001 — slowapi requires the `request` arg
+    duration_seconds: int = Query(
+        60,
+        ge=1,
+        le=86400,
+        description=(
+            "Soak test duration in seconds (default 60 for a quick check, "
+            "max 86 400 for a full 24 h simulation)."
+        ),
+    ),
+):
+    """Run a soak test for the specified duration.
+
+    W26-4 — the runner probes the live singletons on every check tick
+    (default: every 60 s) so a long-running soak surfaces drift in
+    memory / DB writability / audit-chain integrity the moment it
+    happens rather than only at the end.
+
+    Returns::
+
+        {
+          "overall_pass": bool,
+          "duration_seconds": float,
+          "checks": [
+            {"name": str, "passed": bool, "value": any,
+             "threshold": any, "message": str}, ...
+          ],
+          "errors": [str, ...],
+          "started_at": float,
+          "ended_at": float,
+          "metrics": {...}  # observability health report
+        }
+
+    ``overall_pass`` is the conjunction of every check's ``passed``
+    flag AND the absence of any recorded errors during the run window.
+    """
+    from core.soak_test import soak_test_runner
+    report = await soak_test_runner.run(duration_override=duration_seconds)
+    return report.to_dict()
+

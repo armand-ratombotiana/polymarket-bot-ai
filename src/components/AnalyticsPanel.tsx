@@ -21,6 +21,40 @@ import { fmtUsd, fmtPnl, fmtPct } from '@/lib/design-tokens'
 import { useRealtimeData } from '@/hooks/useRealtimeData'
 import { apiFetch } from '@/lib/api'
 import { Badge } from '@/components/ui/badge'
+// W26-6 — Confidence-interval + statistical-significance widgets.
+// Used by the win-rate KPI card to surface (a) the Wilson 95% CI
+// visually as a range bar, and (b) the binomial-test verdict
+// (significant / not-significant / insufficient-data) as a pill.
+import { ConfidenceIntervalBadge } from '@/components/ui/ConfidenceIntervalBadge'
+import { StatisticalSignificanceBadge } from '@/components/ui/StatisticalSignificanceBadge'
+
+// W26-6 — Client-side binomial-test p-value approximation (null p=0.5).
+// The Analytics object doesn't ship a server-computed p_value for the
+// live win-rate KPI (only PaperMetrics in /api/performance/report does).
+// We compute a normal-approximation p-value so the significance badge
+// has a real number to display; the exact binomial-test value from the
+// backend supersedes this whenever the report fetch succeeds (which it
+// does for the PaperTrading card in PerformanceReportSection).
+function normalCdf(x: number): number {
+  // Abramowitz-Stegun 26.2.17 — good to ~7 decimal places, sufficient
+  // for the dashboard's "p=0.034" 3dp display.
+  const t = 1 / (1 + 0.2316419 * Math.abs(x))
+  const d = 0.3989423 * Math.exp(-(x * x) / 2)
+  let p =
+    d *
+    t *
+    (0.3193815 +
+      t * (-0.3565638 + t * (1.781478 + t * (-1.821256 + t * 1.330274))))
+  if (x > 0) p = 1 - p
+  return p
+}
+
+function binomialPValue(wins: number, n: number): number {
+  if (n <= 0) return 1
+  const pHat = wins / n
+  const z = (pHat - 0.5) / Math.sqrt(0.25 / n)
+  return 2 * (1 - normalCdf(Math.abs(z)))
+}
 
 interface Analytics {
   equity: number
@@ -112,10 +146,32 @@ function AnalyticsPanel() {
   }
 
   const n = data.closed_trades ?? (data.winning_trades + data.losing_trades)
-  const isSmallSample = n < 10
+  // W26-6 — bumped threshold from 10 → 30 to match the
+  // StatisticalSignificanceBadge's MIN_SAMPLE_SIZE. Below 30 closed
+  // trades the binomial-test p-value is unreliable (a single lucky
+  // streak can produce p<0.05) so we surface the "Insufficient Data"
+  // verdict + the small-sample warning banner regardless of p.
+  const isSmallSample = n < 30
   const winRatePct = (data.win_rate * 100).toFixed(1)
   const ciLowPct = data.win_rate_ci_low != null ? (data.win_rate_ci_low * 100).toFixed(1) : null
   const ciHighPct = data.win_rate_ci_high != null ? (data.win_rate_ci_high * 100).toFixed(1) : null
+
+  // W26-6 — Compute the win-rate significance verdict client-side.
+  // Two sources feed into it:
+  //   1. The Wilson 95% CI bounds — if the CI excludes 0.5 (i.e.
+  //      both bounds above OR both below 0.5), we reject the null
+  //      (p=0.5) at α=0.05.
+  //   2. The normal-approximation binomial-test p-value computed
+  //      from wins/n — surfaced in the significance badge as
+  //      "p=0.034" (3dp) so the trader can see how close to the
+  //      threshold the verdict sits.
+  const ciExcludes50 =
+    data.win_rate_ci_low != null &&
+    data.win_rate_ci_high != null &&
+    ((data.win_rate_ci_low > 0.5 && data.win_rate_ci_high > 0.5) ||
+      (data.win_rate_ci_low < 0.5 && data.win_rate_ci_high < 0.5))
+  const winRatePValue = binomialPValue(data.winning_trades, n)
+  const isWinRateSignificant = ciExcludes50 && winRatePValue < 0.05
 
   // Determine trend arrow from CI midpoint vs 50%
   const ciMid = data.win_rate_ci_low != null && data.win_rate_ci_high != null
@@ -152,15 +208,29 @@ function AnalyticsPanel() {
         </div>
       </div>
 
-      {/* Small sample warning */}
+      {/* Small sample warning — W26-6 raised threshold from 10 → 30
+          to match StatisticalSignificanceBadge.MIN_SAMPLE_SIZE. The
+          verdict text is intentionally a separate warning (the badge
+          itself surfaces "Insufficient Data" inline next to the metric). */}
       {isSmallSample && (
-        <div className="banner-warning text-[10.5px] mx-3 mt-2 py-1.5 px-2.5" role="alert">
-          <span aria-hidden="true">⚠️</span>
-          <span>
-            Small sample ({n} closed trades). Win rate CI is broad [{ciLowPct ?? '0.0'}% – {ciHighPct ?? '100.0'}%].
-          </span>
+        <div
+          className="banner-warning text-[10.5px] mx-3 mt-2 py-1.5 px-2.5"
+          role="alert"
+          data-testid="small-sample-warning"
+        >
+          <span>⚠ Small sample size — results may not be reliable (n={n} &lt; 30)</span>
         </div>
       )}
+
+      {/* W26-6 — Metrics sample-size note. Surfaced unconditionally
+          (even when n is large) so the trader always knows the CI
+          methodology + sample-size basis of the displayed metrics. */}
+      <div
+        className="text-[10px] text-[#7e8aaa] mx-3 mt-2"
+        data-testid="metrics-sample-note"
+      >
+        Metrics based on N={n} trades. 95% confidence intervals shown.
+      </div>
 
       {/* Active Strategies Strip */}
       {activeStrats.length > 0 && (
@@ -175,13 +245,32 @@ function AnalyticsPanel() {
       )}
 
       <div className="p-3 grid grid-cols-2 gap-2 text-[11px]">
-        {/* Win Rate + Wilson CI */}
-        <div className="kpi-card">
-          <span className="kpi-label">Win Rate (Wilson 95% CI)</span>
-          <span className="kpi-value text-[#dde1ed]">{winRatePct}%</span>
-          <span className="kpi-sub">
-            {ciLowPct && ciHighPct ? `[${ciLowPct}% – ${ciHighPct}%] (n=${n})` : `n=${n}`}
-          </span>
+        {/* Win Rate + Wilson CI — W26-6 rebuilt around the new
+            ConfidenceIntervalBadge + StatisticalSignificanceBadge
+            pair. The badge renders the point estimate (72.0%), the
+            CI range "[55.0% – 84.0%]" below it, and a horizontal
+            range bar visualising where the CI sits on [0, 1]. The
+            significance badge sits to the right of the CI badge and
+            encodes the binomial-test verdict as a colored pill. */}
+        <div className="kpi-card col-span-2" data-testid="win-rate-kpi">
+          <div className="flex items-center justify-between mb-1.5">
+            <span className="kpi-label">Win Rate (95% CI)</span>
+            <StatisticalSignificanceBadge
+              pValue={winRatePValue}
+              n={n}
+              isSignificant={isWinRateSignificant}
+            />
+          </div>
+          <ConfidenceIntervalBadge
+            value={data.win_rate}
+            ciLower={data.win_rate_ci_low ?? 0}
+            ciUpper={data.win_rate_ci_high ?? 1}
+            format="percentage"
+            significant={isWinRateSignificant}
+            pValue={winRatePValue}
+            n={n}
+            className="w-full"
+          />
         </div>
 
         {/* Profit Factor */}
@@ -278,6 +367,13 @@ function AnalyticsPanel() {
         </div>
       </div>
 
+      {/* W26-6 — Standalone metrics disclaimer section. The
+          PerformanceReportSection below ALSO renders a (shorter)
+          disclaimer banner, but the task spec asks for this expanded
+          5-bullet version as its own section so the trader can scan it
+          without expanding the per-category report. */}
+      <MetricsDisclaimerSection n={n} />
+
       {/* W25-6 — Honest Performance Report (per-category breakdown) +
           disclaimer banner. Fetches /api/performance/report (paper +
           walk-forward + live + disclaimer) and /api/performance/backtest
@@ -286,6 +382,39 @@ function AnalyticsPanel() {
           breakdown is conditionally rendered only when the report fetch
           succeeds AND the response shape matches the expected schema. */}
       <PerformanceReportSection />
+    </div>
+  )
+}
+
+// ── W26-6 — Metrics Disclaimer Section ───────────────────────────────────
+// Five-bullet performance-metrics disclaimer. Rendered unconditionally
+// (independent of the PerformanceReport fetch) so the trader is always
+// warned about the backtest / paper / live distinction, the 95% CI
+// convention, and the significance thresholds (α=0.05, n≥30).
+
+function MetricsDisclaimerSection({ n }: { n: number }) {
+  return (
+    <div
+      className="border-t border-[#1f2335] p-3 text-[10.5px] text-[#7e8aaa]"
+      data-testid="metrics-disclaimer-section"
+      aria-label="Performance Metrics Disclaimer"
+    >
+      <div className="font-semibold text-[#dde1ed] mb-1">
+        ⚠ Performance Metrics Disclaimer
+      </div>
+      <ul className="space-y-0.5 list-disc pl-4">
+        <li>
+          Backtest results may be overfit — see walk-forward and paper
+          metrics
+        </li>
+        <li>Only paper/live performance reflects actual system behavior</li>
+        <li>Win rate target (95%) is aspirational, not guaranteed</li>
+        <li>Metrics are reported with 95% confidence intervals</li>
+        <li>Statistical significance requires p &lt; 0.05 and n ≥ 30</li>
+      </ul>
+      <div className="text-[9.5px] text-[#3e4560] mt-1">
+        Current sample: n={n} closed trades
+      </div>
     </div>
   )
 }

@@ -4,11 +4,12 @@
 ![Python](https://img.shields.io/badge/Python-3.12-blue)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.111%2B-009688)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5-3178C6)
-![Tests](https://img.shields.io/badge/tests-1429%2B%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-4046%20passing-brightgreen)
 ![E2E](https://img.shields.io/badge/E2E-Playwright-2EAD33)
 ![Docker](https://img.shields.io/badge/Docker-ready-2496ED)
 ![PWA](https://img.shields.io/badge/PWA-installable-5A0FC8)
 ![i18n](https://img.shields.io/badge/i18n-EN%2FFR-orange)
+![Production Sign-Off](https://img.shields.io/badge/Production%20Sign--Off-paper%20trading-4ade80)
 ![Trading Mode](https://img.shields.io/badge/trading-paper-orange)
 
 Polymarket Pro is an institutional-grade algorithmic trading bot for
@@ -24,7 +25,12 @@ attributed, and stress-tested end-to-end.
 
 ## Project Status
 
-**Maturity: production-ready for paper trading; live trading gated behind a 10-check safety gate.**
+**Maturity: PRODUCTION-READY (paper trading) — signed off Wave 26 (2025-09-04).**
+Live trading remains gated behind the 10-check safety gate. See
+[docs/PRODUCTION_SIGN_OFF.md](docs/PRODUCTION_SIGN_OFF.md) for the final sign-off
+and [docs/PRODUCTION_READINESS.md](docs/PRODUCTION_READINESS.md) for the
+15-category readiness checklist.
+
 Wave 13–14 added an A/B testing framework, Prometheus + Grafana observability,
 API versioning, a circuit breaker for external APIs, dark/light theme, a Cmd+K
 command palette, browser push notifications, walk-forward + Monte Carlo
@@ -35,10 +41,11 @@ hardening pass (including penetration tests).
 
 | Dimension             | Status                                                                                  |
 | --------------------- | --------------------------------------------------------------------------------------- |
-| Backend tests         | 970+ passing (pytest, 71+ files)                                                        |
-| Frontend tests        | 459+ passing (vitest + Testing Library)                                                |
-| E2E tests             | 38 passing (Playwright: dashboard, navigation, API health)                             |
-| Total tests           | 1429+ across the full stack                                                             |
+| Backend tests         | 2806 passing (pytest, `mini-services/polymarket-bot/tests/`)                            |
+| Frontend tests        | 1049 passing (vitest + Testing Library, 50 test files)                                |
+| E2E tests             | 191 passing (Playwright, 17 spec files)                                                |
+| Total tests           | 4046 tests across the full stack (0 failures, lint clean)                              |
+| Production sign-off   | Wave 26 — PRODUCTION-READY for paper trading (see docs/PRODUCTION_SIGN_OFF.md)          |
 | API surface           | 90+ routes across 13 modules, all rate-limited, OpenAPI-documented (v1 versioning)       |
 | UI panels             | 55+ React panels + 5 chart primitives, WCAG 2.1 AA, dark/light theme, EN/FR i18n     |
 | Real-time             | WebSocket multiplexed broadcast (5 channels) + REST polling fallback                   |
@@ -689,9 +696,9 @@ are returned alongside the aggregate `passed` boolean.
 
 ## Testing
 
-The platform is covered by a four-layer test pyramid totalling **1429+ tests**.
+The platform is covered by a four-layer test pyramid totalling **4046 tests**.
 
-### Backend (pytest — 970+ tests across 71+ files)
+### Backend (pytest — 2806 tests across 135+ files)
 
 ```bash
 cd /home/z/my-project/mini-services/polymarket-bot
@@ -708,14 +715,14 @@ negotiator, the Prometheus metrics endpoint, the OpenAPI contract surface,
 the security helpers, and an end-to-end decision-chain test that exercises
 PREDICTION → SIGNAL → RISK → ORDER → FILL.
 
-### Frontend (vitest + Testing Library — 459+ tests across 20 files)
+### Frontend (vitest + Testing Library — 1049 tests across 50 files)
 
 ```bash
 cd /home/z/my-project
 bun run test           # vitest run (component + hook + lib tests)
 ```
 
-### E2E (Playwright — 38 tests)
+### E2E (Playwright — 191 tests across 17 spec files)
 
 ```bash
 cd /home/z/my-project

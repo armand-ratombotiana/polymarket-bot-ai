@@ -715,20 +715,33 @@ async def test_book_poller_passes_ladders_to_record_snapshot(
     monkeypatch: pytest.MonkeyPatch,
 ):
     """``book_poller._apply_book`` must pass the full bid/ask ladders
-    through to ``timescale_db.record_snapshot`` so the JSON columns
-    are populated with real ladder data (the W21-5 call-site fix).
+    through to ``db_manager.record_snapshot`` (W26-3 — the W21-5
+    call-site fix is now routed through the unified ``db_manager``
+    facade rather than calling ``timescale_db.record_snapshot``
+    directly, and the new ``bid_size`` / ``ask_size`` / ``volume`` /
+    ``bid_depth_10`` / ``ask_depth_10`` kwargs are populated so the
+    SQLite fallback INSERT writes real values into the depth columns
+    rather than ``NULL`` / ``0``).
 
     Setup: build a stub CLOB ``/book`` payload with 3 bid levels and
     3 ask levels. Call ``_apply_book`` directly with the stub payload.
-    Assert ``record_snapshot`` was called with the ``bids_json`` /
-    ``asks_json`` keyword arguments populated (not None / not empty).
+    Assert ``db_manager.record_snapshot`` was called with the
+    ``bids_json`` / ``asks_json`` keyword arguments populated as JSON
+    strings (the W26-3 contract — ``record_snapshot`` accepts
+    ``Optional[str]``; the PG path JSON-parses them back to dicts
+    before forwarding to ``timescale_db.record_snapshot``, the SQLite
+    path writes them as-is into the ``bids_json`` / ``asks_json``
+    TEXT columns). Also assert the depth-10 summaries + top-of-book
+    sizes are computed correctly.
 
     The book poller's downstream singletons (``raw_vault``,
-    ``source_registry``, ``store``) are mocked so the call path
-    doesn't trigger any other side effects.
+    ``source_registry``, ``store``, ``timescale_db``) are mocked so
+    the call path doesn't trigger any other side effects.
     """
     from core.book_poller import BookPoller
     from core.data_store import store
+    from core.database_manager import db_manager
+    from core.timescale_db import timescale_db as ts_singleton
 
     poller = BookPoller()
 
@@ -759,51 +772,94 @@ async def test_book_poller_passes_ladders_to_record_snapshot(
     monkeypatch.setattr("core.ingestion.raw_vault.raw_vault", mock_rv)
     monkeypatch.setattr("core.ingestion.source_registry.source_registry", mock_sr)
 
-    # Capture the record_snapshot call args via a fresh engine mock.
-    captured: dict[str, Any] = {}
+    # ``record_tick`` is also fired-and-forgotten by ``_apply_book``.
+    # Stub it on the timescale_db singleton so the fire-and-forget
+    # coroutine completes without touching the fresh engine's tick
+    # table (the fresh engine's schema doesn't carry the tick columns
+    # the W21-3 ``record_tick`` SQLite path expects).
+    mock_tick = AsyncMock(return_value=None)
+    monkeypatch.setattr(ts_singleton, "record_tick", mock_tick)
 
-    real_record_snapshot = fresh_engine.record_snapshot
+    # Capture the ``db_manager.record_snapshot`` call args via a
+    # wrapping mock. W26-3 — the book poller now routes through the
+    # ``db_manager`` facade (not ``timescale_db.record_snapshot``
+    # directly), so we capture on the singleton ``db_manager``
+    # rather than on ``fresh_engine``. The wrapper delegates to the
+    # real method so the SQLite row is actually persisted (so the
+    # belt-and-braces SQLite assertion below still holds).
+    captured: dict[str, Any] = {}
+    real_record_snapshot = db_manager.record_snapshot
 
     async def capturing_record_snapshot(**kwargs):
         captured.update(kwargs)
         return await real_record_snapshot(**kwargs)
 
-    fresh_engine.record_snapshot = capturing_record_snapshot
-    # ``record_tick`` is also called — leave the real implementation in
-    # place (it doesn't affect the depth assertions).
+    monkeypatch.setattr(db_manager, "record_snapshot", capturing_record_snapshot)
 
     await poller._apply_book("0xPOLL", book_payload)
     # Drain the fire-and-forget ``asyncio.create_task`` calls so the
     # record_snapshot coroutine actually runs before assertions.
     await asyncio.sleep(0)
 
-    # The full ladders were passed through (not None / not empty).
+    # The full ladders were passed through as JSON strings.
     assert "bids_json" in captured, "bids_json kwarg must be passed"
     assert "asks_json" in captured
     assert captured["bids_json"] is not None, "bids_json must not be None"
-    assert len(captured["bids_json"]) == 3, "all 3 bid levels must be passed"
-    assert len(captured["asks_json"]) == 3, "all 3 ask levels must be passed"
+    assert isinstance(captured["bids_json"], str), (
+        "bids_json must be a JSON string (the W26-3 / W21-5 contract)"
+    )
+
+    parsed_bids = json.loads(captured["bids_json"])
+    parsed_asks = json.loads(captured["asks_json"])
+    assert len(parsed_bids) == 3, "all 3 bid levels must be passed"
+    assert len(parsed_asks) == 3, "all 3 ask levels must be passed"
 
     # The ladder entries are ``{"price": float, "size": float}`` dicts
-    # (the W21-5 conversion from ``PriceLevel`` dataclass instances).
-    first_bid = captured["bids_json"][0]
+    # (the W26-3 / W21-5 conversion from ``PriceLevel`` dataclass
+    # instances — the bids are sorted high → low, so the first entry
+    # is the best bid at 0.48).
+    first_bid = parsed_bids[0]
     assert isinstance(first_bid, dict)
     assert set(first_bid.keys()) == {"price", "size"}
     assert float(first_bid["price"]) == pytest.approx(0.48)
     assert float(first_bid["size"]) == pytest.approx(100.0)
 
+    # W26-3 — the new ``bid_size`` / ``ask_size`` / ``volume`` /
+    # ``bid_depth_10`` / ``ask_depth_10`` kwargs are populated so the
+    # SQLite fallback INSERT writes real values into the depth columns.
+    assert captured["bid_size"] == pytest.approx(100.0), (
+        "bid_size must be the best bid's size (first ladder level)"
+    )
+    assert captured["ask_size"] == pytest.approx(150.0), (
+        "ask_size must be the best ask's size (first ladder level)"
+    )
+    assert captured["volume"] == pytest.approx(0.0), (
+        "volume defaults to 0 — the CLOB /book response carries no volume"
+    )
+    assert captured["bid_depth_10"] == pytest.approx(100.0 + 200.0 + 300.0), (
+        "bid_depth_10 must be the sum of the top 10 bid sizes"
+    )
+    assert captured["ask_depth_10"] == pytest.approx(150.0 + 250.0 + 350.0), (
+        "ask_depth_10 must be the sum of the top 10 ask sizes"
+    )
+
     # Belt-and-braces: the snapshot row is actually persisted with
-    # the ladder (not just passed through — the JSON column is
-    # populated in the SQLite fallback).
+    # the ladder (the JSON column is populated in the SQLite fallback
+    # — the wrapper above delegated to the real ``db_manager.record_snapshot``
+    # which routed to ``_sqlite_record_snapshot`` and wrote to the
+    # ``fresh_engine._sqlite_path`` the fixture re-pointed the
+    # singleton at).
     with sqlite3.connect(str(fresh_engine._sqlite_path)) as conn:
         conn.row_factory = sqlite3.Row
         row = conn.execute(
-            "SELECT bids_json FROM market_snapshots WHERE token_id = ?",
+            "SELECT bids_json, bid_size, bid_depth_10 FROM market_snapshots WHERE token_id = ?",
             ("0xPOLL",),
         ).fetchone()
     assert row is not None
     parsed = json.loads(row["bids_json"])
     assert len(parsed) == 3
+    assert float(row["bid_size"]) == pytest.approx(100.0)
+    assert float(row["bid_depth_10"]) == pytest.approx(600.0)
 
 
 # ────────────────────────────────────────────────────────────────────────────

@@ -280,10 +280,18 @@ def mock_source_registry(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
 
 @pytest.fixture
 def mock_db_manager(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
-    """Mock ``core.database_manager.db_manager`` so the trade_ingester's
-    ``record_trade`` call is captured as an AsyncMock (no SQLite write).
+    """Mock ``core.database_manager.db_manager`` so fire-and-forget
+    ``record_snapshot`` / ``record_trade`` calls from the book_poller
+    AND the trade_ingester are captured as AsyncMocks (no SQLite write,
+    no asyncpg pool).
+
+    W26-3 — extended to also stub ``record_snapshot`` because the
+    book_poller now routes its snapshot writes through the
+    ``db_manager`` facade (was previously calling
+    ``timescale_db.record_snapshot`` directly).
     """
     mock = MagicMock()
+    mock.record_snapshot = AsyncMock(return_value=True)
     mock.record_trade = AsyncMock(return_value=True)
     monkeypatch.setattr("core.database_manager.db_manager", mock)
     return mock
@@ -295,15 +303,25 @@ def mock_db_manager(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
 @pytest.mark.asyncio
 async def test_book_poller_validates_snapshot_before_recording(
     fresh_validator: DataValidator,
-    mock_timescale: MagicMock,
+    mock_db_manager: MagicMock,
+    mock_timescale: MagicMock,  # ``record_tick`` still routes through ``timescale_db`` directly
     mock_raw_vault: MagicMock,  # noqa: ARG001 — sets up monkeypatch side-effect
     mock_source_registry: MagicMock,  # noqa: ARG001 — sets up monkeypatch side-effect
 ):
     """``core.book_poller._apply_book`` MUST route the snapshot through
-    the validator BEFORE scheduling the ``timescale_db.record_snapshot``
+    the validator BEFORE scheduling the ``db_manager.record_snapshot``
     fire-and-forget task — and the data passed to ``record_snapshot``
     must come from the validator's NORMALISED payload (with provenance
     fields, derived ``mid`` / ``spread``, etc.).
+
+    W26-3 — the book_poller now routes snapshot writes through the
+    unified ``db_manager`` facade (was previously calling
+    ``timescale_db.record_snapshot`` directly). The
+    ``record_snapshot`` assertions therefore target ``mock_db_manager``,
+    not ``mock_timescale``. ``record_tick`` still routes through
+    ``timescale_db`` directly (W21-3 — the tick hypertable doesn't
+    have a ``db_manager`` indirection yet) so the ``mock_timescale``
+    fixture is still pulled in.
 
     Belt-and-braces:
       * ``validate_snapshot`` IS called (verified by the validator's
@@ -333,10 +351,10 @@ async def test_book_poller_validates_snapshot_before_recording(
     assert stats["invalid_count"] == 0
     assert stats["duplicate_count"] == 0
 
-    # record_snapshot WAS called (exactly once).
-    assert mock_timescale.record_snapshot.call_count == 1, (
+    # record_snapshot WAS called (exactly once) — on the db_manager facade.
+    assert mock_db_manager.record_snapshot.call_count == 1, (
         f"expected record_snapshot.call_count=1, "
-        f"got {mock_timescale.record_snapshot.call_count}"
+        f"got {mock_db_manager.record_snapshot.call_count}"
     )
 
     # The book_poller passes the normalised best_bid / best_ask through
@@ -345,7 +363,7 @@ async def test_book_poller_validates_snapshot_before_recording(
     # reads ``book.best_bid`` / ``book.best_ask`` / ``book.mid`` /
     # ``book.spread`` from the OrderBook dataclass (parsed from the raw
     # CLOB payload), which match the validator's view.
-    call_kwargs = mock_timescale.record_snapshot.call_args.kwargs
+    call_kwargs = mock_db_manager.record_snapshot.call_args.kwargs
     assert call_kwargs["token_id"] == "T1"
     assert call_kwargs["best_bid"] == pytest.approx(0.49)
     assert call_kwargs["best_ask"] == pytest.approx(0.51)
@@ -359,13 +377,21 @@ async def test_book_poller_validates_snapshot_before_recording(
 @pytest.mark.asyncio
 async def test_book_poller_skips_invalid_snapshot(
     fresh_validator: DataValidator,
+    mock_db_manager: MagicMock,
     mock_timescale: MagicMock,
     mock_raw_vault: MagicMock,  # noqa: ARG001
     mock_source_registry: MagicMock,  # noqa: ARG001
 ):
     """An INVALID snapshot (negative ``best_bid`` — out of the ``[0, 1]``
     probability range) must be rejected by the validator AND the
-    ``timescale_db.record_snapshot`` call must be SKIPPED entirely.
+    ``db_manager.record_snapshot`` call must be SKIPPED entirely.
+
+    W26-3 — ``record_snapshot`` is now routed through the
+    ``db_manager`` facade (was previously a direct
+    ``timescale_db.record_snapshot`` call). The skipped-call assertion
+    therefore targets ``mock_db_manager.record_snapshot``.
+    ``record_tick`` still routes through ``timescale_db`` directly, so
+    its skipped-call assertion continues to target ``mock_timescale``.
 
     The book_poller builds the ``raw_snapshot`` from the parsed
     ``OrderBook`` (which itself was parsed from the raw CLOB ``/book``
@@ -376,10 +402,10 @@ async def test_book_poller_skips_invalid_snapshot(
 
     Belt-and-braces:
       * ``validate_snapshot`` IS called (validator saw 1 invalid).
-      * ``record_snapshot`` is NOT called (zero call_count).
-      * ``record_tick`` is NOT called (the book_poller schedules both
-        via ``asyncio.create_task`` AFTER the validator gate; both must
-        be skipped).
+      * ``db_manager.record_snapshot`` is NOT called (zero call_count).
+      * ``timescale_db.record_tick`` is NOT called (the book_poller
+        schedules both via ``asyncio.create_task`` AFTER the validator
+        gate; both must be skipped).
     """
     from core.book_poller import BookPoller
 
@@ -400,9 +426,9 @@ async def test_book_poller_skips_invalid_snapshot(
     assert stats["valid_count"] == 0
 
     # record_snapshot NOT called — the validator gate short-circuited.
-    assert mock_timescale.record_snapshot.call_count == 0, (
+    assert mock_db_manager.record_snapshot.call_count == 0, (
         f"expected record_snapshot NOT called, got "
-        f"{mock_timescale.record_snapshot.call_count} calls"
+        f"{mock_db_manager.record_snapshot.call_count} calls"
     )
     # record_tick NOT called either — both downstream calls are gated.
     assert mock_timescale.record_tick.call_count == 0
@@ -414,15 +440,21 @@ async def test_book_poller_skips_invalid_snapshot(
 @pytest.mark.asyncio
 async def test_book_poller_skips_duplicate_snapshot(
     fresh_validator: DataValidator,
-    mock_timescale: MagicMock,
+    mock_db_manager: MagicMock,
+    mock_timescale: MagicMock,  # noqa: ARG001 — still pulled in so ``record_tick`` is stubbed
     mock_raw_vault: MagicMock,  # noqa: ARG001
     mock_source_registry: MagicMock,  # noqa: ARG001
 ):
     """A second poll of the SAME token with the SAME top-of-book (same
     ``token_id`` + ``best_bid`` + ``best_ask`` + ``timestamp``) must be
     flagged as a duplicate by the validator's hash dedup — and the
-    ``timescale_db.record_snapshot`` call must be SKIPPED on the
+    ``db_manager.record_snapshot`` call must be SKIPPED on the
     duplicate path.
+
+    W26-3 — ``record_snapshot`` is now routed through the
+    ``db_manager`` facade (was previously a direct
+    ``timescale_db.record_snapshot`` call). The duplicate-skip
+    assertion therefore targets ``mock_db_manager.record_snapshot``.
 
     The CLOB legitimately returns the same book on consecutive polls
     within a single Tier-1 interval, so this is the expected steady
@@ -448,7 +480,7 @@ async def test_book_poller_skips_duplicate_snapshot(
     # First poll — accepted.
     await poller._apply_book("T1", book_data)
     await asyncio.sleep(0)
-    first_call_count = mock_timescale.record_snapshot.call_count
+    first_call_count = mock_db_manager.record_snapshot.call_count
     assert first_call_count == 1, (
         f"first poll should have called record_snapshot once, "
         f"got {first_call_count}"
@@ -459,9 +491,9 @@ async def test_book_poller_skips_duplicate_snapshot(
     await asyncio.sleep(0)
 
     # record_snapshot NOT called again — duplicate was skipped.
-    assert mock_timescale.record_snapshot.call_count == first_call_count, (
+    assert mock_db_manager.record_snapshot.call_count == first_call_count, (
         f"second poll should NOT have called record_snapshot, "
-        f"got {mock_timescale.record_snapshot.call_count - first_call_count} "
+        f"got {mock_db_manager.record_snapshot.call_count - first_call_count} "
         f"extra calls"
     )
 

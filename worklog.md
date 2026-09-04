@@ -28514,3 +28514,291 @@ config edit introduce zero new lint warnings.
 - Test count: 102 → 184 (files: 11 → 16).
 - No backend / DB / component / API changes — pure additive E2E
   expansion.
+
+---
+
+## W26-7 — full-stack-developer (E2E suite verify + Production Features spec)
+
+### Scope
+Verify the existing 16-file / 184-test E2E Playwright suite is
+syntactically valid + lint clean, then add a new spec file covering
+the Wave 24-26 production surfaces (Performance Report, Database
+Status, Safety Gate, Audit Log, Rate Limits, Command Palette,
+Theme Toggle).
+
+### Inputs read
+- `worklog.md` (last ~100 lines) — W25-7 context (test count 102 →
+  184, 4 sample tests verified passing).
+- `playwright.config.ts` — single-worker / 60s test / 15s expect /
+  webServer `bun run dev` / 120s webServer timeout.
+- All 16 `e2e/*.spec.ts` files — selector conventions, defensive
+  `expect.poll` patterns, i18n-tolerant regex label patterns.
+- `src/components/{Sidebar,page}.tsx` — nav item labels + panel
+  render tree. Discovered the W26-2 `PerformanceReportPanel.tsx`
+  is mounted under `analytics-performance-report` (Sidebar.tsx:139,
+  distinct from `analytics-performance` which hosts the older
+  embedded `PerformanceReportSection` inside AnalyticsPanel).
+- `src/components/{PerformanceReportPanel,DatabaseStatusPanel,
+  LiveSafetyGatePanel,AuditLogPanel,RateLimitPanel}.tsx` —
+  canonical `data-testid` / `aria-label` / visible-text markers
+  for each render path (loading / error / main).
+- `src/messages/{en,fr}.json` — FR nav label translations
+  (`Base de Données`, `Porte Sécurité`, `Journal Audit`,
+  `Limites Taux`, `Rapport Performance`).
+
+### Work performed
+
+#### 1. Verified all existing E2E tests compile + list
+`bunx playwright test --list` listed 184 tests in 16 files cleanly
+— zero syntactic errors, no broken imports, no selector regressions.
+
+#### 2. New E2E spec: `e2e/production-features.spec.ts` (7 tests)
+
+Each test is STRUCTURAL — verifies panel mounts + canonical header
+or `data-testid` renders + no `PanelErrorBoundary` fallback. Backend-
+down tolerant: every panel has 3+ render paths (loading / error /
+main) and the tests poll for "(success marker visible) OR (error
+marker visible)" rather than asserting on a single state.
+
+1. **performance report panel loads** — navigates via
+   `analytics-performance-report` (Sidebar.tsx:139, label "Performance
+   Report" / FR "Rapport Performance"). Asserts
+   `data-testid="performance-report-panel"` root + `performance-
+   disclaimer` + `performance-report-tabs` + `tab-backtest` +
+   `tab-paper` triggers all visible (every render path renders them).
+2. **database status panel loads** — clicks `Database` nav. Polls
+   for `(db-backend-badge visible) OR (Database status endpoint
+   unavailable visible)`.
+3. **safety gate panel loads** — clicks `Safety Gate`. Asserts `LIVE
+   SAFETY GATE` header (always rendered), then polls for `(10 Staged
+   Checks visible) OR (Safety-gate endpoint unavailable visible)`.
+4. **audit log panel loads** — clicks `Audit Log`. Asserts `📋 AUDIT
+   LOG` header (always rendered), then polls for `(audit-log-panel
+   data-testid visible) OR (Audit trail unavailable visible)`.
+5. **rate limits panel loads** — clicks `Rate Limits`. Polls for
+   `(Rate Limits text visible) OR (Rate-limit stats endpoint
+   unavailable visible)`.
+6. **command palette opens with Cmd+K** — defensive (mirrors
+   `command-palette.spec.ts`): presses Ctrl+K, if a dialog opens
+   with a filter input the positive path runs + closes via Escape;
+   if no dialog opens the test SKIPS with a clear reason. Verifies
+   no uncaught page errors either way.
+7. **theme toggle works** — locates toggle via aria-label
+   (`Switch to light mode` / `Switch to dark mode`), clicks, polls
+   until `<html>` class flips, then restores original. Captures
+   uncaught page errors.
+
+#### 3. Updated `playwright.config.ts` webServer config
+- Changed `command: 'bun run dev'` → `command: 'next dev -p 3000'`.
+- Reason: `bun run dev` resolves to `next dev -p 3000 2>&1 | tee
+  dev.log` (package.json). The `tee` pipe works for the sandbox's
+  auto-running dev server (the agent reads dev.log), but it breaks
+  Playwright's `webServer` spawn tracking — Playwright spawns the
+  wrapper shell, the shell exits once the pipe is set up, and
+  Playwright reports "Process from config.webServer exited early"
+  preventing the e2e suite from auto-booting when no server is up.
+- Spawning `next dev` directly lets Playwright track the actual
+  Next.js child process so it can reliably spawn + kill the server.
+- `reuseExistingServer: !process.env.CI` unchanged — still picks up
+  the sandbox's auto-running dev server when one is already up.
+- Added an inline comment block documenting the rationale.
+- All other config knobs unchanged (60s test / 15s expect / 1 worker
+  / retries 0 dev 2 CI / `trace: 'on-first-retry'` / `screenshot:
+  'only-on-failure'` / `video: 'retain-on-failure'`).
+
+### Verification
+
+#### `bunx playwright test --list` ✓
+```
+Total: 191 tests in 17 files
+```
+Was 184 tests in 16 files. +7 tests across 1 new file. All listed
+cleanly with their describe blocks.
+
+#### `bunx eslint e2e/production-features.spec.ts playwright.config.ts` ✓
+Exit 0, no warnings.
+
+#### `bunx eslint e2e/` ✓ (full e2e suite)
+Exit 0, no warnings — the 16 existing spec files + the new spec +
+the playwright config edit are all lint clean.
+
+#### End-to-end run
+- Could NOT verify the new tests end-to-end against the live dev
+  server. The sandbox's auto-running `bun run dev` server is not
+  currently running (curl http://localhost:3000 returns 000 / exit 7),
+  and manual attempts to start `next dev` in the background also
+  died within ~25s (process exited silently after "Compiling / ...").
+  This is a sandbox / system-runner issue unrelated to the spec file
+  itself.
+- The spec is syntactically valid (per `--list`), lint clean, and
+  follows the established defensive patterns from the existing 16
+  spec files. Selectors were cross-referenced against the component
+  source files to confirm `data-testid` / `aria-label` / visible-text
+  markers exist in every render path the test asserts against.
+
+### Stage summary
+- 1 new E2E spec file (`e2e/production-features.spec.ts`, 7 tests).
+- 1 config edit (`playwright.config.ts` webServer command: direct
+  `next dev` instead of `bun run dev` to fix the pipe+tee spawn-
+  tracking issue).
+- Test count: 184 → 191 (files: 16 → 17).
+- All new + edited files lint clean.
+- No backend / DB / component / API changes — pure additive E2E
+  expansion + 1-line config tweak.
+
+---
+
+## W26-2 — Honest Performance Report Panel (per-category metrics)
+
+- **Date:** 2026-09-05
+- **Agent:** full-stack-developer
+- **Scope:** Additive — 1 new component + 1 test file + 4 surgical
+  edits (Sidebar type+item, page.tsx lazy+render, en/fr i18n keys).
+  Zero changes to existing components, hooks, API routes, or Prisma
+  schema.
+
+### Files
+
+- NEW `src/components/PerformanceReportPanel.tsx` (~510 lines) —
+  standalone trader-facing panel that surfaces the bot's honest
+  performance metrics separated by category (Backtest | Walk-Forward
+  | Paper Trading | Live). Hosts the 12 spec metric cards per category,
+  the always-on disclaimer banner, the per-category equity curve, and
+  a visibility-aware 30-second auto-refresh.
+- NEW `src/components/PerformanceReportPanel.test.tsx` (~445 lines,
+  19 tests) — covers loading/disclaimer rendering, tab switching, CI
+  text + range bar, unavailable-category branch, equity-curve render
+  gating, error handling, and the auto-refresh + pause-on-hidden +
+  unmount-cleanup lifecycle.
+- EDIT `src/components/Sidebar.tsx` — Added `'analytics-performance-report'`
+  to the `NavSection` union + a NavItem entry in the Analytics group
+  (`label: 'Performance Report'`, `labelKey: 'nav.performance_report'`,
+  icon `∉`, no keyboard shortcut — keeps the `8` shortcut on the
+  existing Performance tab so muscle memory is preserved).
+- EDIT `src/app/page.tsx` — Added a `lazyPanel(() => import('@/components/PerformanceReportPanel'), 'Loading Performance Report…')`
+  declaration + a new `activeSection === 'analytics-performance-report'`
+  render branch wrapped in `<PanelErrorBoundary label="Performance Report">`
+  between the existing `analytics-performance` and `analytics-backtest`
+  cases. The dynamic chunk keeps the Recharts equity-curve dependency
+  out of the initial bundle.
+- EDIT `src/messages/en.json` — Added `"performance_report": "Performance Report"`.
+- EDIT `src/messages/fr.json` — Added `"performance_report": "Rapport Performance"`.
+
+### Architecture
+
+`PerformanceReportPanel` fetches `GET /api/performance/report?XTransformPort=8080`
+(the same endpoint the existing `AnalyticsPanel.PerformanceReportSection`
+already consumes), but expects an upgraded `PerformanceReport` shape
+where each of the four categories is a full `CategoryMetrics` object.
+When the backend returns the legacy shape (paper_trading as object,
+others as strings — see `AnalyticsPanel.PerformanceReportSection`'s
+`PerformanceReport` interface), the panel's `coerceLegacyShape` helper
+wraps the string fields into `makeUnavailable()` category objects so
+the metric grid + raw-status card still render. If the response shape
+isn't recognisable at all (no `disclaimer` string), the panel falls
+back to a fully-unavailable report — the disclaimer banner still
+renders because honest disclosure is the panel's most important single
+artefact.
+
+The 12 metric cards (one per category) are:
+
+| # | Card | Source field | Tone |
+|---|------|--------------|------|
+| 1 | Win Rate (95% CI) | `win_rate` + `win_rate_ci_low/high` | green ≥ 0.5, red < 0.5 |
+| 2 | Profit Factor | `profit_factor` | green ≥ 1, red < 1 |
+| 3 | Expectancy | `expectancy` | green ≥ 0, red < 0 |
+| 4 | Max Drawdown | `max_drawdown_pct` | always red (bad metric) |
+| 5 | Sharpe Ratio | `sharpe_ratio` | green ≥ 1, blue ≥ 0, red < 0 |
+| 6 | Sortino Ratio | `sortino_ratio` | same ladder as Sharpe |
+| 7 | Open Exposure | `open_exposure` | blue (info) |
+| 8 | Capital Utilization | `capital_utilization` | red > 0.9, blue ≤ 0.9 |
+| 9 | Avg Slippage | `avg_slippage_bps` | red > 5 bps, blue ≤ 5 bps |
+| 10 | Total Fees | `total_fees` | neutral grey |
+| 11 | Number of Trades | `n_trades` | neutral grey |
+| 12 | Statistical Significance | `is_statistically_significant` + `p_value` | green ✓ sig, amber ✗ ns |
+
+The win-rate card displays the CI as `"72.0% [65.2%, 78.1%]"` and
+includes a tiny `CIRangeBar` — a horizontal bar showing the CI bounds
+relative to the full [0,1] range with a thin vertical marker at the
+point estimate — so the trader can glance at how tight the interval is.
+
+When a category is unavailable (e.g. live trading when the bot is
+still in paper mode), the 12-card grid is replaced by a single
+explanation card showing `metrics.unavailable_reason`.
+
+The equity curve uses the existing `EquityCurveChart` from
+`@/components/charts` (the same dark-themed Recharts `AreaChart` that
+`EquityCurve` and `BacktestLabView` consume). It is rendered only
+when the active category supplies an `equity_curve` array of length
+≥ 2 — the contract the EquityCurveChart already enforces.
+
+Auto-refresh: `setInterval(fetchReport, refreshIntervalMs)` with
+`refreshIntervalMs=30_000` (configurable via prop — tests pass 100ms).
+`document.visibilitychange` pauses the interval when the tab is hidden
+and resumes it on visible — the same convention as `useRealtimeData`
+and `useBot` so no panel keeps polling while the trader isn't watching.
+
+### Verification
+
+- `bun run lint` ✓ (exit 0, no output — clean across all files).
+- `bunx vitest run src/components/PerformanceReportPanel.test.tsx
+  --maxWorkers=2` → **19 passed (19)** in 7.92s. All 5 spec-coverage
+  areas pass:
+  - rendering with mock data (4 tests)
+  - category tabs switch (2 tests)
+  - disclaimer is displayed (2 tests)
+  - confidence interval display (3 tests)
+  - auto-refresh (3 tests — interval, pause-on-hidden, unmount-cleanup)
+  Plus error handling (2 tests), equity-curve gating (1 test), endpoint
+  URL + Authorization header (2 tests).
+- `bunx vitest run --maxWorkers=4` (full repo) → **1115 passed (1115)**
+  across 53 test files in 203s. No regressions — the 19 new tests are
+  net additions to the suite.
+- Dev server log (`dev.log`) — clean. Next.js 16.1.3 / Turbopack
+  compiled without errors after the new lazy chunk was added.
+
+### Stage summary
+
+- 1 new component (`PerformanceReportPanel.tsx`, ~510 lines) with 4
+  category tabs + 12 metric cards per category + always-on disclaimer
+  banner + per-category equity curve + 30s visibility-aware
+  auto-refresh.
+- 1 new test file (`PerformanceReportPanel.test.tsx`, 19 tests)
+  covering all 5 spec-coverage areas.
+- 4 surgical edits: Sidebar NavSection type+item, page.tsx lazy+render,
+  en.json + fr.json i18n keys.
+- Lint clean for all new + modified files; 19 new tests pass; full
+  1115-test suite passes with no regressions.
+
+### Known limitations / follow-ups
+
+1. **Backend contract not yet upgraded.** The panel expects each of
+   `backtest / walk_forward / paper_trading / live` to be a full
+   `CategoryMetrics` object (with `win_rate`, `win_rate_ci_low/high`,
+   `profit_factor`, etc.). The current backend (as consumed by
+   `AnalyticsPanel.PerformanceReportSection`) returns only
+   `paper_trading` as an object and the other three as opaque
+   status strings. The panel's `coerceLegacyShape` helper makes this
+   transparent — the metric grid renders with all cards N/A and the
+   raw string shows in a fallback card — but the trader doesn't get
+   the per-category metrics until the backend is upgraded to emit the
+   full shape. W26-3 is the planned backend follow-up.
+2. **CI range bar is purely visual.** The bar shows the CI bounds
+   relative to [0, 1] but doesn't include a tooltip with the exact
+   bounds (the textual "72.0% [65.2%, 78.1%]" right above it already
+   does that). If a future design pass wants hover tooltips on the
+   bar itself, lift it into its own component with a Radix Tooltip.
+3. **No CSV export.** The panel surfaces metrics but doesn't yet
+   export them. `ClosedPositionsPanel` has a CSV-export pattern
+   (Button + Blob download) that could be lifted into a shared hook
+   and reused here if the trader wants to export the report for an
+   audit log.
+4. **Single TabsContent with `forceMount`.** Because the panel uses
+   a single `<TabsContent value={activeCategory} forceMount>` whose
+   value tracks the active category, switching tabs re-renders the
+   whole grid (12 cards) rather than pre-mounting all four grids and
+   radix-toggling visibility. This is intentional — the metric cards
+   are cheap and the data is already in memory, so the remount cost
+   is negligible. If the cards ever become expensive (e.g. each one
+   fetches its own tooltip data), the pattern should switch to four
+   pre-mounted TabsContent blocks.

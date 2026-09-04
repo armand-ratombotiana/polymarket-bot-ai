@@ -26,6 +26,7 @@ export type NavSection =
   | 'intelligence-shadow'
   | 'intelligence-validation'
   | 'analytics-performance'
+  | 'analytics-performance-report'
   | 'analytics-backtest'
   | 'analytics-attribution'
   | 'analytics-execution'
@@ -132,6 +133,10 @@ const NAV_GROUPS: NavGroup[] = [
     label: 'Analytics',
     items: [
       { id: 'analytics-performance', labelKey: 'nav.performance', label: 'Performance', shortLabel: 'Perf', icon: '◷', kbd: '8', group: 'analytics' },
+      // W26-2 — Honest Performance Report: dedicated per-category breakdown
+      // (backtest / walk-forward / paper / live) with confidence intervals,
+      // p-values, slippage + fees, and an always-on disclaimer banner.
+      { id: 'analytics-performance-report', labelKey: 'nav.performance_report', label: 'Performance Report', shortLabel: 'Honest', icon: '∉', group: 'analytics' },
       { id: 'analytics-backtest', labelKey: 'nav.backtest', label: 'Backtest Lab', shortLabel: 'Backtest', icon: '⊙', group: 'analytics' },
       { id: 'analytics-attribution', labelKey: 'nav.attribution', label: 'Attribution', shortLabel: 'Attrib', icon: '◫', group: 'analytics' },
       { id: 'analytics-execution', labelKey: 'nav.execution', label: 'Execution Quality', shortLabel: 'Exec Q', icon: '⌖', group: 'analytics' },
