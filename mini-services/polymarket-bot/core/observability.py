@@ -145,13 +145,23 @@ CATEGORIES: tuple[str, ...] = (
 # Centralised here so call sites don't drift on naming; the recorder itself
 # accepts ANY (category, name) pair so ad-hoc metrics still work — they just
 # land in the "other" bucket in the health report.
+# W22-7 - extended with the 9 God-Mode §54 spec metrics that were
+# previously declared-but-never-collected. The collector now emits every
+# name listed below; the catalog here is the single source of truth for
+# the canonical surface a dashboard can expect.
 METRIC_NAMES: dict[str, tuple[str, ...]] = {
-    CAT_DATA_SOURCE: ("updates", "latency", "staleness"),
-    CAT_BOT: ("cycles", "errors"),
+    CAT_DATA_SOURCE: ("updates", "latency", "staleness", "reconnects"),
+    CAT_BOT: ("cycles", "errors", "actions"),
     CAT_STRATEGY: ("evaluations", "signals", "rejects"),
-    CAT_EXECUTION: ("submissions", "fills", "rejections", "slippage"),
+    CAT_EXECUTION: ("submissions", "fills", "rejections", "slippage", "latency"),
     CAT_ML: ("inference_latency", "prediction_distribution", "drift"),
-    CAT_SYSTEM: ("cpu_percent", "memory_percent", "memory_used_mb"),
+    CAT_SYSTEM: (
+        "cpu_percent",
+        "memory_percent",
+        "memory_used_mb",
+        "db_connections",
+        "queue_health",
+    ),
 }
 
 

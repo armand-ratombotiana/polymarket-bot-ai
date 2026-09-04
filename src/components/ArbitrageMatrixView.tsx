@@ -2,6 +2,7 @@
 'use client'
 
 import { useEffect, useState, useMemo } from 'react'
+import { AlertTriangle, X } from 'lucide-react'
 import { getApiUrl, apiFetch } from '@/lib/api'
 import { formatHierarchicalMarket } from '@/lib/formatters'
 import { fmtPrice, fmtUsd } from '@/lib/design-tokens'
@@ -31,6 +32,8 @@ export default function ArbitrageMatrixView({ onSelectMarket }: Props = {}) {
   const [lastExecuted, setLastExecuted] = useState<{ ok: boolean; message: string } | null>(null)
   const [searchQuery, setSearchQuery] = useState('')
   const [minBps, setMinBps] = useState(10)
+  // W22-1 — surface fetch failures instead of silent swallowing.
+  const [fetchError, setFetchError] = useState<string | null>(null)
 
   const fetchOpportunities = async () => {
     try {
@@ -39,8 +42,14 @@ export default function ArbitrageMatrixView({ onSelectMarket }: Props = {}) {
       if (res.ok) {
         const data = await res.json()
         setOpportunities(data.opportunities || [])
+        setFetchError(null)
+      } else {
+        setFetchError(`Failed to load arbitrage opportunities (HTTP ${res.status})`)
       }
-    } catch {}
+    } catch (e) {
+      console.error('[ArbitrageMatrixView] Failed to fetch arbitrage opportunities:', e)
+      setFetchError(e instanceof Error ? e.message : 'Network error loading arbitrage opportunities')
+    }
     setLoading(false)
   }
 
@@ -72,7 +81,8 @@ export default function ArbitrageMatrixView({ onSelectMarket }: Props = {}) {
         const body = await res.json().catch(() => null)
         setLastExecuted({ ok: false, message: body?.detail || `Execution rejected by risk engine (HTTP ${res.status})` })
       }
-    } catch {
+    } catch (e) {
+      console.error('[ArbitrageMatrixView] Failed to execute arbitrage:', e)
       setLastExecuted({ ok: false, message: 'Execution network request failed' })
     }
     setExecuting(null)
@@ -200,6 +210,29 @@ export default function ArbitrageMatrixView({ onSelectMarket }: Props = {}) {
         >
           <span>{lastExecuted.ok ? '✅ ' : '⚠️ '}{lastExecuted.message}</span>
           <button onClick={() => setLastExecuted(null)} className="hover:underline font-bold ml-2">✕</button>
+        </div>
+      )}
+
+      {/* W22-1 — fetch-error banner (previously silently swallowed). */}
+      {fetchError && (
+        <div
+          className="banner-danger text-xs px-3 py-2 rounded flex justify-between items-center"
+          role="alert"
+        >
+          <span className="flex items-center gap-1.5">
+            <AlertTriangle className="w-3.5 h-3.5" aria-hidden="true" />
+            <span>{fetchError}</span>
+          </span>
+          <div className="flex items-center gap-2">
+            <button onClick={() => fetchOpportunities()} className="hover:underline text-xs">Retry</button>
+            <button
+              onClick={() => setFetchError(null)}
+              className="hover:underline text-xs flex items-center gap-0.5"
+              aria-label="Dismiss error"
+            >
+              <X className="w-3 h-3" aria-hidden="true" /> Dismiss
+            </button>
+          </div>
         </div>
       )}
 

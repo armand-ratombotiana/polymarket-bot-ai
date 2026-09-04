@@ -49,8 +49,9 @@ export default function MarketScreener({ onSelectMarket, onQuickTrade }: Props) 
       } else {
         setError(`Failed to load markets (HTTP ${res.status})`)
       }
-    } catch {
-      setError('Network error while querying Gamma markets')
+    } catch (e) {
+      console.error('[MarketScreener] Failed to fetch markets:', e)
+      setError(e instanceof Error ? e.message : 'Network error while querying Gamma markets')
     } finally {
       setLoading(false)
     }
@@ -147,11 +148,18 @@ export default function MarketScreener({ onSelectMarket, onQuickTrade }: Props) 
 
       {/* Error state */}
       {error && (
-        <div className="banner-danger mx-3 mt-2 text-xs py-1.5 px-3">
+        <div className="banner-danger mx-3 mt-2 text-xs py-1.5 px-3 flex items-center gap-2" role="alert">
           <span aria-hidden="true">⚠️</span>
-          <span>{error}</span>
-          <button onClick={() => fetchMarkets()} className="ml-auto underline cursor-pointer">
+          <span className="flex-1 truncate">{error}</span>
+          <button onClick={() => fetchMarkets()} className="underline cursor-pointer shrink-0">
             Retry
+          </button>
+          <button
+            onClick={() => setError(null)}
+            className="underline cursor-pointer shrink-0"
+            aria-label="Dismiss error"
+          >
+            Dismiss
           </button>
         </div>
       )}

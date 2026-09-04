@@ -115,7 +115,12 @@ export default function TopStatusBar({
             status: d.status ?? 'HEALTHY',
           })
         }
-      } catch {}
+      } catch (e) {
+        // W22-1 — log ML health fetch failures so they don't disappear
+        // silently. The status bar keeps the last known values (or none)
+        // until the next 6s poll recovers.
+        console.error('[TopStatusBar] Failed to fetch ML health:', e)
+      }
     }
     fetchMl()
     const t = setInterval(fetchMl, 6000)

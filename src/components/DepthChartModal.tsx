@@ -96,7 +96,13 @@ export default function DepthChartModal({ tokenId, slug, onClose, onOrderPlaced 
             setPrice(json.mid.toFixed(3))
           }
         }
-      } catch {}
+      } catch (e) {
+        // W22-1 — log the failure so it shows up in the dev console. The
+        // panel keeps the last known depth data (or shows placeholders
+        // until the next 2s poll) — same UX as before, but now we
+        // surface the underlying error for debugging.
+        console.error('[DepthChartModal] Failed to fetch order book depth:', e)
+      }
     }
     fetchDepth()
     const timer = setInterval(fetchDepth, 2000)
@@ -118,9 +124,11 @@ export default function DepthChartModal({ tokenId, slug, onClose, onOrderPlaced 
           const json: MlPred = await res.json()
           setMlPred(json)
         }
-      } catch {
-        // network/HTTP errors are silently ignored — the panel will keep
+      } catch (e) {
+        // network/HTTP errors are logged for debugging — the panel will keep
         // the last known value or show placeholders until the next poll.
+        // W22-1 — previously silent; now logged via console.error.
+        console.error('[DepthChartModal] Failed to fetch ML prediction:', e)
       }
     }
     fetchMlPred()
@@ -152,7 +160,8 @@ export default function DepthChartModal({ tokenId, slug, onClose, onOrderPlaced 
       } else {
         setFeedback({ ok: false, text: body?.detail || `Risk gate rejected: HTTP ${res.status}` })
       }
-    } catch {
+    } catch (e) {
+      console.error('[DepthChartModal] Trade submission network error:', e)
       setFeedback({ ok: false, text: 'Network error submitting trade' })
     }
     setLoading(false)

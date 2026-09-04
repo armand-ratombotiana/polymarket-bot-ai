@@ -44,6 +44,11 @@ class WebSocketClient:
         self._running = False
         self._ws = None
         self._task: asyncio.Task | None = None
+        # W22-7 - cumulative reconnect count. Read by the observability
+        # collector to emit the canonical data_source.reconnects metric
+        # (God Mode §54). Incremented in _run_forever on every iteration
+        # after the very first connect attempt.
+        self._reconnect_count: int = 0
 
     def register_handler(self, handler: Callable) -> None:
         """Register an async callable(event_type, data) handler."""
@@ -74,6 +79,7 @@ class WebSocketClient:
 
     async def _run_forever(self) -> None:
         delay = RECONNECT_BASE_DELAY
+        first_attempt = True
         while self._running:
             # W13-2 — circuit breaker: when the WebSocket endpoint has been
             # failing sustainedly, the breaker opens and we skip the connect
@@ -85,8 +91,13 @@ class WebSocketClient:
                 log.debug(
                     "WebSocket circuit OPEN — backing off %.0fs", delay,
                 )
+                # W22-7 - even a skipped attempt counts as a reconnect cycle
+                # for observability purposes.
+                if not first_attempt:
+                    self._reconnect_count += 1
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, RECONNECT_MAX_DELAY)
+                first_attempt = False
                 continue
             try:
                 await self._connect_and_listen()
@@ -99,6 +110,11 @@ class WebSocketClient:
                 log.debug("WebSocket error: %s — reconnecting in %.0fs", e, delay)
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, RECONNECT_MAX_DELAY)
+            # W22-7 - every iteration after the very first connect attempt
+            # counts as a reconnect cycle.
+            if not first_attempt:
+                self._reconnect_count += 1
+            first_attempt = False
 
     async def _connect_and_listen(self) -> None:
         log.info("Connecting to %s", self._uri)

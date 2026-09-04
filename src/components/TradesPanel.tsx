@@ -1,21 +1,62 @@
 // components/TradesPanel.tsx — Recent Trade Executions Feed
+//
+// W22-5 — Migrated from the implicit "parent passes snapshot.recent_trades"
+// pattern (the parent's useBot poll drives updates) to the hybrid
+// `useRealtimeData` hook. The panel now:
+//   1. REST-prefetches /api/trades?limit=100 on mount.
+//   2. Subscribes to the `trades` WS channel for live push updates.
+//   3. Falls back to polling /api/trades?limit=100 every 10s when the
+//      WS isn't connected.
+//   4. Renders a "● Live" / "⟳ Polling" badge so the trader can tell
+//      at a glance whether the executions list is real-time or lagged.
+//
+// Backwards-compat: callers MAY still pass `trades` as a prop (page.tsx
+// still threads useBot's snapshot through; existing tests pass it too).
+// When provided, the prop overrides the fetched data — the WS
+// subscription still runs so `isRealtime` stays accurate. Mirrors the
+// OrdersPanel migration (W15-5) pattern exactly.
 'use client'
 
 import { useState, useMemo, useCallback, memo } from 'react'
 import { Trade } from '@/hooks/useBot'
 import { formatHierarchicalMarket } from '@/lib/formatters'
 import { fmtAge, fmtPrice, fmtPnl, fmtUsd } from '@/lib/design-tokens'
+import { useRealtimeData } from '@/hooks/useRealtimeData'
+import { Badge } from '@/components/ui/badge'
 
-interface Props {
-  trades: Trade[]
+interface TradesApiResponse {
+  trades?: Trade[]
 }
 
-// W9-6 — wrapped in React.memo. The single prop `trades` is a new array
-// reference on every snapshot, so memo skips re-render only when snapshot
-// identity is unchanged (e.g. parent re-rendered without a new snapshot).
-// Internal filtering/sorting is memoized below to avoid recomputing on
-// every parent render.
-function TradesPanel({ trades }: Props) {
+interface Props {
+  /**
+   * Optional override for the trades list. When provided, the panel
+   * uses this directly and skips rendering the useRealtimeData result
+   * (the WS subscription still runs so the Live/Polling badge reflects
+   * the actual transport state). When omitted, the panel self-fetches
+   * via useRealtimeData('/api/trades?limit=100', { wsChannel: 'trades' }).
+   */
+  trades?: Trade[]
+  /**
+   * Optional override for the realtime indicator. When omitted, the
+   * panel derives the badge state from useRealtimeData's `isRealtime`.
+   */
+  isRealtime?: boolean
+}
+
+function TradesPanel({ trades: tradesOverride, isRealtime: isRealtimeOverride }: Props) {
+  const {
+    data: fetched,
+    isLoading,
+    isRealtime: wsIsRealtime,
+  } = useRealtimeData<TradesApiResponse>('/api/trades?limit=100', {
+    wsChannel: 'trades',
+    pollInterval: 10000,
+  })
+
+  const trades = tradesOverride ?? fetched?.trades ?? []
+  const isRealtime = isRealtimeOverride ?? wsIsRealtime
+
   const [filterQuery, setFilterQuery] = useState('')
   const [sideFilter, setSideFilter] = useState<'ALL' | 'BUY' | 'SELL'>('ALL')
   const [copiedId, setCopiedId] = useState<string | null>(null)
@@ -31,11 +72,8 @@ function TradesPanel({ trades }: Props) {
     })
   }, [trades, filterQuery, sideFilter])
 
-  // W9-6 — slice(0, 100) is cheap but pure; memoize so we don't allocate
-  // a new array on every parent re-render (e.g. when copiedId toggles).
   const displayedTrades = useMemo(() => filteredTrades.slice(0, 100), [filteredTrades])
 
-  // Execution Summary Metrics
   const stats = useMemo(() => {
     const totalVol = trades.reduce((acc, t) => acc + (t.size * t.price), 0)
     const netPnl = trades.reduce((acc, t) => acc + (t.pnl || 0), 0)
@@ -45,10 +83,6 @@ function TradesPanel({ trades }: Props) {
     return { totalVol, netPnl, winRate, totalCount: trades.length }
   }, [trades])
 
-  // W9-6 — wrap CSV export + clipboard in useCallback. These callbacks
-  // are passed to <button onClick> lambdas, so stability isn't strictly
-  // required, but useCallback documents intent and avoids allocating new
-  // closures when trades hasn't changed.
   const handleExportCsv = useCallback(() => {
     if (trades.length === 0) return
     const headers = ['Trade ID', 'Timestamp', 'Market Slug', 'Side', 'Price', 'Shares', 'P&L', 'Strategy']
@@ -80,16 +114,19 @@ function TradesPanel({ trades }: Props) {
 
   return (
     <div className="card h-full flex flex-col p-3 bg-[#13161e] border border-[#1f2335] shadow-xl">
-      {/* Header with Stats */}
       <div className="card-header pb-2 mb-2 border-b border-[#1f2335] flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-center gap-2">
           <span className="card-title text-xs font-bold text-[#dde1ed]">
             ⚡ Recent Executions ({filteredTrades.length})
           </span>
           <span className="badge badge-green text-[9.5px]">Audit Stream</span>
+          {isRealtime ? (
+            <Badge variant="success" className="text-[9.5px] py-0.5">● Live</Badge>
+          ) : (
+            <Badge variant="warning" className="text-[9.5px] py-0.5">⟳ Polling</Badge>
+          )}
         </div>
 
-        {/* Aggregate KPI Badges */}
         <div className="flex items-center gap-2 text-xs">
           <div className="bg-[#0e1015] border border-[#1f2335] px-2 py-0.5 rounded flex items-center gap-1">
             <span className="text-[9.5px] text-[#7e8aaa] uppercase font-semibold">Vol:</span>
@@ -112,7 +149,6 @@ function TradesPanel({ trades }: Props) {
         </div>
       </div>
 
-      {/* Filter & Search Bar */}
       <div className="flex items-center justify-between gap-2 mb-2">
         <div className="inline-flex bg-[#0e1015] border border-[#1f2335] rounded p-0.5 text-[10px]">
           {(['ALL', 'BUY', 'SELL'] as const).map((s) => (
@@ -150,9 +186,13 @@ function TradesPanel({ trades }: Props) {
         </div>
       </div>
 
-      {/* Trades List */}
       <div className="overflow-auto scrollbar-thin flex-1 table-container">
-        {filteredTrades.length === 0 ? (
+        {isLoading && trades.length === 0 ? (
+          <div className="flex items-center justify-center py-12 text-xs text-[#7e8aaa]">
+            <span className="spinner mr-2" aria-hidden="true" />
+            Loading recent executions…
+          </div>
+        ) : filteredTrades.length === 0 ? (
           <div className="empty-state py-6">
             <span className="empty-state-icon text-2xl" aria-hidden="true">⚡</span>
             <span className="empty-state-title text-sm font-semibold">No executed trades</span>
@@ -243,7 +283,4 @@ function TradesPanel({ trades }: Props) {
   )
 }
 
-// W9-6 — React.memo with shallow compare. Single prop `trades` (array ref)
-// is compared by identity. When the parent re-renders but `trades` hasn't
-// changed (e.g. due to a state update elsewhere), this panel skips.
 export default memo(TradesPanel)

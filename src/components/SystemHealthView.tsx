@@ -2,6 +2,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
+import { AlertTriangle, RefreshCw, X } from 'lucide-react'
 import { getApiUrl, apiFetch } from '@/lib/api'
 
 interface HealthData {
@@ -41,6 +42,8 @@ interface HealthData {
 export default function SystemHealthView() {
   const [health, setHealth] = useState<HealthData | null>(null)
   const [loading, setLoading] = useState(true)
+  // W22-1 — surface fetch failures instead of silently swallowing.
+  const [error, setError] = useState<string | null>(null)
 
   const fetchHealth = async () => {
     try {
@@ -48,8 +51,14 @@ export default function SystemHealthView() {
       const res = await apiFetch(`${apiUrl}/api/system/health`)
       if (res.ok) {
         setHealth(await res.json())
+        setError(null)
+      } else {
+        setError(`System health endpoint unavailable (HTTP ${res.status})`)
       }
-    } catch {}
+    } catch (e) {
+      console.error('[SystemHealthView] Failed to fetch system health:', e)
+      setError(e instanceof Error ? e.message : 'Network error loading system health')
+    }
     setLoading(false)
   }
 
@@ -70,8 +79,32 @@ export default function SystemHealthView() {
 
   if (!health) {
     return (
-      <div className="flex flex-col items-center justify-center h-full text-xs text-[#7e8aaa]">
-        System health telemetry endpoint unavailable.
+      <div
+        className="flex flex-col items-center justify-center h-full text-xs text-[#7e8aaa] gap-3 px-4"
+        role="alert"
+      >
+        {/* W22-1 — previously this state silently swallowed the underlying
+            error. Now we surface it inline with a retry button so the
+            trader can see *why* health telemetry is missing. */}
+        <div className="flex items-center gap-2 text-amber-400">
+          <AlertTriangle className="w-5 h-5" aria-hidden="true" />
+          <span className="font-semibold">System health telemetry endpoint unavailable.</span>
+        </div>
+        {error && (
+          <div className="banner-danger text-xs px-3 py-2 rounded max-w-md flex items-center justify-between gap-3" role="alert">
+            <span className="flex items-center gap-1.5">
+              <AlertTriangle className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+              <span>{error}</span>
+            </span>
+            <button
+              onClick={() => { setError(null); setLoading(true); fetchHealth() }}
+              className="hover:underline text-xs flex items-center gap-1 shrink-0"
+              aria-label="Retry health fetch"
+            >
+              <RefreshCw className="w-3 h-3" aria-hidden="true" /> Retry
+            </button>
+          </div>
+        )}
       </div>
     )
   }
@@ -96,6 +129,34 @@ export default function SystemHealthView() {
           <span className="badge badge-green text-[9.5px]">Process Supervisor Active</span>
         </div>
       </div>
+
+      {/* W22-1 — transient fetch errors during polling. Shown inline so
+          the trader knows the latest poll failed even though stale data
+          is still rendered. Dismissable. */}
+      {error && (
+        <div className="banner-danger text-xs py-2 px-3 flex items-center justify-between" role="alert">
+          <span className="flex items-center gap-1.5">
+            <AlertTriangle className="w-3.5 h-3.5" aria-hidden="true" />
+            <span>{error}</span>
+          </span>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => { setError(null); fetchHealth() }}
+              className="hover:underline text-xs flex items-center gap-1"
+              aria-label="Retry health fetch"
+            >
+              <RefreshCw className="w-3 h-3" aria-hidden="true" /> Retry
+            </button>
+            <button
+              onClick={() => setError(null)}
+              className="hover:underline text-xs flex items-center gap-0.5"
+              aria-label="Dismiss error"
+            >
+              <X className="w-3 h-3" aria-hidden="true" /> Dismiss
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* KPI Cards */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-2.5">

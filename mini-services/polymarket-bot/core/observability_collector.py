@@ -74,6 +74,7 @@ from core.observability import (
     CAT_DATA_SOURCE,
     CAT_EXECUTION,
     CAT_ML,
+    CAT_STRATEGY,
     CAT_SYSTEM,
     record_metric,
 )
@@ -350,6 +351,201 @@ async def _collect_system_metrics() -> None:
         log.debug("[observability_collector] system collection failed: %s", e)
 
 
+# ── W22-7 - collectors for the 9 God-Mode-§54 metrics that were previously
+# declared in METRIC_NAMES but never emitted. Each is independently
+# fault-tolerant (own try/except, debug-level log on failure) so a missing
+# subsystem never blocks the rest of the cycle.
+
+
+async def _collect_data_source_latency() -> None:
+    """Emit ``data_source.latency`` from a single CLOB ``/markets`` probe.
+
+    Calls ``clob_client.health_check()`` (added in W22-7) which performs
+    an unauthenticated ``GET /markets`` round-trip and returns the
+    latency in milliseconds. A connection failure / HTTP error surfaces
+    as ``latency=-1`` with ``error=True`` metadata so the dashboard can
+    distinguish "we measured 250ms" from "we couldn't measure".
+    """
+    try:
+        from core.clob_client import clob_client
+    except Exception as e:
+        log.debug("[observability_collector] clob_client import failed: %s", e)
+        return
+    try:
+        latency_ms = await clob_client.health_check()
+        await record_metric(
+            CAT_DATA_SOURCE, "latency", round(float(latency_ms), 3),
+            source="clob_rest",
+        )
+    except Exception as e:
+        log.debug("[observability_collector] clob health_check failed: %s", e)
+        await record_metric(
+            CAT_DATA_SOURCE, "latency", -1.0,
+            source="clob_rest", error=True, reason=str(e)[:200],
+        )
+
+
+async def _collect_data_source_reconnects() -> None:
+    """Emit ``data_source.reconnects`` from the WebSocket client's counter."""
+    try:
+        from core.ws_client import ws_client
+        reconnects = int(getattr(ws_client, "_reconnect_count", 0))
+        await record_metric(
+            CAT_DATA_SOURCE, "reconnects", float(reconnects),
+            source="websocket",
+        )
+    except Exception as e:
+        log.debug(
+            "[observability_collector] data_source reconnects read failed: %s", e
+        )
+
+
+async def _collect_bot_errors() -> None:
+    """Emit ``bot.errors`` - count of bot-level errors in the last 30 s."""
+    try:
+        from core.data_store import store
+        cutoff = time.time() - 30.0
+        count = store.get_error_count_since(cutoff) if hasattr(
+            store, "get_error_count_since"
+        ) else 0
+        await record_metric(CAT_BOT, "errors", float(count), window_seconds=30)
+    except Exception as e:
+        log.debug("[observability_collector] bot.errors collection failed: %s", e)
+
+
+async def _collect_bot_actions() -> None:
+    """Emit ``bot.actions`` - count of bot-level actions in the last 30 s."""
+    try:
+        from core.data_store import store
+        cutoff = time.time() - 30.0
+        count = store.get_action_count_since(cutoff) if hasattr(
+            store, "get_action_count_since"
+        ) else 0
+        await record_metric(CAT_BOT, "actions", float(count), window_seconds=30)
+    except Exception as e:
+        log.debug("[observability_collector] bot.actions collection failed: %s", e)
+
+
+async def _collect_strategy_metrics() -> None:
+    """Emit strategy.evaluations / signals / rejects per active strategy.
+
+    Iterates ``strategy_registry.get_active_instances()`` and reads each
+    strategy's ``diagnostics()`` counters. The three canonical metrics
+    are read from the nested ``stats`` dict (with a top-level fallback
+    for subclasses that flatten the dict).
+    """
+    try:
+        from strategies.registry import strategy_registry
+    except Exception as e:
+        log.debug(
+            "[observability_collector] strategies.registry import failed: %s", e
+        )
+        return
+    try:
+        active = strategy_registry.get_active_instances()
+        if not active:
+            return
+        for strategy_id, strategy in active.items():
+            try:
+                stats = strategy.diagnostics() if hasattr(
+                    strategy, "diagnostics"
+                ) else {}
+            except Exception as e:
+                log.debug(
+                    "[observability_collector] strategy %s diagnostics() raised: %s",
+                    strategy_id, e,
+                )
+                continue
+            inner = stats.get("stats", {}) if isinstance(stats, dict) else {}
+            name = stats.get("name", strategy_id) if isinstance(stats, dict) else strategy_id
+            evaluations = inner.get("evaluations", stats.get("evaluations", 0)) if isinstance(stats, dict) else 0
+            signals = inner.get("signals", stats.get("signals", 0)) if isinstance(stats, dict) else 0
+            rejects = inner.get("rejects", stats.get("rejects", 0)) if isinstance(stats, dict) else 0
+            await record_metric(
+                CAT_STRATEGY, "evaluations", float(evaluations),
+                strategy=name, strategy_id=strategy_id,
+            )
+            await record_metric(
+                CAT_STRATEGY, "signals", float(signals),
+                strategy=name, strategy_id=strategy_id,
+            )
+            await record_metric(
+                CAT_STRATEGY, "rejects", float(rejects),
+                strategy=name, strategy_id=strategy_id,
+            )
+    except Exception as e:
+        log.debug(
+            "[observability_collector] strategy metrics collection failed: %s", e
+        )
+
+
+async def _collect_execution_latency() -> None:
+    """Emit ``execution.latency`` - median ms of recent executions.
+
+    Reads ``latency_tracker.get_stats(0.5)`` (30-minute window). The
+    existing latency_tracker returns ``{"n_records": N,
+    "decision_latency": {...}, "execution_latency": {...},
+    "total_latency": {...}}`` or ``{"n_records": 0}`` on an empty
+    window. The collector reads ``total_latency.median_ms`` (signal-to-
+    fill end-to-end median) and falls through to ``0.0`` when the window
+    is empty.
+    """
+    try:
+        from core.latency_tracker import latency_tracker
+        stats = latency_tracker.get_stats(0.5)
+        total = stats.get("total_latency", {}) if isinstance(stats, dict) else {}
+        median_ms = float(total.get("median_ms", 0.0))
+        n_records = int(stats.get("n_records", 0)) if isinstance(stats, dict) else 0
+        await record_metric(
+            CAT_EXECUTION, "latency", round(median_ms, 3),
+            window_hours=0.5,
+            sample_count=n_records,
+            p95_ms=float(total.get("p95_ms", 0.0)),
+            p99_ms=float(total.get("p99_ms", 0.0)),
+            min_ms=float(total.get("min_ms", 0.0)),
+            max_ms=float(total.get("max_ms", 0.0)),
+        )
+    except Exception as e:
+        log.debug(
+            "[observability_collector] execution.latency collection failed: %s", e
+        )
+
+
+async def _collect_db_connections() -> None:
+    """Emit ``system.db_connections`` - 1 if the DB backend is live, 0 otherwise."""
+    try:
+        from core.database_manager import db_manager
+        healthy = 1 if (db_manager.is_postgres or db_manager.is_sqlite) else 0
+        await record_metric(
+            CAT_SYSTEM, "db_connections", float(healthy),
+            backend=db_manager.backend_name,
+            is_postgres=bool(db_manager.is_postgres),
+        )
+    except Exception as e:
+        log.debug(
+            "[observability_collector] system.db_connections collection failed: %s", e
+        )
+
+
+async def _collect_queue_health() -> None:
+    """Emit ``system.queue_health`` - count of pending jobs in the job queue."""
+    try:
+        from core.job_queue import job_queue
+        stats = job_queue.get_stats() if hasattr(job_queue, "get_stats") else {}
+        by_status = stats.get("by_status", {}) if isinstance(stats, dict) else {}
+        pending = int(by_status.get("pending", 0))
+        await record_metric(
+            CAT_SYSTEM, "queue_health", float(pending),
+            type="pending_jobs",
+            total_jobs=int(stats.get("total_jobs", 0)) if isinstance(stats, dict) else 0,
+            workers_active=int(stats.get("workers_active", 0)) if isinstance(stats, dict) else 0,
+        )
+    except Exception as e:
+        log.debug(
+            "[observability_collector] system.queue_health collection failed: %s", e
+        )
+
+
 # ── Collection cycle / loop ──────────────────────────────────────────────────
 
 
@@ -369,6 +565,15 @@ async def _collect_cycle() -> None:
     await _collect_execution_metrics()
     await _collect_ml_metrics()
     await _collect_system_metrics()
+    # W22-7 - God-Mode §54 metrics.
+    await _collect_data_source_latency()
+    await _collect_data_source_reconnects()
+    await _collect_bot_errors()
+    await _collect_bot_actions()
+    await _collect_strategy_metrics()
+    await _collect_execution_latency()
+    await _collect_db_connections()
+    await _collect_queue_health()
     # Collector heartbeat — 1.0 per cycle. The dashboard can sum this
     # over a window to compute "collector cycles in last N minutes".
     await record_metric(

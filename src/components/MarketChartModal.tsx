@@ -59,7 +59,12 @@ export default function MarketChartModal({ tokenId, slug, onClose, onOrderPlaced
             setPrice(String(json.bars[json.bars.length - 1].close.toFixed(3)))
           }
         }
-      } catch {}
+      } catch (e) {
+        console.error('[MarketChartModal] Failed to fetch OHLCV bars:', e)
+        // W22-1 — surface via the tradeMsg banner (the modal already has
+        // a visible status banner) so the trader knows the chart is stale.
+        setTradeMsg({ ok: false, text: 'Network error loading price history — chart may be stale' })
+      }
       setLoading(false)
     }
     fetchOhlcv()
@@ -87,7 +92,8 @@ export default function MarketChartModal({ tokenId, slug, onClose, onOrderPlaced
       } else {
         setTradeMsg({ ok: false, text: body?.detail || `Risk gate rejected: HTTP ${res.status}` })
       }
-    } catch {
+    } catch (e) {
+      console.error('[MarketChartModal] Order submission failed:', e)
       setTradeMsg({ ok: false, text: 'Order submission failed — check backend connectivity' })
     }
     setPlacing(false)

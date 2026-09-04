@@ -1,9 +1,23 @@
-// components/LeaderboardPanel.tsx
-// Strategy leaderboard ranked by reproducible risk-adjusted net performance.
+// components/LeaderboardPanel.tsx — Strategy leaderboard ranked by
+// reproducible risk-adjusted net performance.
+//
+// W22-5 — Migrated from the self-managed 6-second REST polling loop to
+// the hybrid `useRealtimeData` hook. The panel now:
+//   1. REST-prefetches /api/leaderboard on mount.
+//   2. Subscribes to the `metrics` WS channel for live push updates.
+//      The `metrics` channel pushes the full BotSnapshot, whose shape
+//      doesn't match the LeaderboardResponse `{ ranked: StrategyRow[] }`
+//      the panel renders. To avoid clobbering the typed state with
+//      mismatched data, the hook is given a `validate` predicate that
+//      drops any payload missing the `ranked` array.
+//   3. Falls back to polling /api/leaderboard every 10s when the WS
+//      isn't connected.
+//   4. Renders a "● Live" / "⟳ Polling" badge so the trader can tell at
+//      a glance whether the rankings are real-time or lagged.
 'use client'
 
-import { useEffect, useState } from 'react'
-import { getApiUrl, apiFetch } from '@/lib/api'
+import { useRealtimeData } from '@/hooks/useRealtimeData'
+import { Badge } from '@/components/ui/badge'
 
 interface StrategyRow {
   strategy: string
@@ -17,31 +31,60 @@ interface StrategyRow {
   risk_adjusted_score: number
 }
 
+interface LeaderboardResponse {
+  ranked?: StrategyRow[]
+}
+
+// W22-5 — type guard for the metrics WS channel. The channel pushes
+// the full BotSnapshot by default; only payloads that look like a
+// LeaderboardResponse (have the `ranked` array) are accepted. When the
+// payload doesn't match, the data state is left untouched and the REST
+// polling continues to drive the displayed rankings.
+function isLeaderboardPayload(d: unknown): boolean {
+  if (!d || typeof d !== 'object') return false
+  const obj = d as Record<string, unknown>
+  return Array.isArray(obj.ranked)
+}
+
 export default function LeaderboardPanel() {
-  const [rows, setRows] = useState<StrategyRow[]>([])
+  const { data, isLoading, isRealtime } = useRealtimeData<LeaderboardResponse>(
+    '/api/leaderboard',
+    {
+      wsChannel: 'metrics',
+      pollInterval: 10000,
+      validate: isLeaderboardPayload,
+    },
+  )
 
-  useEffect(() => {
-    const fetchLeaderboard = async () => {
-      try {
-        const apiUrl = getApiUrl()
-        const res = await apiFetch(`${apiUrl}/api/leaderboard`)
-        if (res.ok) {
-          const data = await res.json()
-          setRows(data.ranked ?? [])
-        }
-      } catch {}
-    }
+  const rows: StrategyRow[] = data?.ranked ?? []
 
-    fetchLeaderboard()
-    const timer = setInterval(fetchLeaderboard, 6000)
-    return () => clearInterval(timer)
-  }, [])
+  if (isLoading && rows.length === 0) {
+    return (
+      <div className="card p-3 flex flex-col justify-between bg-[#13161e] border border-[#1f2335]">
+        <div className="card-header pb-1.5 border-b border-[#1f2335] flex justify-between items-center">
+          <span className="card-title text-xs font-bold text-[#dde1ed]">🏆 Strategy Leaderboard</span>
+          <span className="badge badge-dim text-[9.5px]">Risk-Adjusted</span>
+        </div>
+        <div className="flex items-center justify-center py-6 text-xs text-[#7e8aaa]">
+          <span className="spinner mr-2" aria-hidden="true" />
+          Loading leaderboard…
+        </div>
+      </div>
+    )
+  }
 
   if (rows.length === 0) {
     return (
       <div className="card p-3 flex flex-col justify-between bg-[#13161e] border border-[#1f2335]">
         <div className="card-header pb-1.5 border-b border-[#1f2335] flex justify-between items-center">
-          <span className="card-title text-xs font-bold text-[#dde1ed]">🏆 Strategy Leaderboard</span>
+          <div className="flex items-center gap-2">
+            <span className="card-title text-xs font-bold text-[#dde1ed]">🏆 Strategy Leaderboard</span>
+            {isRealtime ? (
+              <Badge variant="success" className="text-[9.5px] py-0.5">● Live</Badge>
+            ) : (
+              <Badge variant="warning" className="text-[9.5px] py-0.5">⟳ Polling</Badge>
+            )}
+          </div>
           <span className="badge badge-dim text-[9.5px]">Risk-Adjusted</span>
         </div>
         <div className="flex flex-col items-center justify-center py-6 text-xs text-[#7e8aaa] text-center">
@@ -56,7 +99,14 @@ export default function LeaderboardPanel() {
   return (
     <div className="card flex flex-col bg-[#13161e] border border-[#1f2335] shadow-md">
       <div className="card-header p-3 border-b border-[#1f2335] flex justify-between items-center">
-        <span className="card-title text-xs font-bold text-[#dde1ed]">🏆 Strategy Leaderboard</span>
+        <div className="flex items-center gap-2">
+          <span className="card-title text-xs font-bold text-[#dde1ed]">🏆 Strategy Leaderboard</span>
+          {isRealtime ? (
+            <Badge variant="success" className="text-[9.5px] py-0.5">● Live</Badge>
+          ) : (
+            <Badge variant="warning" className="text-[9.5px] py-0.5">⟳ Polling</Badge>
+          )}
+        </div>
         <span className="badge badge-amber text-[9.5px]">Ranked by Score</span>
       </div>
       <div className="p-2.5 space-y-1.5">

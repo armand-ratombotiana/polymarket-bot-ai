@@ -240,6 +240,20 @@ class ClobClient:
     async def get_last_trade_price(self, token_id: str) -> dict:
         return await self._get("/last-trade-price", params={"token_id": token_id})
 
+    async def health_check(self) -> float:
+        """W22-7 - Lightweight liveness probe of the CLOB REST endpoint.
+
+        Returns the round-trip latency in milliseconds (float) of a single
+        unauthenticated ``GET /markets`` call. Used by the observability
+        auto-collector to emit the canonical ``data_source.latency`` metric
+        (God Mode §54).
+        """
+        client = await self._ensure_http()
+        start = time.time()
+        resp = await client.get("/markets")
+        resp.raise_for_status()
+        return (time.time() - start) * 1000.0
+
     # ── Authenticated endpoints ────────────────────────────────────────────
 
     async def get_open_orders(self) -> list[dict]:

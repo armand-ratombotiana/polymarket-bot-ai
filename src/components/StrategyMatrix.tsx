@@ -2,6 +2,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
+import { AlertTriangle, X } from 'lucide-react'
 import { getApiUrl, apiFetch } from '@/lib/api'
 
 interface StrategyMeta {
@@ -47,6 +48,12 @@ export default function StrategyMatrix() {
   const [search, setSearch] = useState('')
   const [toggling, setToggling] = useState<string | null>(null)
   const [stubNotice, setStubNotice] = useState<string | null>(null)
+  // W22-1 — surface fetch / toggle failures instead of silently swallowing.
+  // Each error string is keyed by the operation that produced it so the
+  // banner can show a useful "which call failed" prefix.
+  const [catalogError, setCatalogError] = useState<string | null>(null)
+  const [perfError, setPerfError] = useState<string | null>(null)
+  const [toggleError, setToggleError] = useState<string | null>(null)
 
   const fetchCatalog = async () => {
     try {
@@ -55,8 +62,14 @@ export default function StrategyMatrix() {
       if (res.ok) {
         const json = await res.json()
         setCatalog(json.catalog || [])
+        setCatalogError(null)
+      } else {
+        setCatalogError(`Failed to load strategy catalog (HTTP ${res.status})`)
       }
-    } catch {}
+    } catch (e) {
+      console.error('[StrategyMatrix] Failed to fetch strategy catalog:', e)
+      setCatalogError(e instanceof Error ? e.message : 'Network error loading strategy catalog')
+    }
   }
 
   // U14: live per-strategy P&L / win-rate / trade count from the leaderboard.
@@ -71,8 +84,14 @@ export default function StrategyMatrix() {
         const map: Record<string, StrategyPerf> = {}
         for (const r of rows) map[r.strategy] = r
         setPerf(map)
+        setPerfError(null)
+      } else {
+        setPerfError(`Failed to load per-strategy performance (HTTP ${res.status})`)
       }
-    } catch {}
+    } catch (e) {
+      console.error('[StrategyMatrix] Failed to fetch per-strategy performance:', e)
+      setPerfError(e instanceof Error ? e.message : 'Network error loading per-strategy performance')
+    }
   }
 
   useEffect(() => {
@@ -94,15 +113,26 @@ export default function StrategyMatrix() {
     }
 
     setToggling(strategyId)
+    setToggleError(null)
     try {
       const apiUrl = getApiUrl()
-      await apiFetch(`${apiUrl}/api/strategies/toggle`, {
+      const res = await apiFetch(`${apiUrl}/api/strategies/toggle`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ strategy_name: strategyId, enabled: !currentStatus }),
       })
-      await fetchCatalog()
-    } catch {}
+      if (!res.ok) {
+        const body = await res.json().catch(() => null)
+        const msg = body?.detail || `Risk gate rejected toggle (HTTP ${res.status})`
+        console.error('[StrategyMatrix] Strategy toggle rejected:', msg)
+        setToggleError(msg)
+      } else {
+        await fetchCatalog()
+      }
+    } catch (e) {
+      console.error('[StrategyMatrix] Failed to toggle strategy:', e)
+      setToggleError(e instanceof Error ? e.message : 'Network error toggling strategy')
+    }
     setToggling(null)
   }
 
@@ -165,6 +195,43 @@ export default function StrategyMatrix() {
           <span>⚠️ {stubNotice}</span>
           <button onClick={() => setStubNotice(null)} className="text-white hover:underline text-xs ml-2">
             Dismiss
+          </button>
+        </div>
+      )}
+
+      {/* W22-1 — Error banners for fetch / toggle failures. Previously
+          these errors were silently swallowed by `} catch {}`; now they
+          surface inline with a dismiss control. */}
+      {catalogError && (
+        <div className="banner-danger mx-4 mt-2 text-xs py-2 px-3 flex items-center justify-between" role="alert">
+          <span className="flex items-center gap-1.5">
+            <AlertTriangle className="w-3.5 h-3.5" aria-hidden="true" />
+            <span><strong>Catalog:</strong> {catalogError}</span>
+          </span>
+          <button onClick={() => setCatalogError(null)} className="hover:underline text-xs ml-2 flex items-center gap-0.5" aria-label="Dismiss catalog error">
+            <X className="w-3 h-3" aria-hidden="true" /> Dismiss
+          </button>
+        </div>
+      )}
+      {perfError && (
+        <div className="banner-warning mx-4 mt-2 text-xs py-2 px-3 flex items-center justify-between" role="alert">
+          <span className="flex items-center gap-1.5">
+            <AlertTriangle className="w-3.5 h-3.5" aria-hidden="true" />
+            <span><strong>Performance:</strong> {perfError}</span>
+          </span>
+          <button onClick={() => setPerfError(null)} className="hover:underline text-xs ml-2 flex items-center gap-0.5" aria-label="Dismiss performance error">
+            <X className="w-3 h-3" aria-hidden="true" /> Dismiss
+          </button>
+        </div>
+      )}
+      {toggleError && (
+        <div className="banner-danger mx-4 mt-2 text-xs py-2 px-3 flex items-center justify-between" role="alert">
+          <span className="flex items-center gap-1.5">
+            <AlertTriangle className="w-3.5 h-3.5" aria-hidden="true" />
+            <span><strong>Toggle failed:</strong> {toggleError}</span>
+          </span>
+          <button onClick={() => setToggleError(null)} className="hover:underline text-xs ml-2 flex items-center gap-0.5" aria-label="Dismiss toggle error">
+            <X className="w-3 h-3" aria-hidden="true" /> Dismiss
           </button>
         </div>
       )}

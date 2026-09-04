@@ -2,6 +2,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
+import { AlertTriangle, RefreshCw, X } from 'lucide-react'
 import { getApiUrl, apiFetch } from '@/lib/api'
 
 type TableName = 'market_snapshots' | 'orderbook_ticks' | 'fundamental_news' | 'ml_feature_store'
@@ -17,6 +18,8 @@ export default function DatabaseExplorerView() {
   const [selectedTable, setSelectedTable] = useState<TableName>('market_snapshots')
   const [records, setRecords] = useState<any[]>([])
   const [loading, setLoading] = useState(true)
+  // W22-1 — surface fetch failures instead of silently swallowing.
+  const [error, setError] = useState<string | null>(null)
 
   const fetchRecords = async (table: TableName) => {
     setLoading(true)
@@ -26,8 +29,14 @@ export default function DatabaseExplorerView() {
       if (res.ok) {
         const json = await res.json()
         setRecords(json.records || [])
+        setError(null)
+      } else {
+        setError(`Failed to load ${table} records (HTTP ${res.status})`)
       }
-    } catch {}
+    } catch (e) {
+      console.error('[DatabaseExplorerView] Failed to fetch table records:', e)
+      setError(e instanceof Error ? e.message : `Network error loading ${table} records`)
+    }
     setLoading(false)
   }
 
@@ -78,6 +87,32 @@ export default function DatabaseExplorerView() {
           </button>
         ))}
       </div>
+
+      {/* W22-1 — fetch-error banner (previously silently swallowed). */}
+      {error && (
+        <div className="banner-danger text-xs py-2 px-3 flex items-center justify-between" role="alert">
+          <span className="flex items-center gap-1.5">
+            <AlertTriangle className="w-3.5 h-3.5" aria-hidden="true" />
+            <span>{error}</span>
+          </span>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => fetchRecords(selectedTable)}
+              className="hover:underline text-xs flex items-center gap-1"
+              aria-label="Retry table fetch"
+            >
+              <RefreshCw className="w-3 h-3" aria-hidden="true" /> Retry
+            </button>
+            <button
+              onClick={() => setError(null)}
+              className="hover:underline text-xs flex items-center gap-0.5"
+              aria-label="Dismiss error"
+            >
+              <X className="w-3 h-3" aria-hidden="true" /> Dismiss
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Data Table */}
       <div className="card p-3 bg-[#0e1015] border border-[#1f2335] flex-1 flex flex-col">

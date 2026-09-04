@@ -101,8 +101,15 @@ export default function DeepAnalysisView({ onOpenChart, onSelectMarket }: DeepAn
       if (res.ok) {
         const json = await res.json()
         setSingleAnalysis(json)
+      } else {
+        // W22-1 — previously silently swallowed; now surfaced via the
+        // shared `error` state so the existing banner shows the reason.
+        setError(`Failed to load market analysis (HTTP ${res.status})`)
       }
-    } catch {}
+    } catch (e) {
+      console.error('[DeepAnalysisView] Failed to fetch single-market analysis:', e)
+      setError(e instanceof Error ? e.message : 'Network error loading single-market analysis')
+    }
     setAnalyzingSingle(false)
   }
 

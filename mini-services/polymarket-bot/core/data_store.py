@@ -175,6 +175,16 @@ class DataStore:
         # Events log (max 500 entries)
         self.event_log: list[str] = []
 
+        # W22-7 - bot-level error / action time-series for the canonical
+        # bot.errors / bot.actions observability metrics (God Mode §54).
+        # Each entry is the unix timestamp of the event so a windowed count
+        # is a single list comprehension. Cap at 10k entries guards against
+        # a runaway loop filling memory if the collector stops.
+        self._errors: list[float] = []
+        self._actions: list[float] = []
+        self._ERROR_CAP: int = 10_000
+        self._ACTION_CAP: int = 10_000
+
     # ── Order Book ───────────────────────────────────────────────────────
 
     async def update_order_book(self, book: OrderBook) -> None:
@@ -337,6 +347,49 @@ class DataStore:
     async def get_recent_events(self, n: int = 20) -> list[str]:
         async with self._lock:
             return list(self.event_log[-n:])
+
+    # ── W22-7 - Bot error / action counters ─────────────────────────────
+
+    async def record_error(self) -> None:
+        """Append time.time() to the bot-level error timestamp series.
+
+        Used by the observability collector (via get_error_count_since)
+        to emit the canonical bot.errors metric (God Mode §54). The cap
+        (_ERROR_CAP = 10k entries) drops the oldest 10% when reached.
+        """
+        async with self._lock:
+            self._errors.append(time.time())
+            if len(self._errors) > self._ERROR_CAP:
+                drop = max(1, self._ERROR_CAP // 10)
+                self._errors = self._errors[drop:]
+
+    async def record_action(self) -> None:
+        """Append time.time() to the bot-level action timestamp series.
+
+        Used by the observability collector (via get_action_count_since)
+        to emit the canonical bot.actions metric (God Mode §54). An
+        "action" is any meaningful bot-level decision (signal / order /
+        fill). Same cap policy as record_error.
+        """
+        async with self._lock:
+            self._actions.append(time.time())
+            if len(self._actions) > self._ACTION_CAP:
+                drop = max(1, self._ACTION_CAP // 10)
+                self._actions = self._actions[drop:]
+
+    def get_error_count_since(self, since_ts: float) -> int:
+        """Count error events with timestamp >= since_ts.
+
+        Sync - pure list-filter read, no I/O. Lock-free is safe because
+        the worst race is a concurrent record_error appending a single
+        entry that we may or may not see (both outcomes are valid
+        counts; the next collector cycle picks up the new entry).
+        """
+        return sum(1 for ts in self._errors if ts >= since_ts)
+
+    def get_action_count_since(self, since_ts: float) -> int:
+        """Count action events with timestamp >= since_ts."""
+        return sum(1 for ts in self._actions if ts >= since_ts)
 
     # ── Disk Persistence ─────────────────────────────────────────────────
 

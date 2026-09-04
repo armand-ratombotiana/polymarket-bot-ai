@@ -2,6 +2,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
+import { AlertTriangle, X } from 'lucide-react'
 import { getApiUrl, apiFetch } from '@/lib/api'
 
 interface ReliabilityBin {
@@ -68,6 +69,12 @@ export default function AIMLCommandCenter() {
   const [searchResults, setSearchResults] = useState<Array<{ market: { title?: string; slug?: string }; score: number }>>([])
   const [searching, setSearching] = useState(false)
   const [featureCategory, setFeatureCategory] = useState<'ALL' | 'MICRO' | 'REGIME' | 'FUNDAMENTAL'>('ALL')
+  // W22-1 — surface fetch / retrain / search failures instead of silently
+  // swallowing them. Each error string is keyed by the operation that
+  // produced it so the banner can show a useful "which call failed" prefix.
+  const [fetchError, setFetchError] = useState<string | null>(null)
+  const [retrainError, setRetrainError] = useState<string | null>(null)
+  const [searchError, setSearchError] = useState<string | null>(null)
 
   const fetchData = async () => {
     try {
@@ -80,7 +87,15 @@ export default function AIMLCommandCenter() {
       if (resM.ok) setMetrics(await resM.json())
       if (resR.ok) setRegistry(await resR.json())
       if (resD.ok) setDrift(await resD.json())
-    } catch {}
+      if (!resM.ok && !resR.ok && !resD.ok) {
+        setFetchError('AI/ML telemetry endpoints unavailable (all three returned non-OK)')
+      } else {
+        setFetchError(null)
+      }
+    } catch (e) {
+      console.error('[AIMLCommandCenter] Failed to fetch ML telemetry:', e)
+      setFetchError(e instanceof Error ? e.message : 'Network error loading AI/ML telemetry')
+    }
   }
 
   useEffect(() => {
@@ -91,11 +106,22 @@ export default function AIMLCommandCenter() {
 
   const handleRetrain = async () => {
     setRetraining(true)
+    setRetrainError(null)
     try {
       const apiUrl = getApiUrl()
-      await apiFetch(`${apiUrl}/api/ml/retrain`, { method: 'POST' })
-      await fetchData()
-    } catch {}
+      const res = await apiFetch(`${apiUrl}/api/ml/retrain`, { method: 'POST' })
+      if (!res.ok) {
+        const body = await res.json().catch(() => null)
+        const msg = body?.detail || `Retrain rejected (HTTP ${res.status})`
+        console.error('[AIMLCommandCenter] Retrain rejected:', msg)
+        setRetrainError(msg)
+      } else {
+        await fetchData()
+      }
+    } catch (e) {
+      console.error('[AIMLCommandCenter] Failed to retrain models:', e)
+      setRetrainError(e instanceof Error ? e.message : 'Network error retraining models')
+    }
     setRetraining(false)
   }
 
@@ -103,14 +129,22 @@ export default function AIMLCommandCenter() {
     e.preventDefault()
     if (!searchQuery.trim()) return
     setSearching(true)
+    setSearchError(null)
     try {
       const apiUrl = getApiUrl()
       const res = await apiFetch(`${apiUrl}/api/ai/search?query=${encodeURIComponent(searchQuery)}&top_k=6`)
       if (res.ok) {
         const json = await res.json()
         setSearchResults(json.results || [])
+      } else {
+        const msg = `Semantic search failed (HTTP ${res.status})`
+        console.error('[AIMLCommandCenter] Semantic search failed:', msg)
+        setSearchError(msg)
       }
-    } catch {}
+    } catch (e) {
+      console.error('[AIMLCommandCenter] Semantic search network error:', e)
+      setSearchError(e instanceof Error ? e.message : 'Network error running semantic search')
+    }
     setSearching(false)
   }
 
@@ -168,6 +202,46 @@ export default function AIMLCommandCenter() {
           </button>
         </div>
       </div>
+
+      {/* W22-1 — Error banners for fetch / retrain / search failures.
+          Previously these errors were silently swallowed by `} catch {}`;
+          now they surface inline with a dismiss control. */}
+      {fetchError && (
+        <div className="banner-danger text-xs px-3 py-2 rounded flex justify-between items-center" role="alert">
+          <span className="flex items-center gap-1.5">
+            <AlertTriangle className="w-3.5 h-3.5" aria-hidden="true" />
+            <span><strong>Telemetry:</strong> {fetchError}</span>
+          </span>
+          <div className="flex items-center gap-2">
+            <button onClick={() => fetchData()} className="hover:underline text-xs">Retry</button>
+            <button onClick={() => setFetchError(null)} className="hover:underline text-xs flex items-center gap-0.5" aria-label="Dismiss telemetry error">
+              <X className="w-3 h-3" aria-hidden="true" /> Dismiss
+            </button>
+          </div>
+        </div>
+      )}
+      {retrainError && (
+        <div className="banner-danger text-xs px-3 py-2 rounded flex justify-between items-center" role="alert">
+          <span className="flex items-center gap-1.5">
+            <AlertTriangle className="w-3.5 h-3.5" aria-hidden="true" />
+            <span><strong>Retrain failed:</strong> {retrainError}</span>
+          </span>
+          <button onClick={() => setRetrainError(null)} className="hover:underline text-xs flex items-center gap-0.5" aria-label="Dismiss retrain error">
+            <X className="w-3 h-3" aria-hidden="true" /> Dismiss
+          </button>
+        </div>
+      )}
+      {searchError && (
+        <div className="banner-warning text-xs px-3 py-2 rounded flex justify-between items-center" role="alert">
+          <span className="flex items-center gap-1.5">
+            <AlertTriangle className="w-3.5 h-3.5" aria-hidden="true" />
+            <span><strong>Search failed:</strong> {searchError}</span>
+          </span>
+          <button onClick={() => setSearchError(null)} className="hover:underline text-xs flex items-center gap-0.5" aria-label="Dismiss search error">
+            <X className="w-3 h-3" aria-hidden="true" /> Dismiss
+          </button>
+        </div>
+      )}
 
       {/* 4-Member Ensemble Weights Strip */}
       <div className="bg-[#0e1015] border border-[#1f2335] rounded-lg p-3">

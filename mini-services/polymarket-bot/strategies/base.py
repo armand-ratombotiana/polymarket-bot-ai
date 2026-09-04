@@ -189,7 +189,17 @@ class BaseStrategy(StrategyContract):
         # place trades / hit errors; the base class only initializes the
         # shape so ``diagnostics()`` never raises ``KeyError`` on a fresh
         # instance.
-        self._stats: dict[str, int] = {"signals": 0, "trades": 0, "errors": 0}
+        # W22-7 - extended with evaluations + rejects counters for the
+        # canonical strategy.evaluations / strategy.rejects observability
+        # metrics (God Mode §54). Default 0 - concrete strategies
+        # increment them in their _run loops.
+        self._stats: dict[str, int] = {
+            "signals": 0,
+            "trades": 0,
+            "errors": 0,
+            "evaluations": 0,
+            "rejects": 0,
+        }
         # W19-2 — last error message (if any) for the diagnostics surface.
         # ``None`` means "no error recorded"; strategies set this when they
         # catch an unexpected exception inside ``_run`` so the operator
