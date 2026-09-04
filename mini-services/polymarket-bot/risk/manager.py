@@ -160,6 +160,36 @@ class InstitutionalRiskEngine:
                 ))
             except Exception:
                 pass
+            # W22-4 — also record a rejected-opportunity row so the
+            # operator dashboard surfaces "what was rejected + why" in
+            # the analytics roll-up. Mirrors the shadow-trade wiring:
+            # fire-and-forget, wrapped in try/except: pass so it can
+            # never alter the rejection return value or block the caller.
+            try:
+                from core.rejected_opportunities import (
+                    record_rejected_opportunity,
+                )
+                import asyncio as _asyncio_mod
+                _asyncio_mod.create_task(record_rejected_opportunity(
+                    token_id=order.token_id,
+                    strategy=order.strategy or "",
+                    signal_action=(
+                        order.side.value
+                        if hasattr(order.side, 'value') else str(order.side)
+                    ),
+                    signal_price=float(order.price) if order.price else 0.0,
+                    signal_size=float(order.size) if order.size else 0.0,
+                    predicted_edge=0.0,
+                    confidence=0.0,
+                    rejection_reason=result[1],
+                    rejection_details={
+                        "raw_message": result[1],
+                        "paper": bool(getattr(order, "paper", False)),
+                    },
+                    correlation_id=getattr(order, 'decision_id', None),
+                ))
+            except Exception:
+                pass
         return result
 
     async def _check_order_impl(self, order: Order) -> tuple[bool, str]:

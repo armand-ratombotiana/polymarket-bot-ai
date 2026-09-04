@@ -61,11 +61,11 @@ STRATEGY_CATALOG: list[StrategyMeta] = [
     # ── Group A: Market Making & Liquidity Provision (8) ──
     StrategyMeta("mm_avellaneda_stoikov", "Avellaneda-Stoikov MM", "market_making", "Reservation price with inventory skewing & volatility bounds", "Medium", True, status=STATUS_IMPLEMENTED),
     StrategyMeta("mm_glft_optimal", "GLFT Optimal Quoter", "market_making", "Gueant-Tapia-Manziadi intensity-based optimal quote spread", "Medium", False),
-    StrategyMeta("mm_asymmetric_spread", "Asymmetric Spread Skew", "market_making", "Skewed bid/ask width based on directional order flow momentum", "Medium", False),
+    StrategyMeta("mm_asymmetric_spread", "Asymmetric Spread Skew", "market_making", "Skewed bid/ask width based on directional order flow momentum", "Medium", False, status=STATUS_IMPLEMENTED),
     StrategyMeta("mm_volatility_adaptive", "Volatility Adaptive MM", "market_making", "Dynamic spread widening/narrowing based on ATR & realized vol", "Low", False),
     StrategyMeta("mm_rebate_harvester", "Rebate Harvester", "market_making", "Maximizes maker fee rebates at top-of-book with queue priority", "Low", False),
     StrategyMeta("mm_ofi_microstructure", "Order Flow Imbalance MM", "market_making", "Real-time micro-depth OFI quotes against toxic adverse selection", "Medium", False),
-    StrategyMeta("mm_grid_liquidity", "Grid Trading Liquidity", "market_making", "Multi-level layered limit orders with step-ladder profit taking", "Medium", False),
+    StrategyMeta("mm_grid_liquidity", "Grid Trading Liquidity", "market_making", "Multi-level layered limit orders with step-ladder profit taking", "Medium", False, status=STATUS_IMPLEMENTED),
     StrategyMeta("mm_poisson_arrival", "Poisson Arrival Quoter", "market_making", "Quoting calibrated to continuous trade arrival intensity lambda(p)", "Low", False),
 
     # ── Group B: Arbitrage & Relative Value (8) ──
@@ -74,7 +74,7 @@ STRATEGY_CATALOG: list[StrategyMeta] = [
     StrategyMeta("arb_gamma_clob_parity", "Gamma-CLOB Parity Arb", "arbitrage", "Exploits pricing dislocations between Gamma AMM and CLOB books", "Low", False),
     StrategyMeta("arb_synthetic_straddle", "Synthetic Straddle Arb", "arbitrage", "Exploits implied volatility mispricing on paired event outcomes", "Medium", False),
     StrategyMeta("arb_temporal_expiry", "Temporal Expiry Curve", "arbitrage", "Relative value across same-underlying contracts with differing expiries", "Low", False),
-    StrategyMeta("arb_cross_correlation", "Cross-Category Arb", "arbitrage", "Pairs trading on economically correlated event groups (crypto/macro)", "Medium", False),
+    StrategyMeta("arb_cross_correlation", "Cross-Category Arb", "arbitrage", "Pairs trading on economically correlated event groups (crypto/macro)", "Medium", False, status=STATUS_IMPLEMENTED),
     StrategyMeta("arb_cluster_dislocation", "Cluster Dislocation Arb", "arbitrage", "Divergence capture in clustered multi-market question groups", "Low", False),
     StrategyMeta("arb_cyclic_triangle", "Cyclic Triangle Arb", "arbitrage", "Triangle arbitrage across multi-condition chained prediction markets", "Low", False),
 
@@ -99,14 +99,14 @@ STRATEGY_CATALOG: list[StrategyMeta] = [
     StrategyMeta("mom_micro_price_accel", "Micro-Price Acceleration", "momentum", "Fast execution following micro-price acceleration (P_micro - P_mid)", "High", False),
 
     # ── Group E: Event-Driven, Sentiment & Intelligence (8) ──
-    StrategyMeta("event_news_sentiment", "News Sentiment Breakout", "event_driven", "NLP sentiment scoring on breaking news feeds to trade probability shifts", "Medium", False),
+    StrategyMeta("event_news_sentiment", "News Sentiment Breakout", "event_driven", "NLP sentiment scoring on breaking news feeds to trade probability shifts", "Medium", False, status=STATUS_IMPLEMENTED),
     StrategyMeta("event_social_volume", "Social Volume Spike", "event_driven", "Detects sudden surges in social mention velocity to trade news early", "High", False),
     StrategyMeta("event_poll_discrepancy", "Polling Gap Exploiter", "event_driven", "Exploits statistical gaps between real-world polling and market prices", "Medium", False),
     StrategyMeta("event_oracle_dispute", "Oracle Dispute Sniper", "event_driven", "Positions ahead of UMA resolution disputes and bond challenges", "High", False),
     StrategyMeta("event_election_momentum", "Election Momentum Tracker", "event_driven", "Tracks polling momentum shifts in political & election markets", "Medium", False),
     StrategyMeta("event_macro_straddle", "Macro Announcement Straddle", "event_driven", "Pre-positions ahead of CPI/FOMC/jobs reports using straddle execution", "Medium", False),
     StrategyMeta("event_whale_follower", "Whale Block Order Follower", "event_driven", "Detects institutional block orders (> $5,000) and rides market impact", "Medium", False),
-    StrategyMeta("event_resolution_sniper", "Resolution Expiry Sniper", "event_driven", "High-conviction sniper executing in final 24h of near-certain events", "Low", False),
+    StrategyMeta("event_resolution_sniper", "Resolution Expiry Sniper", "event_driven", "High-conviction sniper executing in final 24h of near-certain events", "Low", False, status=STATUS_IMPLEMENTED),
 
     # ── Group F: Machine Learning & Reinforcement Learning (10) ──
     StrategyMeta("ml_lightgbm_boost", "LightGBM Gradient Boost", "machine_learning", "Ultra-fast gradient boosted decision tree classifier with calibrated probs", "Medium", False),
@@ -135,6 +135,12 @@ _IMPLEMENTED_STRATEGY_CLASSES: dict[str, str] = {
     "stat_ornstein_uhlenbeck": "strategies.mean_reversion.MeanReversionStrategy",
     "mom_macd_histogram": "strategies.momentum.MomentumStrategy",
     "ml_isotonic_calibrated": "strategies.value.ValueStrategy",
+    # The five W22-3 additions — promoted from PLANNED to IMPLEMENTED.
+    "arb_cross_correlation": "strategies.stat_arb.StatisticalArbitrage",
+    "event_news_sentiment": "strategies.event_driven.EventDriven",
+    "event_resolution_sniper": "strategies.convergence.Convergence",
+    "mm_asymmetric_spread": "strategies.spread_capture.SpreadCapture",
+    "mm_grid_liquidity": "strategies.liquidity.LiquidityProvision",
 }
 
 # Legacy aliases — the registry accepts these alternative ids for backward

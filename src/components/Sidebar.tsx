@@ -19,6 +19,7 @@ export type NavSection =
   | 'portfolio-trades'
   | 'strategies-registry'
   | 'strategies-arbitrage'
+  | 'strategies-performance'
   | 'intelligence-analysis'
   | 'intelligence-aiml'
   | 'intelligence-copilot'
@@ -106,6 +107,11 @@ const NAV_GROUPS: NavGroup[] = [
     items: [
       { id: 'strategies-registry', labelKey: 'nav.strategies', label: 'Strategy Registry', shortLabel: 'Strategies', icon: '⊗', kbd: '5', group: 'strategies' },
       { id: 'strategies-arbitrage', labelKey: 'nav.arbitrage', label: 'Arbitrage', shortLabel: 'Arbitrage', icon: '⇌', kbd: '6', group: 'strategies' },
+      // W23-5 — Strategy Performance dashboard: per-strategy P&L, win rate,
+      // Sharpe / Sortino / Calmar, equity overlay, and risk-adjusted ranking.
+      // Sits next to the Strategy Registry + Arbitrage so all strategy-side
+      // panels live under the same sidebar group.
+      { id: 'strategies-performance', labelKey: 'nav.strategies_performance', label: 'Performance', shortLabel: 'Perf', icon: '◷', group: 'strategies' },
     ],
   },
   {

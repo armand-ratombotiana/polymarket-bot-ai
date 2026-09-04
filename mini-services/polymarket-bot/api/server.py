@@ -77,8 +77,19 @@ from core.logging_config import (
 )
 from core.data_store import Order, Side, store
 from core.fundamental_ingest import fundamental_engine
+# W23-2 — Signal→order→fill pipeline latency tracker. Same singleton
+# pattern, same coarse-grained ``threading.Lock`` discipline as the
+# ``rate_limit_tracker`` / ``profiler`` siblings above. The strategy
+# (``strategies/signal_trader.py::_ml_signal``), order
+# (``strategies/base.py::submit_order``), and fill
+# (``paper/simulator.py::_execute_fill`` /
+# ``core/live_fill_monitor.py::_process_trade``) paths each call
+# ``latency_tracker.record_*`` so the ``GET /api/latency/stats`` /
+# ``GET /api/latency/recent`` routes below can surface p50/p95/p99
+# pipeline latencies without an external tracing layer.
+from core.latency_tracker import latency_tracker
 from core.gamma_client import gamma_client
-from core.portfolio import compute_exposure, compute_reconciliation, leaderboard
+from core.portfolio import compute_exposure, compute_reconciliation, leaderboard, strategy_performance
 from core.position_manager import position_manager
 # W13-1 — Prometheus metrics. Module-level singleton registry covering
 # HTTP / trading / ML / system surfaces. The ``/metrics`` route handler
@@ -135,6 +146,16 @@ from strategies.registry import strategy_registry
 setup_logging()
 
 log = logging.getLogger(__name__)
+
+# W23-3 — module-level server-start timestamp used by the periodic
+# ``system``-channel broadcaster to compute ``uptime`` (seconds since
+# the module was imported, which is a few seconds before the lifespan
+# ``startup`` phase runs — close enough for an operator-facing
+# heartbeat). Kept at module scope (not inside the lifespan) so the
+# value is stable across reloads and visible to every caller that
+# imports the symbol (tests, monitoring scripts, the
+# ``/api/ws/broadcast-stats`` endpoint).
+_SERVER_START_TIME: float = time.time()
 
 # ── Auth Policy ────────────────────────────────────────────────────────────────
 # Only the liveness probe (/api/health) and the API version info endpoint
@@ -546,6 +567,16 @@ async def lifespan(app: FastAPI):
     status_broadcast_task = asyncio.create_task(
         _periodic_status_broadcast(), name="ws-status-broadcast"
     )
+    # W23-3 — periodic metrics broadcast (every 5s on the "metrics"
+    # channel). Distinct from ``status_broadcast_task`` (which fires on
+    # ``system`` with operator heartbeat fields): this task pushes the
+    # trading-state numbers a quant dashboard renders (balance /
+    # positions_count / orders_count / mode / uptime / backend). See
+    # :func:`_periodic_metrics_broadcast` docstring for the full
+    # rationale on why the two channels are kept separate.
+    metrics_broadcast_task = asyncio.create_task(
+        _periodic_metrics_broadcast(), name="ws-metrics-broadcast"
+    )
     reseed_task = asyncio.create_task(_reseed_loop(), name="market-reseed")
     token_sync_task = asyncio.create_task(_token_sync_loop(), name="token-sync")
     persist_task = asyncio.create_task(_state_persistence_loop(), name="state-persist")
@@ -567,6 +598,7 @@ async def lifespan(app: FastAPI):
     await watchdog.stop()
     broadcast_task.cancel()
     status_broadcast_task.cancel()
+    metrics_broadcast_task.cancel()
     reseed_task.cancel()
     token_sync_task.cancel()
     persist_task.cancel()
@@ -710,15 +742,37 @@ async def _periodic_status_broadcast() -> None:
     consumers must merge the two streams (the richer 1s snapshot
     dominates the lean 5s status, but the lean one is the only
     heartbeat when no snapshot loop is running).
+
+    W23-3 — the payload also carries the spec'd ``status`` /
+    ``uptime`` / ``backend`` / ``orders_count`` fields so a client
+    implementing the W23-3 broadcast contract (Step 1 ``system``
+    channel example) receives a single stream that satisfies both
+    the legacy ``type=status`` consumers and the new
+    ``status=healthy`` operator-monitor consumers.
     """
     while True:
         await asyncio.sleep(5)
         try:
             from core.safety import kill_switch_file_exists
+            # W23-3 — best-effort backend label from the unified DB
+            # manager. Lazy import + getattr so a transient
+            # ``database_manager`` import failure doesn't crash the
+            # heartbeat (the field is informational only).
+            _backend_name = "unknown"
+            try:
+                from core.database_manager import db_manager as _db_mgr
+
+                _backend_name = _db_mgr.backend_name
+            except Exception:  # noqa: BLE001 — informational, must not crash
+                pass
             status = {
                 "type": "status",
+                "status": "healthy",
+                "uptime": time.time() - _SERVER_START_TIME,
+                "backend": _backend_name,
                 "balance": store.paper_balance,
                 "positions_count": len(store.positions),
+                "orders_count": len(store.open_orders),
                 "open_orders_count": len(store.open_orders),
                 "daily_pnl": store.daily_pnl,
                 "mode": settings.trading_mode,
@@ -733,6 +787,61 @@ async def _periodic_status_broadcast() -> None:
             raise
         except Exception as e:  # noqa: BLE001 — must not crash the loop
             log.debug("Periodic status broadcast error: %s", e)
+
+
+async def _periodic_metrics_broadcast() -> None:
+    """Broadcast a lean metrics snapshot every 5s on the ``metrics`` channel.
+
+    W23-3 (Step 1 ``metrics`` channel + Step 2 ``periodic_broadcast``)
+    — emits a small dict (balance, positions count, orders count, mode,
+    uptime, backend) every 5 seconds so a client subscribed to the
+    ``metrics`` channel (distinct from the richer ``system`` heartbeat
+    emitted by :func:`_periodic_status_broadcast`) receives a regular
+    cadence of trading-state metrics without polling any REST endpoint.
+
+    Distinct from :func:`_periodic_status_broadcast`: the ``system``
+    channel carries the operator heartbeat (kill-switch, observation
+    mode, active strategies, paper-trade flag); the ``metrics`` channel
+    carries the trading-state numbers a quant dashboard renders (balance,
+    position count, order count, mode). The two channels serve different
+    subscribers and are kept separate so a metrics-only panel doesn't
+    wake up on every kill-switch event.
+
+    Defensive: any broadcast failure is logged at debug level so the
+    loop never crashes (mirrors :func:`_periodic_status_broadcast`).
+    """
+    while True:
+        await asyncio.sleep(5)
+        try:
+            # W23-3 — best-effort backend label (same lazy import as the
+            # system-status broadcaster; duplicated here so the metrics
+            # broadcaster is self-contained and doesn't depend on the
+            # system-status loop having run first).
+            _backend_name = "unknown"
+            try:
+                from core.database_manager import db_manager as _db_mgr
+
+                _backend_name = _db_mgr.backend_name
+            except Exception:  # noqa: BLE001 — informational, must not crash
+                pass
+            await ws_manager.broadcast(
+                "metrics",
+                {
+                    "type": "metrics",
+                    "balance": store.paper_balance,
+                    "positions_count": len(store.positions),
+                    "orders_count": len(store.open_orders),
+                    "daily_pnl": store.daily_pnl,
+                    "mode": settings.trading_mode,
+                    "uptime": time.time() - _SERVER_START_TIME,
+                    "backend": _backend_name,
+                    "timestamp": time.time(),
+                },
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001 — must not crash the loop
+            log.debug("Periodic metrics broadcast error: %s", e)
 
 
 def _get_meta_warm() -> bool:
@@ -1781,6 +1890,51 @@ async def get_leaderboard():
     return result
 
 
+@app.get(
+    "/api/strategies/performance",
+    tags=["strategies"],
+    summary="Strategy performance dashboard with risk-adjusted attribution",
+    description=(
+        "W23-5 — Comprehensive per-strategy performance breakdown. For each "
+        "strategy in the catalog (IMPLEMENTED + PLANNED), returns P&L "
+        "(realized + unrealized + net + gross), trade stats (win rate, "
+        "profit factor, expectancy, avg win/loss), risk metrics (Sharpe, "
+        "Sortino, Calmar — annualised per-trade), trade timing (avg hold "
+        "hours, notional volume, open exposure), the cumulative equity "
+        "curve, and catalog metadata (status, version, is_running, "
+        "is_enabled). Used by the Strategy Performance Dashboard UI "
+        "panel — polls every 30 s."
+    ),
+)
+async def get_strategy_performance():
+    """Get performance metrics for all strategies.
+
+    Aggregates closed positions / trades by strategy and computes:
+      * P&L — realized, unrealized, net, gross
+      * Trade stats — fills, closed_trades, win_rate, profit_factor,
+        expectancy, avg_win, avg_loss
+      * Risk metrics — sharpe_ratio, sortino_ratio, calmar_ratio,
+        max_drawdown (per-trade pnl basis, annualised to 252 trading
+        periods)
+      * Timing — avg_hold_hours, notional_volume, open_exposure
+      * Equity curve — cumulative P&L time series for chart overlay
+      * Catalog metadata — name, version, status, category, risk_level,
+        is_running, is_enabled
+    """
+    # W11-2 — cache the roll-up for 30s. ``strategy_performance()`` walks
+    # every closed trade to compute per-strategy Sharpe / Sortino / Calmar
+    # + the equity curve — the cost grows with trade count, and the
+    # dashboard polls this on every render (30 s tick). Same invalidation
+    # hook as ``/api/leaderboard`` (``POST /api/trade`` invalidates).
+    cache_key = "strategies_performance"
+    cached = analytics_cache.get(cache_key)
+    if cached is not None:
+        return cached
+    result = strategy_performance(strategy_registry=strategy_registry)
+    analytics_cache.set(cache_key, result)
+    return result
+
+
 # ── 50+ Strategy Hub Endpoints ────────────────────────────────────────────────
 
 @app.get(
@@ -1855,6 +2009,10 @@ async def toggle_strategy(req: StrategyToggleRequest):
         # invalidated since either could shadow the other.
         markets_cache.invalidate("strategies_catalog")
         markets_cache.invalidate("strategies_catalog:impl")
+        # W23-5 — invalidate the strategies_performance cache so the next
+        # ``GET /api/strategies/performance`` reflects the new is_running /
+        # is_enabled state on the toggle the trader just made.
+        analytics_cache.invalidate("strategies_performance")
         return {"status": "started", "strategy": strat_id}
     else:
         ok = await strategy_registry.stop_strategy(strat_id)
@@ -1862,6 +2020,8 @@ async def toggle_strategy(req: StrategyToggleRequest):
         # W11-2 — same invalidation as the start branch above.
         markets_cache.invalidate("strategies_catalog")
         markets_cache.invalidate("strategies_catalog:impl")
+        # W23-5 — same invalidation as the start branch above.
+        analytics_cache.invalidate("strategies_performance")
         return {"status": "stopped" if ok else "not_running", "strategy": strat_id}
 
 
@@ -2428,6 +2588,10 @@ async def place_manual_trade(request: Request, req: ManualTradeRequest):
     # is acked — better to invalidate aggressively than show stale data.
     analytics_cache.invalidate("analytics")
     analytics_cache.invalidate("leaderboard")
+    # W23-5 — also invalidate the per-strategy performance roll-up so the
+    # Strategy Performance Dashboard reflects the new trade / fill on the
+    # next 30 s poll (or sooner if the operator hits the Refresh button).
+    analytics_cache.invalidate("strategies_performance")
     attribution_cache.clear()
     # W15-4 — invalidate the W15-4 hot-path caches that depend on
     # open-position / open-order state so the next dashboard poll
@@ -2884,6 +3048,11 @@ async def close_position(request: Request, token_id: str, req: PositionCloseRequ
     # which is captured by the trade POST invalidation path above.
     analytics_cache.invalidate("analytics")
     analytics_cache.invalidate("leaderboard")
+    # W23-5 — also invalidate the per-strategy performance roll-up so the
+    # next dashboard poll reflects the new realised PnL on the closed
+    # strategy (Sharpe / Sortino / Calmar / equity curve all derive from
+    # the trade ledger, which mutated the moment this close landed).
+    analytics_cache.invalidate("strategies_performance")
     # W15-4 — invalidate the W15-4 hot-path caches that depend on
     # open-position / open-order state so the next dashboard poll
     # reflects the position close. Same rationale as the analytics
@@ -4980,6 +5149,33 @@ async def ws_stats():
     return ws_manager.get_stats()
 
 
+# W23-3 — broadcast-stats alias endpoint.
+# Additive: appends ``GET /api/ws/broadcast-stats`` mirroring the W14-1
+# ``GET /api/ws/stats`` endpoint so a client implementing the W23-3
+# broadcast contract (Step 3) can hit the spec'd path without learning
+# the W14-1 alias. Both endpoints return the exact same
+# ``ws_manager.get_stats()`` payload; the duplicate surface is intentional
+# so the W23-3 contract has its own canonical path the docs / OpenAPI
+# surface can advertise independently.
+# Auth enforced by ``enforce_api_auth`` (path not in ``PUBLIC_PATHS``).
+@app.get(
+    "/api/ws/broadcast-stats",
+    tags=["system"],
+    summary="WebSocket broadcast manager stats (W23-3 alias)",
+    description=(
+        "Returns the broadcast manager stats: connected_clients, "
+        "total_messages_sent, total_errors, channels, client_ids. "
+        "Mirrors ``GET /api/ws/stats`` (W14-1) under a W23-3-spec'd "
+        "path so a client implementing the W23-3 broadcast contract "
+        "has its own canonical endpoint. Both endpoints return the "
+        "identical payload."
+    ),
+)
+async def broadcast_stats():
+    """Return ``WSBroadcastManager`` stats (alias for ``GET /api/ws/stats``)."""
+    return ws_manager.get_stats()
+
+
 # R11 — Unified Decision Ledger inspection endpoints.
 # Registered last (after the WebSocket route) so the existing endpoint surface
 # is unchanged; this appends `GET /api/decision/{token_id}` and
@@ -6453,3 +6649,82 @@ from core.database_manager import register_routes as _register_depth_routes
 
 _register_depth_routes(app)
 
+
+# ── W23-2 — Signal→order→fill pipeline latency endpoints ─────────────────────
+# Additive: appends two read-only endpoints under ``/api/latency/*`` so an
+# operator (or a future ``LatencyPanel`` React component) can surface
+# p50/p95/p99 latencies for the three-stage pipeline without an external
+# tracing layer. Sibling to the W14-7 ``/api/rate-limit/stats`` and
+# W15-4 ``/api/profiling/*`` panels — same singleton pattern, same
+# in-memory + process-local contract (a restart zeroes the data, which
+# is fine for a "last N hours" operational view).
+#
+# The data is fed by the three ``latency_tracker.record_*`` call sites:
+#
+#   * ``strategies/signal_trader.py::_ml_signal``    → record_signal
+#   * ``strategies/base.py::submit_order``           → record_order
+#   * ``paper/simulator.py::_execute_fill``           → record_fill  (paper)
+#   * ``core/live_fill_monitor.py::_process_trade``  → record_fill  (live)
+#
+# Auth enforced by ``enforce_api_auth`` (neither path is in
+# ``PUBLIC_PATHS``). Rate-limited by ``READ_LIMIT`` so a dashboard
+# polling every few seconds can't starve the trading path.
+@app.get(
+    "/api/latency/stats",
+    tags=["system"],
+    summary="Signal→order→fill pipeline latency statistics",
+    description=(
+        "Returns p50 / p95 / p99 latencies (ms) for the three pipeline "
+        "segments (signal→order, order→fill, signal→fill) over the "
+        "trailing ``hours`` window, plus a per-strategy p95 breakdown "
+        "and counts of complete / in-flight / orphaned / signal-only "
+        "records. In-memory only — a process restart zeroes the data."
+    ),
+)
+@limiter.limit(READ_LIMIT)
+async def latency_stats(
+    request: Request,  # noqa: ARG001 — slowapi requires the `request` arg
+    hours: float = Query(24.0, ge=0.0, le=720.0),
+):
+    """Get signal→order→fill pipeline latency statistics.
+
+    Shape::
+
+        {
+          "window_hours": 24.0,
+          "total_records": 142,
+          "complete_records": 87,
+          "in_flight_records": 12,
+          "orphaned_records": 43,
+          "signal_only_records": 0,
+          "latencies_ms": {
+            "signal_to_order": {"count": 95, "avg": 12.3, "p50": 8.1,
+                                "p95": 45.6, "p99": 89.2, "max": 120.5},
+            "order_to_fill":   {...},
+            "signal_to_fill":   {...}
+          },
+          "by_strategy": {"signal_trader": {...}, ...}
+        }
+    """
+    return latency_tracker.get_stats(hours)
+
+
+@app.get(
+    "/api/latency/recent",
+    tags=["system"],
+    summary="Recent signal→order→fill latency records",
+    description=(
+        "Returns the ``limit`` most-recent latency records as a list of "
+        "dicts (newest first), each carrying the correlation_id / "
+        "token_id / strategy / three timestamps / three pre-computed "
+        "latency segments / a ``complete`` flag. Useful for a dashboard "
+        "live-event-stream panel. ``limit`` is clamped to [1, 500]."
+    ),
+)
+@limiter.limit(READ_LIMIT)
+async def latency_recent(
+    request: Request,  # noqa: ARG001 — slowapi requires the `request` arg
+    limit: int = Query(50, ge=1, le=500),
+):
+    """Get the most-recent latency records."""
+    return latency_tracker.get_recent(limit)

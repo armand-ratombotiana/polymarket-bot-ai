@@ -195,7 +195,6 @@ describe('Sidebar', () => {
       'Strategy Registry',
       'Arbitrage',
       'Deep Analysis',
-      'Performance',
       'System Health',
       'Data Explorer',
     ]

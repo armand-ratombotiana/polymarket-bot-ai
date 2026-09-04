@@ -397,6 +397,15 @@ class AlertEngine:
         caller) AND logged at WARNING level so a tail of the bot's log
         surfaces every fired alert even when the dashboard is down.
 
+        W23-3 — schedules a fire-and-forget broadcast on the ``alerts``
+        WS channel so any dashboard subscribed to ``alerts`` flashes the
+        new alert immediately. ``fire_alert`` is SYNC (callers from the
+        risk gate's sync ``_check_order_impl`` path can't await), so the
+        broadcast is dispatched via ``asyncio.create_task``. If no event
+        loop is running (e.g. unit test without a loop), the broadcast
+        is silently skipped — the persistence + log still happened, so
+        the alert is durable even without the live push.
+
         Returns ``True`` to signal the alert was dispatched (the
         underlying ``_store`` swallows storage errors so this never
         raises — callers can chain ``fire_alert`` after a critical
@@ -404,7 +413,60 @@ class AlertEngine:
         """
         self._store(alert)
         logger.warning("Alert fired: %s — %s", alert.name, alert.message)
+        # W23-3 — fire-and-forget broadcast. ``asyncio.create_task``
+        # requires a running loop; in contexts without one (sync unit
+        # tests, scripts), the broadcast is silently skipped — the
+        # alert has already been persisted to SQLite + logged.
+        try:
+            import asyncio
+
+            asyncio.create_task(self._broadcast_alert(alert))
+        except RuntimeError:
+            # No running event loop — fall back to a debug log so the
+            # broadcast is observable without crashing the caller. The
+            # ``ws_manager.broadcast`` coroutine itself is safe to
+            # construct (no I/O until awaited) so we don't need to
+            # worry about a leaked coroutine here.
+            logger.debug(
+                "[alerting] no event loop — alerts broadcast skipped for %s",
+                alert.name,
+            )
+        except Exception as e:  # noqa: BLE001 — broadcast must never break the caller
+            logger.debug(
+                "[alerting] alerts broadcast schedule failed: %s", e
+            )
         return True
+
+    async def _broadcast_alert(self, alert: Alert) -> None:
+        """Push a single alert on the ``alerts`` WS channel.
+
+        W23-3 — the payload follows the spec'd shape::
+
+            {"type": "alert", "alert": <asdict(alert)>}
+
+        so a subscriber can dispatch on ``data.type`` (consistent with
+        the ``kill_switch`` / ``observation_mode`` alert envelopes that
+        ``api/server.py`` already emits on the same channel). The
+        ``alert`` field carries the full dataclass dict (mirroring the
+        shape returned by ``GET /api/alerts``) so the subscriber doesn't
+        need a second fetch to render the alert card.
+
+        Defensive: a broadcast failure (no WS clients, broken
+        ``ws_manager`` import, send error) is swallowed at debug level
+        so the alert fire path is never broken by the broadcast
+        subsystem.
+        """
+        try:
+            from core.ws_broadcast import ws_manager
+
+            await ws_manager.broadcast(
+                "alerts",
+                {"type": "alert", "alert": asdict(alert)},
+            )
+        except Exception as e:  # noqa: BLE001 — broadcast must never break
+            logger.debug(
+                "[alerting] alerts broadcast failed: %s", e
+            )
 
     @timed_query
     def get_recent(
@@ -681,12 +743,23 @@ def register_routes(app: Any) -> None:
         # — but the pattern is consistent with the ``core.observability``
         # lazy import above). One broadcast per fired alert so a client
         # can dedupe / acknowledge them individually.
+        #
+        # W23-3 — payload shape ``{"type": "alert", "alert": <asdict(a)>}``
+        # so a subscriber can dispatch on ``data.type`` (consistent with
+        # the ``kill_switch`` / ``observation_mode`` alert envelopes that
+        # ``api/server.py`` already emits on the same channel). Mirrors
+        # the shape used by ``AlertEngine._broadcast_alert`` /
+        # ``AlertEngine.fire_alert`` so a single client-side parser
+        # handles every alerts-channel push.
         if fired:
             try:
                 from core.ws_broadcast import ws_manager
 
                 for a in fired:
-                    await ws_manager.broadcast("alerts", asdict(a))
+                    await ws_manager.broadcast(
+                        "alerts",
+                        {"type": "alert", "alert": asdict(a)},
+                    )
             except Exception as e:  # noqa: BLE001 — broadcast must never break the API
                 logger.debug("[alerting] alerts broadcast failed: %s", e)
         return {"fired": len(fired), "alerts": [asdict(a) for a in fired]}

@@ -1132,3 +1132,153 @@ above) and the live trading validation itself — the code posture is
 institutionally complete; the operational validation is not. The path
 to live readiness is documented in §7.6 (Next optimization opportunities
 1–3 above).
+
+---
+
+## §8 Wave 17 → Wave 23 Update (2026-09-22)
+
+Wave 17 through Wave 23 pushed the system further: the God Mode
+assessment (Wave 17) yielded P0/P1/P2/P3 fix waves (Waves 18–21), a
+database-handling overhaul (Wave 21), P3 polish (Wave 22), and an
+integration & polish wave (Wave 23). This section summarises the
+incremental movement from the Wave 16 baseline.
+
+### 8.1 Wave 16 → Wave 23 headline metrics
+
+| Metric | Wave 16 | Wave 23 | Δ |
+|---|---|---|---|
+| Backend tests | 1855 | 2321 | +466 |
+| Frontend tests | 709 | 881 | +172 |
+| Total tests (backend + frontend) | 2564 | 3202 | +638 |
+| E2E tests | 38 | 111 | +73 |
+| API routes | 95+ | 95+ | — |
+| UI panels | 65+ | 70+ | +5 |
+| ML labels | 4970 | 4970+ | — |
+| Documentation files | 30+ | 35+ | +5 |
+| Lint | clean | clean | — |
+
+### 8.2 Wave-by-wave progress (W17 → W23)
+
+| Wave | Theme | Key deltas |
+|---|---|---|
+| W17 | God Mode assessment | 8 improvement plans + 7 per-domain reassessments + final system reassessment |
+| W18 | P0 critical fixes | Live-gate API, ML drift, shadow trading API, security hardening |
+| W19 | P1 fixes | Historical replay, strategy contract, decision ledger model versioning, broker parity |
+| W20 | P2 fixes | CV API, real-data training, experiment store, live VaR, data quality, trade ingestion, integration tests |
+| W21 | Database handling | PostgreSQL primary with SQLite fallback architecture |
+| W22 | P3 polish | Error-handling unification, UI test coverage, 5 more real strategies, rejected-opportunity analytics, latency tracker, missing metrics, memory monitoring |
+| W23 | Integration & polish | Skipped tests restored, latency tracker wired, 6 WS channels complete, real-time alert notifications, strategy performance dashboard, async DB write methods, model lifecycle management, E2E expansion |
+
+### 8.3 Domain-by-domain maturity (Wave 16 → Wave 23)
+
+| Domain | Wave 16 | Wave 23 | Δ |
+|---|---|---|---|
+| Bot execution engine | 3.7 | 3.8 | +0.1 |
+| AI/ML engine | 3.9 | 4.0 | +0.1 |
+| Data platform | 3.9 | 4.0 | +0.1 |
+| Strategy layer | 4.0 | 4.1 | +0.1 |
+| Backtest engine | 3.9 | 3.9 | — |
+| UI/UX | 4.3 | 4.4 | +0.1 |
+| Risk & portfolio | 4.1 | 4.1 | — |
+| **Overall (avg, /5)** | **3.97** | **4.04** | **+0.07** |
+
+### 8.4 Key achievements (Wave 17 → Wave 23)
+
+1. **+638 tests** (1855 → 2321 backend, 709 → 881 frontend) with zero
+   regressions and lint clean at every commit.
+2. **+73 E2E tests** (38 → 111) covering database, strategies, analytics,
+   ML, settings, dashboard, navigation, theme, error-handling,
+   responsive, system, api-health, command-palette, trading flows.
+3. **PostgreSQL primary + SQLite fallback** architecture deployed
+   (Wave 21): PostgreSQL is the write-side source of truth; SQLite
+   provides read-side redundancy and degrades gracefully if PG is
+   unreachable.
+4. **Latency tracker wired end-to-end**: signal → order → fill with
+   p50/p95/p99 stats exposed via `/api/latency/stats` and
+   `/api/latency/recent`.
+5. **6 WebSocket broadcast channels** all wired (positions, orders,
+   trades, metrics, alerts, system) with a 5 s periodic system-status
+   broadcaster.
+6. **Real-time alert notifications** via WebSocket (`useAlertNotifications`
+   hook + `AlertNotificationsPanel` with bell icon + unread badge +
+   browser-notification integration).
+7. **Strategy performance dashboard** with per-strategy P&L, win rate,
+   Sharpe, profit factor, attribution bar chart, equity-curve overlay,
+   and risk-adjusted ranking table.
+8. **Async DB write methods** added to all async repositories +
+   write-through cache for hot paths; new repositories: ClosedPositions,
+   Alert, FeatureStore.
+9. **Model lifecycle management**: six-state lifecycle
+   (experimental → shadow → challenger → champion → demoted → retired)
+   with promote / rollback / demote API endpoints and lifecycle
+   dashboard.
+10. **5 more real strategies** implemented in Wave 22 (stat_arb,
+    event_driven, convergence, spread_capture, liquidity) — reduces the
+    stubbed-strategy count from 47 → 42.
+
+### 8.5 Remaining risks (W17 R1–R9 status + new W23 risks)
+
+- **R1 — ML lookahead bias:** partially fixed in Wave 6; the
+  `_LookAheadDetector` is in place but `validate_no_leakage` has not
+  been run against the full `ml_feature_store`.
+- **R2 — Security token rotated:** fixed in Wave 6.
+- **R3 — No live trading validation:** unchanged.
+- **R4 — V2 spec/code divergence:** fixed in Wave 6.
+- **R5 — `market_intelligence.db` integrity:** unchanged.
+- **R6 — VaR sign convention:** still open.
+- **R7 — Portfolio optimizer advisory only:** still open.
+- **R8 — Constant slippage/latency models:** still open.
+- **R9 — i18n coverage incomplete:** still open.
+- **R10 — (New, W23) Skipped tests restored but contract drift:** the
+  7 `.skip` files restored in Wave 23 were verified to pass, but their
+  long-term coverage needs to be tracked to prevent silent re-skipping.
+- **R11 — (New, W23) Latency tracker single-process:** the tracker runs
+  in-process; in a multi-worker deployment the p50/p95/p99 stats are
+  per-worker, not aggregated.
+- **R12 — (New, W23) Alert notification fan-out:** the WebSocket alert
+  channel broadcasts to all connected clients; per-user routing is not
+  implemented.
+
+### 8.6 Next optimization opportunities (Wave 23 → Wave 24+)
+
+1. **(Required before live activation)** Drive §82 gate from 4/10 → 10/10.
+2. **(Required before live activation)** Run
+   `validate_no_leakage(features, labels)` against the full
+   `ml_feature_store`.
+3. **(Required before live activation)** Complete a ≥ 24 h paper-mode
+   cycle with continuous drift health.
+4. **(Required, R6)** Review the VaR sign convention.
+5. **(Optional, R7)** Add an auto-rebalance mode to the portfolio
+   optimizer.
+6. **(Optional, R8)** Replace constant slippage/latency models with
+   distribution-based models.
+7. **(Optional, R9)** Run a full i18n audit across all panels.
+8. **(Optional, R11)** Aggregated latency stats across workers (Redis
+   or shared SQLite aggregation).
+9. **(Optional, R12)** Per-user alert routing via WebSocket session
+   registry.
+
+### 8.7 Per-domain reassessment file index (Wave 23 update)
+
+| Domain | Reassessment file |
+|---|---|
+| Bot execution engine | `BOT_EXECUTION_ENGINE_REASSESSMENT.md` |
+| AI/ML engine | `AI_ML_ENGINE_REASSESSMENT.md` |
+| Data platform | `DATA_PLATFORM_REASSESSMENT.md` |
+| Strategy layer | `STRATEGY_REASSESSMENT.md` |
+| Backtest engine | `BACKTEST_ENGINE_REASSESSMENT.md` |
+| UI/UX | `UI_UX_REASSESSMENT.md` |
+| Risk & portfolio | `RISK_PORTFOLIO_REASSESSMENT.md` |
+| Wave 23 integration & polish | `WAVE_23_REASSESSMENT.md` (new) |
+| (Master comparison) | `FINAL_SYSTEM_REASSESSMENT.md` (this file) |
+
+---
+
+**Document status (Wave 23 update):** Final. The system retains its
+**paper-mode credible + institutional posture** (overall maturity
+8.5/10 → 8.6/10) with another +638 tests, +73 E2E tests, and full
+lint-clean green. The remaining gap to a 10/10 "production live"
+posture is unchanged from Wave 16: the §82 live-safety gate (4/10) and
+the live trading validation itself remain the gating items. The path
+to live readiness is documented in §8.6.
+

@@ -508,6 +508,24 @@ class BaseStrategy(StrategyContract):
                 "[%s] OSM VALIDATED transition failed: %s", self.name, e,
             )
 
+        # W23-2 — record the order-submission timestamp against the latency
+        # tracker so the signal→order→fill pipeline latency is measurable
+        # per correlation_id. ``decision_id`` is the same identifier the
+        # decision ledger threads through the chain (alias for the
+        # tracker's ``correlation_id``). Placed AFTER risk approval and
+        # BEFORE the actual paper/live submit call so ``order_time`` is
+        # anchored to "the moment the order was about to leave the
+        # strategy layer" (the latency segment we care about for SLO
+        # monitoring is signal→order, not signal→exchange-ack). Best-
+        # effort: a tracker exception must NEVER block order submission.
+        try:
+            from core.latency_tracker import latency_tracker
+            latency_tracker.record_order(correlation_id=decision_id)
+        except Exception as e:
+            log.debug(
+                "[%s] latency_tracker.record_order failed: %s", self.name, e,
+            )
+
         if self._paper:
             # W18-1 — pass the pre-minted ``osm_order_id`` so the OSM
             # entry and the in-memory Order share one identity.

@@ -55,6 +55,11 @@ import TradesPanel from '@/components/TradesPanel'
 // Strategies
 import StrategyMatrix from '@/components/StrategyMatrix'
 import ArbitrageMatrixView from '@/components/ArbitrageMatrixView'
+// W23-5 — Strategy Performance dashboard (per-strategy P&L, risk-adjusted
+// ranking, equity overlay, sortable comparison table). Loaded with
+// `next/dynamic` + `ssr: false` so the Recharts multi-line + bar chart
+// chunk stays out of the initial bundle.
+const StrategyPerformancePanel = lazyPanel(() => import('@/components/StrategyPerformancePanel'), 'Loading Strategy Performance…')
 
 // Intelligence
 import DeepAnalysisView from '@/components/DeepAnalysisView'
@@ -798,6 +803,15 @@ export default function Dashboard() {
               <PanelErrorBoundary label="Arbitrage Matrix">
               <div style={{ height: '100%', overflow: 'hidden' }}>
                 <ArbitrageMatrixView onSelectMarket={(m) => setChartMarket(m)} />
+              </div>
+              </PanelErrorBoundary>
+            )}
+
+            {/* ── 6b. Strategies — Performance (W23-5) ──────────────────── */}
+            {activeSection === 'strategies-performance' && (
+              <PanelErrorBoundary label="Strategy Performance">
+              <div style={{ height: '100%', overflow: 'auto' }} className="scrollbar-thin">
+                <StrategyPerformancePanel />
               </div>
               </PanelErrorBoundary>
             )}

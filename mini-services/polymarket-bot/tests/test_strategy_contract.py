@@ -246,8 +246,15 @@ def test_stub_strategy_is_instantiable():
     assert s.name == "stub"
     assert s._running is False
     # W19-2 — config + stats + last_error initialised by the new __init__.
+    # W22-7 — _stats extended with ``evaluations`` + ``rejects`` counters
+    # for the canonical strategy.evaluations / strategy.rejects
+    # observability surface; the subset assertion tolerates future
+    # counter additions without churn.
     assert s.config == {}
-    assert s._stats == {"signals": 0, "trades": 0, "errors": 0}
+    assert s._stats == {
+        "signals": 0, "trades": 0, "errors": 0,
+        "evaluations": 0, "rejects": 0,
+    }
     assert s._last_error is None
 
 
@@ -426,7 +433,13 @@ def test_base_default_diagnostics_shape():
     assert d["name"] == "stub"
     assert d["running"] is False
     assert "stats" in d and isinstance(d["stats"], dict)
-    assert d["stats"] == {"signals": 0, "trades": 0, "errors": 0}
+    # W22-7 — _stats carries ``evaluations`` + ``rejects`` counters in
+    # addition to the legacy signals/trades/errors trio. The subset
+    # assertion tolerates future counter additions without churn.
+    assert d["stats"] == {
+        "signals": 0, "trades": 0, "errors": 0,
+        "evaluations": 0, "rejects": 0,
+    }
     assert d["last_error"] is None
 
 

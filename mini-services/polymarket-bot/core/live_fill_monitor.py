@@ -400,6 +400,26 @@ class LiveFillMonitor:
                 logger.debug(
                     "[live_fill_monitor] ledger FILL record failed: %s", e
                 )
+            # W23-2 — record the fill timestamp against the latency tracker
+            # so the signal→order→fill pipeline latency is measurable per
+            # correlation_id. ``decision_id`` is the same identifier the
+            # decision ledger threads through the chain (alias for the
+            # tracker's ``correlation_id``). Placed inside the
+            # ``if decision_id:`` block so the latency record is only
+            # created for fills that also have a decision-ledger chain —
+            # keeps the by-strategy breakdown meaningful. Best-effort:
+            # wrapped in its own try/except so a tracker hiccup never
+            # blocks the fill path (mirrors the ledger /
+            # execution_quality fire-and-forget contract above).
+            try:
+                from core.latency_tracker import latency_tracker
+
+                latency_tracker.record_fill(correlation_id=decision_id)
+            except Exception as e:
+                logger.debug(
+                    "[live_fill_monitor] latency_tracker.record_fill "
+                    "failed: %s", e,
+                )
 
         logger.info(
             "Live fill confirmed: %s %.4f @ %.4f (order=%s trade=%s)",

@@ -55,6 +55,7 @@ import json
 import logging
 import os
 import sqlite3
+import sys
 import time
 from pathlib import Path
 from typing import Any, Optional
@@ -650,6 +651,30 @@ class DatabaseManager:
             self._pg_retry_loop(), name="database-manager-pg-retry"
         )
 
+        # W23-1 — start the PG health monitor alongside the retry loop
+        # so callers only need to manage ONE lifecycle (``db_manager.
+        # initialize()`` / ``shutdown()``). The monitor's ``_monitor_loop``
+        # is a no-op until its first tick, so this is cheap when PG is
+        # unreachable (the loop sleeps for the configured poll interval
+        # between ``_check_health`` calls). ``start()`` is idempotent —
+        # a second call (e.g. from a duplicate lifespan startup hook) is
+        # a no-op (the ``_running`` flag short-circuits).
+        # Look up via ``sys.modules[__name__]`` so a test-time swap of
+        # the module attribute (e.g.
+        # ``core.database_manager.pg_health_monitor = fresh_monitor``)
+        # is honoured — the module-import-time ``from ... import``
+        # binding captures the original singleton.
+        try:
+            _monitor = getattr(
+                sys.modules[__name__], "pg_health_monitor", None
+            )
+            if _monitor is not None:
+                await _monitor.start()
+        except Exception as e:  # pragma: no cover — defensive
+            logger.warning(
+                "[database_manager] pg_health_monitor.start() raised: %s", e
+            )
+
         return self._status.pg_available
 
     async def _try_postgres(self) -> bool:
@@ -731,6 +756,12 @@ class DatabaseManager:
         try:
             while True:
                 await asyncio.sleep(self._status.pg_retry_interval)
+                # W23-1 — reconcile with the PG health monitor before
+                # attempting the retry. The monitor's verdict is the
+                # canonical signal for "is PG healthy RIGHT NOW" (the
+                # retry loop's own ``_try_postgres`` only catches the
+                # connect-time failures, not the steady-state health).
+                await self._sync_backend_with_monitor()
                 if not self._status.pg_available:
                     logger.info(
                         "[database_manager] Retrying PostgreSQL connection..."
@@ -750,6 +781,61 @@ class DatabaseManager:
         except asyncio.CancelledError:
             # Clean shutdown via task.cancel() — propagate silently.
             raise
+
+    async def _sync_backend_with_monitor(self) -> None:
+        """Reconcile ``_status.backend`` with the PG health monitor.
+
+        W23-1 contract — the retry loop calls this every tick so the
+        manager's ``_status.backend`` flag tracks the monitor's verdict
+        rather than the (stale) ``pg_available`` flag set by the last
+        ``_try_postgres`` call. When the monitor flips healthy/unhealthy
+        the manager flips the backend accordingly and bumps
+        ``fallback_count`` so the operator sees the flap in the status
+        payload.
+
+        Idempotent: when the monitor and manager already agree, the
+        method is a no-op (no flip, no fallback_count bump).
+
+        Looks up the monitor via ``sys.modules[__name__].pg_health_monitor``
+        rather than the module-import-time ``pg_health_monitor`` name so
+        a test that swaps the module attribute (e.g.
+        ``core.database_manager.pg_health_monitor = fresh_monitor``) is
+        honoured — the imported name binding captures the original
+        singleton, but the module attribute reflects the current value.
+        """
+        # Late import to pick up a test-time swap of the module attribute
+        # (e.g. ``core.database_manager.pg_health_monitor = fresh_monitor``).
+        # The module-import-time ``from core.pg_health_monitor import
+        # pg_health_monitor`` binding captures the original singleton and
+        # would miss the patch.
+        monitor = getattr(
+            sys.modules[__name__], "pg_health_monitor", None
+        )
+        # ``is_healthy`` is a *method* on PGHealthMonitor (not a
+        # property), so it must be called to read the verdict.
+        if monitor is None:
+            monitor_healthy = False
+        else:
+            try:
+                _verdict = monitor.is_healthy
+                monitor_healthy = bool(
+                    _verdict() if callable(_verdict) else _verdict
+                )
+            except Exception:  # pragma: no cover — defensive
+                monitor_healthy = False
+        if monitor_healthy and not self._status.pg_available:
+            # Monitor says healthy + manager says not pg_available →
+            # flip to POSTGRESQL (the W21-2 task-spec wiring snippet).
+            self._status.backend = DatabaseBackend.POSTGRESQL
+            self._status.pg_available = True
+            self._status.fallback_count += 1
+        elif not monitor_healthy and self._status.pg_available:
+            # Monitor says unhealthy + manager says pg_available →
+            # flip back to SQLITE so the operator sees the flap.
+            self._status.backend = DatabaseBackend.SQLITE
+            self._status.pg_available = False
+            self._status.fallback_count += 1
+        # else: monitor and manager agree — no-op.
 
     async def shutdown(self) -> None:
         """Clean shutdown — cancel the PG retry task.
@@ -771,6 +857,22 @@ class DatabaseManager:
                     "[database_manager] PG retry task teardown raised: %s", e
                 )
             self._retry_task = None
+        # W23-1 — stop the PG health monitor too so callers only need
+        # to invoke ``shutdown()`` once (single lifecycle owner). The
+        # monitor's ``stop()`` is idempotent (``_running = False`` is
+        # the only side effect on a second call), so a duplicate
+        # shutdown call is a no-op. Use ``sys.modules[__name__]`` lookup
+        # so a test-time swap of the module attribute is honoured.
+        try:
+            _monitor = getattr(
+                sys.modules[__name__], "pg_health_monitor", None
+            )
+            if _monitor is not None:
+                await _monitor.stop()
+        except Exception as e:  # pragma: no cover — defensive
+            logger.warning(
+                "[database_manager] pg_health_monitor.stop() raised: %s", e
+            )
         self._initialized = False
         logger.info("[database_manager] shut down cleanly")
 

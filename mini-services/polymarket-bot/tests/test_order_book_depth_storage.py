@@ -177,10 +177,27 @@ def fresh_engine(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TimescaleDB
     sandboxed conftest environment can reach — PG would require a
     live TimescaleDB instance, which is out of scope for these unit
     tests).
+
+    Also re-points the singleton ``db_manager._sqlite_paths["market"]``
+    to the fresh engine's SQLite path so the HTTP routes registered by
+    ``register_routes`` (which use the singleton ``db_manager``) read
+    from the same file the engine wrote to. Without this, the depth
+    routes return empty payloads (the singleton still reads from the
+    conftest-redirected ``MARKET_DB_PATH``).
     """
     engine = TimescaleDBEngine(sqlite_path=tmp_path / "test_depth.db")
     engine._is_postgres = False
     monkeypatch.setattr("core.timescale_db.timescale_db", engine)
+    # Re-point the singleton ``db_manager``'s cached market path at the
+    # fresh engine's SQLite file. ``register_routes`` (and the depth
+    # HTTP tests that use ``depth_client``) close over the singleton
+    # ``db_manager`` directly — without this re-point, the routes read
+    # from the conftest-redirected ``MARKET_DB_PATH`` and never see the
+    # rows the fresh engine wrote.
+    from core.database_manager import db_manager as _singleton_db_manager
+
+    _singleton_db_manager._sqlite_paths["market"] = str(engine._sqlite_path)
+    _singleton_db_manager._ensure_market_schema(engine._sqlite_path)
     return engine
 
 
@@ -194,8 +211,33 @@ def fresh_db_manager(fresh_engine: TimescaleDBEngine) -> DatabaseManager:
     through the ``_ts_module.timescale_db`` attribute lookup (the
     monkeypatch in ``fresh_engine`` applies to all instances, not just
     the singleton).
+
+    The fresh instance's ``_sqlite_paths["market"]`` is re-pointed at
+    ``fresh_engine._sqlite_path`` so reads from
+    ``DatabaseManager.get_snapshots`` / ``get_order_book_depth`` /
+    ``get_depth_history`` hit the same SQLite file that
+    ``fresh_engine.record_snapshot`` wrote to (without this, the
+    DatabaseManager resolves ``market`` via the conftest-redirected
+    ``MARKET_DB_PATH`` and the test sees an empty result set).
     """
-    return DatabaseManager()
+    mgr = DatabaseManager()
+    # Re-point the market DB read path at the fresh engine's SQLite
+    # file so reads + writes share the same physical file. This mirrors
+    # what the production lifespan does (DatabaseManager resolves the
+    # market path via ``timescale_db._sqlite_path`` at initialize time
+    # — the conftest env-var redirect short-circuits that lookup, so we
+    # re-establish the link here for the per-test engine).
+    mgr._sqlite_paths["market"] = str(fresh_engine._sqlite_path)
+    # The fresh engine's ``_init_sqlite_fallback`` creates the
+    # ``market_snapshots`` table WITHOUT ``bid_size`` / ``ask_size``
+    # columns (the legacy timescale_db schema). The DatabaseManager's
+    # SELECT for ``get_snapshots`` / ``get_order_book_depth`` /
+    # ``get_depth_history`` projects those columns, so we run the
+    # in-place schema migration here to add them. ``_ensure_market_schema``
+    # is idempotent (CREATE TABLE IF NOT EXISTS + ALTER TABLE) so the
+    # call is a no-op when the columns already exist.
+    mgr._ensure_market_schema(fresh_engine._sqlite_path)
+    return mgr
 
 
 @pytest.fixture

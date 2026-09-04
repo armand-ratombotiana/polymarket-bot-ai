@@ -200,6 +200,12 @@ class DataStore:
     async def add_order(self, order: Order) -> None:
         async with self._lock:
             self.open_orders[order.order_id] = order
+        # W23-3 — broadcast the placement on the ``orders`` WS channel so
+        # any dashboard / monitor subscribed to "orders" sees the new
+        # open order immediately rather than waiting for the next 1s
+        # snapshot tick. Defensive: a broadcast failure must never break
+        # the data path (the order has already been recorded).
+        await self._broadcast_orders("placed")
 
     async def update_order(self, order_id: str, **kwargs) -> Order | None:
         async with self._lock:
@@ -211,7 +217,12 @@ class DataStore:
             if order.status in (OrderStatus.FILLED, OrderStatus.CANCELLED):
                 self.order_history.append(order)
                 del self.open_orders[order_id]
-            return order
+        # W23-3 — lock released before the broadcast so the I/O doesn't
+        # serialise other mutations. Only the success path (order was
+        # found and mutated) reaches here — the ``return None`` above
+        # exits the coroutine before this line.
+        await self._broadcast_orders("updated")
+        return order
 
     async def cancel_all_orders(self) -> list[Order]:
         async with self._lock:
@@ -220,7 +231,11 @@ class DataStore:
                 o.status = OrderStatus.CANCELLED
                 self.order_history.append(o)
             self.open_orders.clear()
-            return cancelled
+        # W23-3 — lock released before the broadcast so the I/O doesn't
+        # serialise other mutations. ``cancelled`` is captured under the
+        # lock so the returned list reflects the pre-clear state.
+        await self._broadcast_orders("cancelled")
+        return cancelled
 
     async def get_open_orders(self) -> list[Order]:
         async with self._lock:
@@ -315,6 +330,117 @@ class DataStore:
             })
             if len(self.equity_history) > 300:
                 self.equity_history = self.equity_history[-300:]
+        # W23-3 — broadcast the trade fill on the ``trades`` channel AND
+        # the resulting position update on the ``positions`` channel.
+        # Lazy-import + try/except so a broadcast failure (no event loop,
+        # ``ws_broadcast`` import broken, …) can NEVER break the data
+        # path — the trade has already been booked by this point. The
+        # snapshots are taken AFTER the lock is released so the broadcast
+        # I/O doesn't serialise other mutations; the position / trade
+        # snapshots are read back under a fresh lock acquisition so the
+        # broadcast reflects the post-fill state.
+        await self._broadcast_trade_fill(trade)
+        await self._broadcast_positions("update")
+
+    # ── W23-3 — WebSocket broadcast helpers ──────────────────────────────
+    #
+    # Each helper snapshots the relevant state under ``self._lock`` and
+    # pushes it on the matching ``ws_manager`` channel. They are
+    # DEFENSIVE: a lazy-import failure or send error is swallowed at
+    # debug level so a broadcast hiccup never breaks the data path.
+    # Called from ``add_order`` / ``update_order`` / ``cancel_all_orders``
+    # / ``record_fill`` AFTER the mutation has been committed and the
+    # lock released.
+    #
+    # The lazy ``from core.ws_broadcast import ws_manager`` keeps the
+    # data_store module importable even when the broadcast subsystem
+    # is unavailable (it never is in practice — same package — but the
+    # pattern is consistent with how every other cross-subsystem import
+    # in ``core.data_store`` is handled, e.g. ``core.decision_ledger``
+    # inside ``paper/simulator._execute_fill``).
+
+    async def _broadcast_orders(self, event_type: str = "update") -> None:
+        """Broadcast the current open-orders state on the ``orders`` channel.
+
+        ``event_type`` is one of ``placed`` / ``updated`` / ``cancelled``
+        / ``filled`` — surfaced in the envelope's ``data.type`` field so
+        a subscriber can distinguish a new-placement from a cancellation
+        without diffing the order list.
+        """
+        try:
+            from core.ws_broadcast import ws_manager
+
+            async with self._lock:
+                orders_payload = [
+                    {
+                        "order_id": o.order_id,
+                        "token_id": o.token_id,
+                        "side": o.side.value,
+                        "price": float(o.price),
+                        "size": float(o.size),
+                        "size_matched": float(o.size_matched),
+                        "status": o.status.value,
+                        "strategy": o.strategy,
+                        "paper": bool(o.paper),
+                        "created_at": float(o.created_at),
+                        "decision_id": o.decision_id,
+                    }
+                    for o in self.open_orders.values()
+                ]
+            await ws_manager.broadcast(
+                "orders",
+                {"type": event_type, "orders": orders_payload},
+            )
+        except Exception as e:  # noqa: BLE001 — broadcast must never break the data path
+            log.debug("[data_store] orders broadcast failed: %s", e)
+
+    async def _broadcast_positions(self, event_type: str = "update") -> None:
+        """Broadcast the current positions state on the ``positions`` channel.
+
+        Reuses the same dict shape as :meth:`get_positions` (the
+        portfolio-optimizer contract) so a subscriber can parse the
+        payload without a per-channel adapter.
+        """
+        try:
+            from core.ws_broadcast import ws_manager
+
+            positions_payload = await self.get_positions()
+            await ws_manager.broadcast(
+                "positions",
+                {"type": event_type, "positions": positions_payload},
+            )
+        except Exception as e:  # noqa: BLE001 — broadcast must never break the data path
+            log.debug("[data_store] positions broadcast failed: %s", e)
+
+    async def _broadcast_trade_fill(self, trade: Trade) -> None:
+        """Broadcast a single trade fill on the ``trades`` channel.
+
+        The payload mirrors the shape emitted by the existing
+        ``_build_snapshot`` ``recent_trades`` entry so a subscriber can
+        reuse the same parser for both the 1s snapshot and the per-fill
+        push.
+        """
+        try:
+            from core.ws_broadcast import ws_manager
+
+            trade_payload = {
+                "trade_id": trade.trade_id,
+                "token_id": trade.token_id,
+                "slug": self.market_slugs.get(trade.token_id, trade.token_id[:14]),
+                "side": trade.side.value,
+                "price": float(trade.price),
+                "size": float(trade.size),
+                "pnl": float(trade.pnl),
+                "strategy": trade.strategy,
+                "paper": bool(trade.paper),
+                "timestamp": float(trade.timestamp),
+            }
+            await ws_manager.broadcast(
+                "trades",
+                {"type": "fill", "trade": trade_payload},
+            )
+        except Exception as e:  # noqa: BLE001 — broadcast must never break the data path
+            log.debug("[data_store] trades broadcast failed: %s", e)
 
     # ── Weekly Loss Window (P0-GOV-01) ─────────────────────────────────
 

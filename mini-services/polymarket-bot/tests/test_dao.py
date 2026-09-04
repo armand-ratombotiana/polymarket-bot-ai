@@ -119,13 +119,20 @@ def reset_dao_paths(tmp_path, monkeypatch):
     """
     from core.database_manager import DatabaseBackend, db_manager
 
-    # Re-point BOT_DATA_DIR to per-test tmp_path so the decision-ledger
-    # SQLite file lives under tmp_path (no leakage between tests).
-    # Also re-point the cached _sqlite_paths dict so the DAO picks up
-    # the new path on its next call.
+    # Re-point the decision_ledger DAO's env-var-resolved SQLite path to
+    # a per-test file under tmp_path so writes from one test cannot leak
+    # into the next. The DAO's get_sqlite_path("decision_ledger") reads
+    # DECISION_LEDGER_DAO_DB_PATH FIRST (then falls back to
+    # sqlite_dir / "decision_ledger.db"), so we MUST override the env var
+    # (not just BOT_DATA_DIR) — otherwise the conftest-level redirect at
+    # /tmp/pmbot_conftest_isolation/decision_ledger_dao.db is reused
+    # across every test and earlier tests' rows leak into later tests'
+    # assertions (e.g. chain length 15 instead of 3).
     dao_dir = tmp_path / "dao_data"
     dao_dir.mkdir(parents=True, exist_ok=True)
+    decision_path = dao_dir / "decision_ledger.db"
     monkeypatch.setenv("BOT_DATA_DIR", str(dao_dir))
+    monkeypatch.setenv("DECISION_LEDGER_DAO_DB_PATH", str(decision_path))
     # Force-refresh the cached _sqlite_paths dict so the DAO's
     # ``get_sqlite_path("decision_ledger")`` returns the new path.
     db_manager._init_sqlite_paths()
@@ -138,6 +145,29 @@ def reset_dao_paths(tmp_path, monkeypatch):
     # Force SQLite backend so non-PG tests never attempt a real PG call.
     db_manager._status.pg_available = False
     db_manager._status.backend = DatabaseBackend.SQLITE
+
+    # Wipe any prior rows from the shared market_intelligence.db (the
+    # conftest-level MARKET_DB_PATH redirect). The market DB is shared
+    # with the rest of the suite because timescale_db captures the path
+    # at import time; without this clean-up, rows from prior runs of
+    # these DAO tests (or sibling tests that write to market_snapshots /
+    # market_trades) leak into the assertions below (e.g.
+    # ``test_market_data_dao_records_snapshot_on_sqlite`` expects
+    # exactly 1 row for ``test_token_records_snapshot`` but sees 2 from
+    # the previous pytest session).
+    import sqlite3 as _sqlite3
+
+    market_db_path = str(db_manager.get_sqlite_path("market"))
+    try:
+        with _sqlite3.connect(market_db_path) as conn:
+            conn.execute("DELETE FROM market_snapshots")
+            conn.execute("DELETE FROM market_trades")
+            conn.commit()
+    except _sqlite3.Error:
+        # Tables don't exist yet — the schema will be created on first
+        # write via _ensure_market_schema().
+        pass
+
     yield {"decision_ledger": db_manager.get_sqlite_path("decision_ledger")}
 
 

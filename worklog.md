@@ -28140,3 +28140,377 @@ Stage Summary:
   /api/system/db-retry) is documented in the file header; the
   panel gracefully degrades to an `ErrorState` with a retry
   button when the backend hasn't yet implemented the endpoints.
+
+---
+
+# W23-4 — Real-time Alert Notifications via WebSocket
+
+**Agent:** full-stack-developer
+**Task ID:** W23-4
+**Date:** 2026-09-04
+**Scope:** Additive — 1 new hook (`useAlertNotifications.ts`) + 1 new
+component (`AlertNotificationsPanel.tsx`) + 2 new test files (43 tests
+total) + 1 surgical edit to `TopStatusBar.tsx` to mount the panel.
+
+## What was done
+
+### Step 1 — `src/hooks/useAlertNotifications.ts`
+
+Composes the W11-4 `useWebSocket` to subscribe to the `alerts`
+channel and forward incoming alert payloads to (a) a rolling
+in-memory list (capped at 50, most-recent first) and (b) the W13-6
+`showCriticalAlert` desktop toast helper.
+
+Surface:
+- `alerts: Alert[]` — most-recent first, capped at 50
+- `unreadCount: number` — incremented per alert, decremented per ack
+- `enabled: boolean` — local mute toggle for OS toasts
+- `isConnected: boolean` — pass-through from `useWebSocket`
+- `acknowledge(alertId)` — removes one + decrements (no-op for
+  unknown id; clamps at 0)
+- `acknowledgeAll()` — clears both lists atomically
+- `toggle()` — flips `enabled` (does NOT revoke permission)
+
+Design notes (full detail in file header):
+- `onMessage` callback wrapped in `useCallback([enabled])` — but
+  `useWebSocket` stores `onMessage` in a ref refreshed every render
+  (no deps array on the ref-sync effect), so the closure swap
+  doesn't tear down the socket.
+- `enabled` is a **local** mute toggle, distinct from the browser's
+  notification permission. When `enabled=false`, the hook still
+  records alerts (so the in-app feed stays complete) but suppresses
+  the OS toast. Mirrors the W13-6 `useNotifications` semantics.
+- Filters strictly on `channel === 'alerts'` AND `data.type ===
+  'alert'` AND `data.alert.alert_id` being a string — other WS
+  frames are ignored so the hook composes cleanly with the other
+  `useWebSocket` consumers.
+- List cap (50) enforced via `[alert, ...prev].slice(0, 50)`.
+  `unreadCount` is NOT capped — the trader should still see
+  "you missed 60 alerts" even if the list only retains the
+  most-recent 50.
+
+### Step 2 — `src/components/AlertNotificationsPanel.tsx`
+
+Radix Popover that renders the bell trigger in the TopStatusBar and
+a dropdown panel listing recent alerts. Composed entirely from
+shadcn/ui primitives (`Popover`, `PopoverTrigger`,
+`PopoverContent`, `Button`) + the new `useAlertNotifications` hook.
+
+Visual language matches the workstation's dark theme
+(`#0e1015` panel surface, `#1f2335` borders, `#dde1ed` primary
+text, `#7e8aaa` secondary text). Severity colour map (matches
+W13-6 `showCriticalAlert`):
+
+| Severity  | Icon | Dot            | Border-left   | Text             |
+| --------- | ---- | -------------- | ------------- | ---------------- |
+| critical  | 🚨   | `bg-red-400`    | red-500       | `text-red-400`     |
+| error     | ❌   | `bg-orange-400` | orange-500    | `text-orange-400`  |
+| warning   | ⚠️   | `bg-amber-400`  | amber-500     | `text-amber-300`   |
+| info      | ℹ️   | `bg-blue-400`   | blue-500      | `text-blue-400`    |
+
+Features (all required by the W23-4 spec):
+1. **Bell icon trigger** — inline SVG (no icon-font dependency),
+   inherits `currentColor`; `aria-label="Alerts, N unread"`
+   includes the count; `aria-haspopup="dialog"` +
+   `aria-expanded` for proper Popover semantics.
+2. **Unread count badge** — absolute-positioned top-right of the
+   bell, only rendered when `unreadCount > 0`. Clamps at "99+" to
+   avoid overflow on long alert bursts.
+3. **Dropdown panel** — 360px wide, capped at 360px tall with
+   `overflow-y-auto`. Empty state
+   (`🔔 No active alerts. New alerts will appear here in real time.`)
+   when no alerts; otherwise each alert rendered as a
+   `<button>` row (keyboard-focusable, click-to-acknowledge) with
+   severity dot, icon, name, message, relative timestamp
+   (`5s ago`, `3m ago`, `2h ago`, `1d ago`), and severity label.
+4. **Live indicator** — header pill showing `Live` (green pulsing
+   dot) when `isConnected=true` and `Polling` (amber dot) when
+   `isConnected=false`. Mirrors W15-5 `ConnectionStatusPill`.
+5. **Mute toggle** — 🔔/🔕 button flipping the hook's local
+   `enabled` flag. `aria-pressed={enabled}` + descriptive
+   `aria-label`. Does NOT revoke the browser permission.
+6. **Acknowledge All button** — footer action calling
+   `acknowledgeAll()`. Only rendered when there are alerts.
+7. **Footer alert count** — `N active alerts · M unread` with
+   singular/plural handling.
+
+### Step 3 — `src/components/TopStatusBar.tsx` wiring
+
+2-edit surgical change:
+1. Added `import { AlertNotificationsPanel } from './AlertNotificationsPanel'`
+   alongside existing component imports, with a W23-4 comment
+   explaining the relationship to W13-6 `useNotifications`
+   (complementary, not a replacement — W13-6 catches alerts
+   that arrive between WS pushes via 30s polling; W23-4 catches
+   the live push as it happens via WS).
+2. Inserted `<AlertNotificationsPanel />` between `<LocaleSwitcher />`
+   and the audio mute toggle button. Clusters the two
+   "alert-related" controls together (bell = visual feed,
+   mute = audio cue).
+
+No other props or state changes — the panel is self-contained.
+
+### Step 4 — Tests
+
+#### `src/hooks/useAlertNotifications.test.ts` (23 tests)
+
+Uses the same `MockWebSocket` shim as `useWebSocket.test.ts` /
+`ConnectionStatus.test.tsx`, plus the same `FakeNotification` class
+as `useNotifications.test.ts`. 8 test groups covering:
+
+- Initial state (empty, zero unread, enabled=true, not connected).
+- WebSocket message capture — alerts channel + type='alert' +
+  valid alert_id adds to list most-recent-first; other channels
+  ignored; non-`alert` types ignored; missing alert_id ignored;
+  list caps at 50 with FIFO eviction; unread counter grows
+  beyond 50 (only the list is capped).
+- `acknowledge(id)` — removes one + decrements; no-op for unknown
+  id; never underflows below zero.
+- `acknowledgeAll()` — clears both; no-op when already empty.
+- `toggle()` — flips enabled; does NOT revoke permission.
+- `isConnected` — pass-through from useWebSocket; reflects open
+  and close events.
+- Desktop toast side-effects — fires `new Notification(...)` when
+  enabled AND permission granted; does NOT fire when
+  enabled=false (but alert still recorded); does NOT fire when
+  permission is default (but alert still recorded); fires per
+  alert in a sequence; does NOT crash when API unavailable.
+- Closure stability across re-renders — flipping enabled on →
+  off → on resumes toast firing; the alert feed is continuous
+  throughout (toast gating is independent of feed recording).
+
+#### `src/components/AlertNotificationsPanel.test.tsx` (20 tests)
+
+Mocks `useAlertNotifications` via `vi.mock` so component tests
+stay focused on rendering/interaction contracts. 5 test groups:
+
+- Trigger button — renders without crashing; no badge when
+  unreadCount=0; numeric badge with correct count; "99+" clamp
+  for >99; aria-label includes count; no "unread" suffix when
+  zero.
+- Empty state — empty-state copy rendered; Acknowledge All
+  button NOT rendered.
+- Live indicator — `Live` text + green dot class when
+  isConnected=true; `Polling` text + amber dot class when
+  isConnected=false.
+- Alerts list rendering — name + message + severity label per
+  row; colour-codes each severity (red/orange/amber/blue via
+  innerHTML contains); footer count with singular/plural.
+- Interactions — clicking a row calls `acknowledge(id)`;
+  clicking "Acknowledge All" calls `acknowledgeAll()`;
+  mute toggle calls `toggle()`; mute icon flips 🔔/🔕;
+  ESC closes the popover.
+
+### Verification
+
+- `bunx eslint src/hooks/useAlertNotifications.ts
+  src/hooks/useAlertNotifications.test.ts
+  src/components/AlertNotificationsPanel.tsx
+  src/components/AlertNotificationsPanel.test.tsx
+  src/components/TopStatusBar.tsx` → **clean (no errors, no
+  warnings)**. The repo-wide `bun run lint` reports 12
+  pre-existing errors in `src/components/StrategyPerformancePanel.tsx`
+  (a file this task did NOT touch — separate concurrent agent's
+  staged file). All new + modified files pass ESLint cleanly.
+- `bunx vitest run ./src/hooks/useAlertNotifications.test.ts
+  ./src/components/AlertNotificationsPanel.test.tsx` →
+  **43 passed (43)** across 2 test files in 28.14s.
+- `bunx vitest run --maxWorkers=4` → **924 passed (924)** across
+  43 test files in 174.29s. No regressions — the new 43 tests
+  are net additions to the suite.
+- Dev server log (`dev.log`) — clean. Next.js 16.1.3 / Turbopack
+  compiled `Ready in 5.5s`; no runtime errors introduced by the
+  new panel or TopStatusBar mount.
+
+## Stage Summary
+
+- Created 1 new hook (`useAlertNotifications.ts`, 102 lines)
+  composing `useWebSocket` (W11-4) + `showCriticalAlert` (W13-6).
+- Created 1 new component (`AlertNotificationsPanel.tsx`, ~260
+  lines) composing the hook + Radix Popover + shadcn/ui Button
+  with all 7 spec features (bell trigger, unread badge, dropdown
+  panel, severity colour-coding, Live indicator, mute toggle,
+  Acknowledge All).
+- Wired the panel into `TopStatusBar.tsx` via a 2-edit surgical
+  change (1 import + 1 element placement) between the
+  LocaleSwitcher and the audio mute toggle.
+- Created 2 new test files (43 tests total): 23 hook tests +
+  20 component tests, covering all required contract surfaces.
+- Lint clean for all new + modified files; 43 new tests pass;
+  full 924-test suite passes with no regressions.
+
+## Known limitations / follow-ups
+
+1. **Server-side acknowledge not yet wired.** The hook's
+   `acknowledge(id)` and `acknowledgeAll()` are purely
+   client-side — they remove the alert from the local list but
+   do NOT call `POST /api/alerts/:id/ack` (endpoint doesn't
+   exist yet). The trader who re-mounts the workstation will
+   see the same alerts again. W23-5 is the planned follow-up
+   to wire the server-side ack.
+2. **No persistence.** The alert list lives in component state
+   only — refreshing the page clears it. Intentional for the
+   initial W23-4 scope; a localStorage / IndexedDB cache can be
+   layered on in a future wave.
+3. **Composes a second `useWebSocket` instance.** The panel
+   mounts its own `useWebSocket` (via `useAlertNotifications`),
+   so the workstation now has at least three WS hooks running
+   concurrently (ConnectionStatusPill, useRealtimeData,
+   useAlertNotifications). Each opens its own socket. The W11-4
+   design doc explicitly chose this over a shared socket for
+   isolation; a future wave could promote a single
+   `useWebSocketProvider` if connection count becomes a concern.
+4. **Bell icon is an inline SVG, not a Lucide icon.** The
+   existing TopStatusBar icons (gear, mute, shortcuts, etc.)
+   all use emoji glyphs, so an inline SVG bell keeps the visual
+   weight consistent. If a future design pass migrates the
+   status-bar icons to Lucide, the bell should go with them.
+
+---
+
+## W23-8 — E2E Test Suite Expansion (5 new spec files + config)
+- **Date:** 2026-09-04
+- **Agent:** full-stack-developer
+- **Scope:** Additive — 5 NEW E2E spec files + 1 config update. Zero
+  changes to existing E2E specs, components, API routes, or Prisma
+  schema.
+
+### Files
+- NEW `e2e/database.spec.ts`        (9 tests, 320+ lines) — Database
+  Status panel flow (PG/SQLite backend indicator, health display,
+  table list, retry button).
+- NEW `e2e/strategies.spec.ts`      (12 tests, 280+ lines) — Strategy
+  Registry + Strategy Performance (Leaderboard) flows.
+- NEW `e2e/analytics-flows.spec.ts` (17 tests, 390+ lines) —
+  Performance / Attribution / Execution Quality / Closed Positions
+  deep-structure assertions.
+- NEW `e2e/ml-flows.spec.ts`        (18 tests, 370+ lines) — AI/ML
+  Engine + ML Validation + Shadow Inference deep-structure assertions.
+- NEW `e2e/settings.spec.ts`        (23 tests, 470+ lines) — Settings
+  modal open/close + 6 sections + in-modal Theme toggle + in-modal
+  Locale switcher + top-bar LocaleSwitcher + Save/Reset integration.
+- EDIT `playwright.config.ts` — Added `testMatch: '**/*.spec.ts'`,
+  `timeout: 60_000` (per-test), `expect.timeout: 15_000`,
+  `actionTimeout: 30_000`, `navigationTimeout: 45_000`, bumped
+  `webServer.timeout` 60_000 → 120_000. Updated docstring.
+
+**Total new tests: 82** (102 → 184 tests; 11 → 16 spec files).
+
+### Test design conventions (matched existing suite)
+- Shared `beforeEach` waits for `.page-area` (45s timeout) — proxy
+  for "client hydrated + default panel mounted".
+- Sidebar `aria-current="page"` is the active-panel signal.
+- PanelErrorBoundary fallback selectors (`.panel-error-boundary`,
+  `.error-boundary-fallback`) asserted to have count 0 — regression
+  guard against panel crashes.
+- Backend may or may not be running — assert STRUCTURE not VALUES.
+- Conditional tests probe the relevant `/api/...?XTransformPort=8080`
+  endpoint first; if down, `test.skip(true, '...')`. Mirrors the
+  `api-health.spec.ts` + `ml.spec.ts` pattern.
+- Cross-panel "no uncaught page errors" sweep at end of each file.
+
+### Per-file coverage highlights
+
+#### `database.spec.ts` (Database Status flow — 9 tests)
+- Navigate to `system-database-status` panel (Sidebar.tsx:142).
+- Backend indicator `[data-testid="db-backend-badge"]` shows
+  PostgreSQL or SQLite (DatabaseStatusPanel.tsx:173).
+- PG health status display (PostgreSQL Connection Health card,
+  DatabaseStatusPanel.tsx:545).
+- Table list (table-or-empty-state poll).
+- Retry PG Connection button (`aria-label="Retry PostgreSQL
+  connection"`, DatabaseStatusPanel.tsx:629).
+- Header Refresh button (`aria-label="Refresh database status"`).
+- ErrorState card's own Retry button (conditional on backend down).
+
+#### `strategies.spec.ts` (Strategy flow — 12 tests)
+- Strategy Registry navigation + mount + catalog header + category
+  tabs + filter input + card grid.
+- Implemented Deploy/Stop controls (conditional on
+  `/api/strategies/catalog` reachable).
+- Strategy Performance = analytics Performance panel hosting
+  EquityCurve + AnalyticsPanel + LeaderboardPanel.
+- Leaderboard ranked-rows-or-empty-state poll.
+- AnalyticsPanel KPI grid (conditional on `/api/analytics`).
+
+#### `analytics-flows.spec.ts` (Analytics flow — 17 tests)
+- Performance KPI cards (P&L, Win Rate, Sharpe — AnalyticsPanel.tsx:176).
+- Attribution 7-DIMENSION badge + summary KPI cards + Dimensions/
+  Waterfall/Strategies tabs + dimension regions (AttributionPanel.tsx).
+- Execution Quality per-fill audit KPI strip + slippage histogram
+  (`role="img"` aria-label="Slippage distribution by bucket") +
+  per-fill log table-or-empty-state.
+- Closed Positions ledger header + KPI summary strip + ledger table-
+  or-empty-state + Refresh + CSV export controls.
+
+#### `ml-flows.spec.ts` (ML flow — 18 tests)
+- AI/ML Engine telemetry header + model info (Active: version badge
+  + Adaptive Ensemble Blend Weights card) + 38-Feature Pipeline badge
+  + RF/GB/SGD/LightGBM member cards + Gated Retrain button.
+- ML Validation header + governance+drift badge + metric labels
+  (Brier, AUC, Log-loss, ECE, Accuracy — conditional on
+  `/api/ml/metrics`) + Refresh control.
+- Shadow Inference header + Challenger Models section + champion
+  badge (conditional on `/api/ml/versions` reporting active model)
+  + Register Challenger button + comparison KPIs (Total P&L, Win
+  Rate, Sharpe).
+
+#### `settings.spec.ts` (Settings modal — 23 tests)
+- Open via gear icon (`aria-label="Open user preferences"`).
+- Close via Cancel / Escape / backdrop click / close button (✕).
+- All 6 sections render in canonical order: Display, Dashboard,
+  Trading, Notifications, Sound, Privacy (SettingsModal.tsx:261
+  SECTION_ORDER).
+- Per-section content assertions (Theme, Language, Default panel,
+  Auto-refresh, Reduced motion, Show unrealized P&L, Show price
+  flashes, Browser notifications, Alert severity filter, Sound cues,
+  Sound volume, Share error reports).
+- In-modal Theme Select exposes Dark + Light options; selecting
+  opposite enables Save (dirty tracking).
+- In-modal Language Select exposes English + French; top-bar
+  LocaleSwitcher flips sidebar group label `Main` → `Principal`
+  (then restores to `Main`).
+- Save button enables after toggling Auto-refresh, then Save closes
+  the modal (with restore-to-original cleanup).
+- Reset to defaults replaces draft without closing.
+- Opening settings doesn't interrupt active panel navigation.
+- No uncaught errors during open/interact/close.
+
+### Verification
+
+#### `bunx playwright test --list` ✓
+184 tests in 16 files (was 102 in 11). 82 new tests across the 5
+new files. All listed with their describe blocks.
+
+#### Sample test runs (each verified to PASS)
+- `e2e/strategies.spec.ts › can navigate to the Strategy Registry panel` ✓ (1.4m)
+- `e2e/settings.spec.ts › all 6 sections render in canonical order` ✓ (50.6s)
+- `e2e/database.spec.ts › can navigate to the Database status panel` ✓ (1.2m)
+- `e2e/ml-flows.spec.ts › panel renders the model telemetry header` ✓ (1.3m)
+
+(Cold-start compile takes ~44s on the sandbox; tests pass once the
+dev server's first compile is done. A `timeout 90` bash command
+killed the database test on its first run because the cold-compile
+exceeded the command-level timeout; bumping to `timeout 150` and
+re-running passed.)
+
+#### `bun run lint` ✓ (for the new files)
+`bunx eslint e2e/database.spec.ts e2e/strategies.spec.ts
+e2e/analytics-flows.spec.ts e2e/ml-flows.spec.ts
+e2e/settings.spec.ts playwright.config.ts` exits 0 with no output.
+
+NOTE: `bun run lint` (full repo) flags 12 pre-existing
+`react-hooks/static-components` errors in
+`src/components/StrategyPerformancePanel.tsx` — this file was added
+by a parallel W23 agent (git status shows `A` not committed) and is
+NOT in this task's scope. The new E2E spec files + the playwright
+config edit introduce zero new lint warnings.
+
+### Stage summary
+- 5 new E2E spec files (82 tests total).
+- 1 config edit (timeouts + testMatch + docs).
+- All new files lint clean.
+- 4 sample tests verified passing against the live dev server.
+- Test count: 102 → 184 (files: 11 → 16).
+- No backend / DB / component / API changes — pure additive E2E
+  expansion.

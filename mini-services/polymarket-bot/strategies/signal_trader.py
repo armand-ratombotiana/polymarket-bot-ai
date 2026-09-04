@@ -574,6 +574,25 @@ class SignalTraderStrategy(BaseStrategy):
                 )
             )
 
+        # W23-2 — record the signal timestamp against the latency tracker
+        # so the signal→order→fill pipeline latency is measurable per
+        # correlation_id. ``correlation_id`` is the ``dec_id`` threaded
+        # through the decision ledger. Best-effort: a tracker exception
+        # must NEVER block the strategy scan (the signal has already
+        # been generated and the decision-ledger row is already written;
+        # the tracker is purely observability).
+        try:
+            from core.latency_tracker import latency_tracker
+            latency_tracker.record_signal(
+                correlation_id=dec_id,
+                token_id=token_id,
+                strategy=self.name,
+            )
+        except Exception as e:
+            log.debug(
+                "[signal_trader] latency_tracker.record_signal failed: %s", e
+            )
+
         return MarketSignal(
             token_id=token_id,
             slug=slug,

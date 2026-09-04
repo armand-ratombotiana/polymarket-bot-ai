@@ -27,6 +27,18 @@ import ConnectionStatusPill from './ConnectionStatus'
 // ShortcutsModal + StrategyConfigModal pattern (mounted by parent,
 // toggled via a status-bar icon).
 import SettingsModal from './SettingsModal'
+// W23-4 — Real-time alert notifications bell. Sits next to the
+// audio mute toggle so the trader's two "alert-related" controls
+// cluster together: the bell surfaces the in-app feed (with a
+// popover of recent alerts pushed over the WebSocket alerts
+// channel) and the mute toggle controls the OS-level audio cue.
+// The panel composes `useAlertNotifications` (which itself
+// composes `useWebSocket`) so it pushes its own alert toasts
+// independently of the W13-6 `useNotifications` poll — the two
+// are complementary: W13-6 catches alerts that arrive between
+// WS pushes (e.g. while the WS is mid-reconnect), W23-4 catches
+// the live push as it happens.
+import { AlertNotificationsPanel } from './AlertNotificationsPanel'
 
 interface TopStatusBarProps {
   snapshot: BotSnapshot
@@ -334,6 +346,18 @@ export default function TopStatusBar({
             picks up the trader's persisted choice via useTranslation
             and flips all t() consumers in one React commit. */}
         <LocaleSwitcher />
+
+        {/* W23-4 — Real-time alert notifications bell. Sits next to the
+            audio mute toggle so the trader's two "alert" controls
+            cluster together. The bell opens a Radix Popover listing
+            recent alerts pushed over the WebSocket `alerts` channel;
+            the mute toggle below controls the OS-level audio cue.
+            The bell also fires its own desktop toast on each new
+            alert via `showCriticalAlert` (subject to the user's
+            `enabled` flag + browser notification permission), so the
+            trader is interrupted even when the workstation tab is
+            in the background. */}
+        <AlertNotificationsPanel />
 
         {onToggleMute && (
           <button

@@ -389,6 +389,24 @@ class PaperSimulator:
                 )
             except Exception as e:
                 log.debug("[paper_sim] ledger FILL record failed: %s", e)
+            # W23-2 — record the fill timestamp against the latency tracker
+            # so the signal→order→fill pipeline latency is measurable per
+            # correlation_id. ``order.decision_id`` is the same identifier
+            # threaded through the chain (alias for the tracker's
+            # ``correlation_id``). Placed inside the ``if order.decision_id:``
+            # block so the latency record is only created for orders that
+            # also have a decision-ledger chain — keeps the by-strategy
+            # breakdown meaningful. Best-effort: wrapped in its own
+            # try/except so a tracker hiccup never blocks the fill path
+            # (mirrors the ledger / execution_quality fire-and-forget
+            # contract).
+            try:
+                from core.latency_tracker import latency_tracker
+                latency_tracker.record_fill(correlation_id=order.decision_id)
+            except Exception as e:
+                log.debug(
+                    "[paper_sim] latency_tracker.record_fill failed: %s", e
+                )
             # W19-3 — record the POSITION stage immediately after the FILL
             # so the chain shows the actual exposure the bot took on this
             # decision. The Position object was mutated in place by

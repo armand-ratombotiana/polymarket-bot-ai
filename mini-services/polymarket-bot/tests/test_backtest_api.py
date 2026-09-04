@@ -319,11 +319,30 @@ def _seed_closed_positions(
 
 
 def _deterministic_rng(seed: int):
-    """Tiny LCG so we don't pull in numpy here (keeps the helper light)."""
-    state = seed
-    while True:
-        state = (1103515245 * state + 12345) & 0x7FFFFFFF
-        yield (state / 0x7FFFFFFF)
+    """Tiny LCG so we don't pull in numpy here (keeps the helper light).
+
+    Returns a small RNG facade exposing ``.uniform(a, b)`` and
+    ``.random()`` so callers can drop-in replace ``random.Random`` while
+    keeping the deterministic LCG stream (no dependency on numpy).
+    """
+    return _LCGRng(seed)
+
+
+class _LCGRng:
+    """Minimal ``random.Random``-like facade over the LCG stream."""
+
+    def __init__(self, seed: int):
+        self._state = seed
+
+    def _next(self) -> float:
+        self._state = (1103515245 * self._state + 12345) & 0x7FFFFFFF
+        return self._state / 0x7FFFFFFF
+
+    def random(self) -> float:
+        return self._next()
+
+    def uniform(self, a: float, b: float) -> float:
+        return a + (b - a) * self._next()
 
 
 def _clear_ml_feature_store(db_path: Path) -> None:
@@ -452,7 +471,7 @@ def test_walk_forward_response_shape(client, auth_headers) -> None:
 
 
 # ── (3) Walk-forward with real labelled features ───────────────────────────
-def test_walk_forward_with_real_features(self): return # SKIP(client, auth_headers) -> None:
+def test_walk_forward_with_real_features(client, auth_headers) -> None:
     """When the ``ml_feature_store`` table has >= 1200 labelled rows
     (the default ``train_window + test_window = 1000 + 200``), the
     route uses them and reports ``source == "real"``.

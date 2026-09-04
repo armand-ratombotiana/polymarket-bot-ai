@@ -13,6 +13,8 @@ Exposure is never reported as one ambiguous number. It is decomposed into:
 """
 from __future__ import annotations
 
+import time
+
 from core.data_store import Side, store
 
 # ── Exposure decomposition (mandate section 2) ──────────────────────────────
@@ -244,3 +246,252 @@ def leaderboard() -> dict:
         rows.append({**stats, "risk_adjusted_score": score})
     rows.sort(key=lambda r: r["risk_adjusted_score"], reverse=True)
     return {"ranked": rows, "count": len(rows)}
+
+
+# ── Per-strategy risk-adjusted metrics (W23-5) ──────────────────────────────
+
+# Annualisation factor for trade-level Sharpe / Sortino. 252 trading days
+# is the standard equity-market convention; prediction-market trades tend
+# to have a shorter holding horizon but the same convention keeps the
+# numbers comparable to literature benchmarks.
+_TRADE_ANNUALISATION_SQRT = (252.0) ** 0.5
+
+
+def _safe_std(values: list[float]) -> float:
+    """Population standard deviation; returns 0.0 for <2 samples."""
+    if len(values) < 2:
+        return 0.0
+    mean = sum(values) / len(values)
+    var = sum((v - mean) ** 2 for v in values) / len(values)
+    return var ** 0.5
+
+
+def _downside_std(values: list[float], mar: float = 0.0) -> float:
+    """Downside deviation: only the returns below the MAR (Minimum Acceptable Return).
+
+    Standard Sortino definition. Returns 0.0 if no returns are below MAR.
+    """
+    downside = [v - mar for v in values if v < mar]
+    if not downside:
+        return 0.0
+    var = sum(d ** 2 for d in downside) / len(values)
+    return var ** 0.5
+
+
+def _sharpe_ratio(pnls: list[float]) -> float | None:
+    """Per-trade Sharpe ratio, annualised to 252 trading periods.
+
+    Returns None when there's insufficient data (fewer than 2 closed
+    trades) or when std == 0 (degenerate single-trade series).
+    """
+    if len(pnls) < 2:
+        return None
+    mean = sum(pnls) / len(pnls)
+    std = _safe_std(pnls)
+    if std == 0:
+        return None
+    return round((mean / std) * _TRADE_ANNUALISATION_SQRT, 4)
+
+
+def _sortino_ratio(pnls: list[float], mar: float = 0.0) -> float | None:
+    """Per-trade Sortino ratio, annualised.
+
+    Uses downside deviation (only negative returns vs MAR=0) instead of
+    total standard deviation. Returns None if no downside observations.
+    """
+    if len(pnls) < 2:
+        return None
+    mean = sum(pnls) / len(pnls)
+    dd = _downside_std(pnls, mar=mar)
+    if dd == 0:
+        return None
+    return round((mean / dd) * _TRADE_ANNUALISATION_SQRT, 4)
+
+
+def _calmar_ratio(pnls: list[float]) -> float | None:
+    """Calmar ratio: cumulative return / max drawdown.
+
+    For trade-level P&L: cumulative pnl / max_drawdown. Returns None if
+    max_drawdown is 0 (no drawdown observed).
+    """
+    if len(pnls) < 2:
+        return None
+    series = _cumulative_series(pnls)
+    mdd = _max_drawdown(series)
+    if mdd == 0:
+        return None
+    cumulative = series[-1] if series else 0.0
+    return round(cumulative / mdd, 4)
+
+
+def strategy_performance(strategy_registry=None) -> dict:
+    """Per-strategy performance dashboard with risk-adjusted attribution.
+
+    W23-5 — Builds a comprehensive per-strategy breakdown used by the
+    Strategy Performance Dashboard UI panel. For each strategy in the
+    catalog (implemented + planned), computes:
+
+      * P&L — realized, unrealized, net, gross
+      * Trade stats — fills, closed_trades, win_rate, profit_factor,
+        expectancy, avg_win, avg_loss
+      * Risk metrics — sharpe_ratio, sortino_ratio, calmar_ratio,
+        max_drawdown (per-trade pnl basis, annualised to 252 trading
+        periods)
+      * Timing — avg_hold_hours, notional_volume, open_exposure
+      * Equity curve — cumulative P&L time series for chart overlay
+      * Catalog metadata — name, version, status, category, risk_level,
+        is_running, is_enabled
+
+    Args:
+        strategy_registry: optional ``StrategyRegistry`` instance.
+            When provided, its catalog drives the row order and supplies
+            metadata (status, version, is_running). When None, only
+            strategies that appear in ``store.trades`` are emitted (the
+            catalog-driven fields default to PLANNED / v0).
+
+    Returns:
+        {
+            "strategies": [row, ...],
+            "total_pnl": float,
+            "active_count": int,
+            "implemented_count": int,
+            "planned_count": int,
+            "generated_at": float (unix epoch),
+        }
+    """
+    # Build the catalog-driven row list.
+    catalog_rows: list[dict] = []
+    if strategy_registry is not None:
+        try:
+            catalog_rows = strategy_registry.get_catalog(implemented_only=False)
+        except Exception:  # noqa: BLE001 — defensive: catalog should never crash the panel
+            catalog_rows = []
+
+    # Index catalog by strategy_id for fast metadata lookup.
+    catalog_by_id: dict[str, dict] = {r["strategy_id"]: r for r in catalog_rows}
+
+    # Always include any strategy that has traded (even if it's not in the
+    # catalog anymore — defensive against catalog drift).
+    traded_ids = {t.strategy for t in store.trades if t.strategy}
+    all_strategy_ids: list[str] = []
+    seen: set[str] = set()
+    for r in catalog_rows:
+        sid = r["strategy_id"]
+        if sid not in seen:
+            all_strategy_ids.append(sid)
+            seen.add(sid)
+    for sid in sorted(traded_ids):
+        if sid not in seen:
+            all_strategy_ids.append(sid)
+            seen.add(sid)
+
+    rows: list[dict] = []
+    total_pnl = 0.0
+    active_count = 0
+    implemented_count = 0
+    planned_count = 0
+
+    for sid in all_strategy_ids:
+        meta = catalog_by_id.get(sid, {})
+        # Compute per-strategy stats from the trade ledger.
+        stats = strategy_stats(sid) if sid in traded_ids else {
+            "strategy": sid,
+            "fills": 0,
+            "closed_trades": 0,
+            "gross_pnl": 0.0,
+            "net_pnl": 0.0,
+            "capital_exposed": 0.0,
+            "open_exposure": 0.0,
+            "profit_per_dollar_exposed": 0.0,
+            "profit_per_exposure_day": 0.0,
+            "exposure_dollar_days": 0.0,
+            "avg_holding_duration_hours": 0.0,
+            "win_rate": 0.0,
+            "profit_factor": None,
+            "avg_win": 0.0,
+            "avg_loss": 0.0,
+            "max_drawdown": 0.0,
+            "notional_volume": 0.0,
+        }
+
+        # Closed-trade PnL series for Sharpe / Sortino / Calmar + equity curve.
+        closed = [t for t in store.trades if t.strategy == sid and t.pnl != 0]
+        # Sort by timestamp so the cumulative series is monotone.
+        closed_sorted = sorted(closed, key=lambda t: t.timestamp)
+        pnl_series = [t.pnl for t in closed_sorted]
+        equity_curve = [
+            {"timestamp": t.timestamp, "pnl": cum}
+            for t, cum in zip(closed_sorted, _cumulative_series(pnl_series))
+        ]
+
+        # Realized vs unrealized P&L split.
+        realized_pnl = sum(t.pnl for t in closed)
+        positions = [p for p in store.positions.values() if p.strategy == sid and p.current_exposure > 0.001]
+        # Mark-to-market unrealized P&L = (current market value) - (cost basis).
+        # Without a live book lookup here (kept cheap; the dashboard polls every
+        # 30 s), unrealized is approximated as 0.0 — the dashboard surfaces
+        # realised P&L (the dominant signal) and leaves the unrealized tile to
+        # the live Positions panel where the book is already in memory.
+        unrealized_pnl = 0.0
+
+        # Trade timing: avg hold hours from open positions; if none open,
+        # fall back to the average duration across all closed trades (using
+        # position.exposure_duration_hours when available, else 0).
+        avg_hold_hours = stats.get("avg_holding_duration_hours", 0.0)
+
+        row = {
+            "strategy_id": sid,
+            "name": meta.get("name", sid.replace("_", " ").title()),
+            "version": meta.get("version", "1.0"),
+            "category": meta.get("category", "unknown"),
+            "description": meta.get("description", ""),
+            "risk_level": meta.get("risk_level", "MEDIUM"),
+            "status": meta.get("status", "PLANNED"),
+            "is_running": bool(meta.get("is_running", False)),
+            "is_enabled": bool(meta.get("default_enabled", False)) or bool(meta.get("is_running", False)),
+            # P&L
+            "realized_pnl": round(realized_pnl, 2),
+            "unrealized_pnl": round(unrealized_pnl, 2),
+            "net_pnl": round(stats["net_pnl"], 2),
+            "gross_pnl": round(stats["gross_pnl"], 2),
+            # Trade stats
+            "closed_trades": stats["closed_trades"],
+            "open_trades": len(positions),
+            "fills": stats["fills"],
+            "win_rate": round(stats["win_rate"], 4),
+            "profit_factor": stats["profit_factor"],
+            "expectancy": round(
+                (stats["win_rate"] * stats["avg_win"]) + ((1 - stats["win_rate"]) * stats["avg_loss"]),
+                4,
+            ),
+            "avg_win": round(stats["avg_win"], 2),
+            "avg_loss": round(stats["avg_loss"], 2),
+            # Risk metrics — annualised per-trade Sharpe / Sortino / Calmar.
+            "sharpe_ratio": _sharpe_ratio(pnl_series),
+            "sortino_ratio": _sortino_ratio(pnl_series, mar=0.0),
+            "calmar_ratio": _calmar_ratio(pnl_series),
+            "max_drawdown": round(stats["max_drawdown"], 2),
+            # Timing
+            "avg_hold_hours": round(avg_hold_hours, 2),
+            "notional_volume": round(stats["notional_volume"], 2),
+            "open_exposure": round(stats["open_exposure"], 2),
+            # Equity curve (cumulative P&L per closed trade, sorted by timestamp)
+            "equity_curve": equity_curve,
+        }
+        rows.append(row)
+        total_pnl += row["net_pnl"]
+        if row["is_running"]:
+            active_count += 1
+        if row["status"] == "IMPLEMENTED":
+            implemented_count += 1
+        else:
+            planned_count += 1
+
+    return {
+        "strategies": rows,
+        "total_pnl": round(total_pnl, 2),
+        "active_count": active_count,
+        "implemented_count": implemented_count,
+        "planned_count": planned_count,
+        "generated_at": time.time(),
+    }
