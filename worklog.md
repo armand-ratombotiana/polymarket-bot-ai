@@ -28802,3 +28802,685 @@ and `useBot` so no panel keeps polling while the trader isn't watching.
    is negligible. If the cards ever become expensive (e.g. each one
    fetches its own tooltip data), the pattern should switch to four
    pre-mounted TabsContent blocks.
+
+---
+
+## W28-3 — full-stack-developer — Tests for untested Wave 21-26 UI panels
+
+**Scope.** Added minimal vitest + React Testing Library coverage for the
+six previously-untested Wave 21-26 dashboard panels. Each panel had no
+test file before this task — they were among the largest untested surfaces
+in `src/components/`. The four panels already in the spec's
+"high-priority" list (DatabaseStatusPanel, PerformanceReportPanel,
+AlertNotificationsPanel, PortfolioRiskPanel) already had tests from prior
+W21-7 / W23-4 / W26-2 work; this task focused on the remaining six.
+
+**Files created (6 new test files, 61 new tests):**
+
+1. `src/components/OrderFlowPanel.test.tsx` — 10 tests
+   (prop-based component; mocks the `/api/depth/{token_id}` poll).
+2. `src/components/RetentionPanel.test.tsx` — 10 tests
+   (mocks `GET /api/system/health`; loading/error/loaded states).
+3. `src/components/MLValidationPanel.test.tsx` — 10 tests
+   (mocks `/api/ml/metrics`, `/api/ml/drift`, `/api/ml/versions`; checks
+   the "Drift OK" badge + Retrain button in the loaded state).
+4. `src/components/CapitalAllocatorPanel.test.tsx` — 10 tests
+   (mocks `/api/positions/closed`, `/api/capital/allocation`,
+   `/api/exposure`; checks the "Edge → Size Saturating Curve" heading).
+5. `src/components/ShadowInferencePanel.test.tsx` — 10 tests
+   (mocks `/api/ml/versions`, `/api/shadow/trades`,
+   `/api/shadow/comparison`, `/api/ml/metrics`; checks the "Champion"
+   badge and the Live/Paused polling toggle).
+6. `src/components/LiveSafetyGatePanel.test.tsx` — 11 tests
+   (mocks `/api/live/readiness`, `/api/status`, `/api/audit/logs`;
+   checks loading skeleton, error-state Retry button, OPEN gate badge,
+   and the "Run all checks" / "Force open" / "Force close" buttons).
+
+**Strategy.** Each test file follows the pattern established by
+`PortfolioRiskPanel.test.tsx` and `DatabaseStatusPanel.test.tsx`:
+
+- `global.fetch` is mocked per-test via `vi.mocked(fetch).mockImplementation`
+  (the project's `src/test/setup.ts` already installs `global.fetch = vi.fn()`
+  globally, so individual tests just override the implementation).
+- `apiFetch` (from `src/lib/api.ts`) wraps `fetch` and adds the
+  `Authorization: Bearer ...` header — so mocking `global.fetch` directly
+  is sufficient to cover both the URL routing and the auth-header check.
+- Each test file covers at minimum: (1) renders without crashing,
+  (2) renders the panel header title, (3) renders in the loading skeleton
+  state, (4) renders the error state on a failed fetch, (5) renders the
+  loaded state after a successful fetch, (6) verifies the
+  `Authorization` header is attached to the initial fetch.
+- For panels that fire multiple parallel fetches (MLValidationPanel,
+  CapitalAllocatorPanel, ShadowInferencePanel, LiveSafetyGatePanel) the
+  fetch mock switches its returned payload based on the URL substring,
+  so all parallel promises resolve with the right shape and the loaded
+  state can be asserted via `waitFor`.
+
+**Two non-obvious gotchas worth recording for future panel-test authors:**
+
+1. **Multiple identical text matches.** `OrderFlowPanel` renders the
+   "0/min" tape-speed value in BOTH the top stats bar AND inside the
+   `OrderBookImbalance` meter when no depth is loaded. Use
+   `getAllByText('0/min')` and `expect(...).toBeGreaterThanOrEqual(1)`
+   rather than `getByText`, which throws on duplicate matches.
+2. **Retrain button only renders after data loads.** `MLValidationPanel`'s
+   "Retrain Now" button lives in the loaded-state body (not the header).
+   Tests that want to assert its presence must wait for the metrics
+   fetch to resolve first — `getByRole('button', { name: /retrain now/i })`
+   inside `waitFor`.
+
+**Verification:**
+- `bun run lint` — clean (0 errors, 0 warnings).
+- `bun run test` — all 1176 tests pass across 59 test files.
+- Test-file count grew from 28 → 34 component test files (6 new).
+
+**Work records.** Full task summary written to
+`/home/z/my-project/agent-ctx/W28-3-full-stack-developer.md`.
+
+---
+
+## W28-1 — TypeScript Zero-Error Pass (27 errors → 0)
+- **Date:** 2026-09-04
+- **Scope:** All TS6133 / TS6196 / TS2739 / TS2345 / TS2352 errors across
+  the `src/**` tree.
+- **Agent:** full-stack-developer
+- **Task ID:** W28-1
+
+### Stage summary
+
+`bunx tsc --noEmit --skipLibCheck` exited non-zero with **27 distinct
+errors** across **17 files**. The brief listed 21 of them (the original
+W28-1 list); 6 additional errors in untracked test files
+(`CapitalAllocatorPanel.test.tsx`, `LiveSafetyGatePanel.test.tsx`,
+`MLValidationPanel.test.tsx`, `OrderFlowPanel.test.tsx`) were also
+visible to `tsc` and had to be cleared to hit zero. All 27 fixed;
+`bunx tsc --noEmit --skipLibCheck 2>&1 | wc -l` now prints **0**.
+
+### File-by-file fixes
+
+1. `src/app/page.tsx` (1 fix) — Removed the `import ShortcutsModal`
+   line. The component was never rendered (the JSX tree only mounts
+   `KeyboardCheatSheet`); the import was the last live reference to
+   the legacy modal. The W17-6 historical-context comment block above
+   the import was rewritten to record why the legacy modal is gone.
+
+2. `src/components/AnalyticsPanel.tsx` (2 fixes) — Removed the
+   `ciLowPct` + `ciHighPct` locals. They were rendered redundant by
+   the W26-6 redesign — the CI is rendered directly from
+   `data.win_rate_ci_low` / `_ci_high` (raw floats) by the
+   downstream `ConfidenceIntervalBadge`, so the percentage-formatted
+   values were dead. No JSX referenced them.
+
+3. `src/components/ArbitrageMatrixView.test.tsx` (4 fixes) — Removed
+   the entire `mockFetchRouteByUrl` helper (scaffolded, never wired
+   into a test). Renamed three unused `input: string` parameters in
+   arrow-function fetch mocks to `_input: string` (TypeScript's
+   `noUnusedParameters` rule skips underscore-prefixed names — same
+   convention as the existing `mockFetchRouteGetPost` helper).
+
+4. `src/components/AuditLogPanel.tsx` (3 fixes) — Removed the `Inbox`
+   and `Loader2` lucide-react imports. Also removed the unused
+   `_AuditRow` type alias (TS6196) AND its sole referent, the
+   `AuditRowProps` interface. Both were non-exported module-private
+   symbols left over from the W16-6 VirtualTable migration — the
+   comment claimed they were "kept for backwards compat with future
+   callers", but they were never exported so the compat shim was a
+   no-op. The history-preserving comment was rewritten to record the
+   removal.
+
+5. `src/components/BacktestLabView.test.tsx` (1 fix) — Removed `act`
+   from the `@testing-library/react` import list. The test file never
+   wraps anything in `act(...)` — it relies entirely on
+   `waitFor`/`fireEvent` which internally call `act` themselves.
+
+6. `src/components/DatabaseStatusPanel.test.tsx` (1 fix) — Renamed
+   the unused `input` parameter in `mockFetchRouteGetPost` to
+   `_input` (same convention as #3).
+
+7. `src/components/KeyboardCheatSheet.tsx` (1 fix) — Removed
+   `type KeyboardEvent as ReactKeyboardEvent` from the React import.
+   The component uses the global DOM `KeyboardEvent` type
+   (lines 194, 211, 250), not the React synthetic-event type.
+
+8. `src/components/PortfolioRiskPanel.test.tsx` (1 fix) — Removed
+   `vi` from the `vitest` import. The 3 tests in this file don't mock
+   anything — they render the panel with stub props and assert on
+   the static output.
+
+9. `src/components/StrategyPerformancePanel.test.tsx` (2 fixes) —
+   Renamed two unused `input: string` parameters to `_input: string`
+   (one in the `mockFetchRouteGetPost` helper, one in an inline
+   `mockImplementation` for the toggle-failure test).
+
+10. `src/components/charts/TradeTape.tsx` (1 fix) — Removed `FlowSide`
+    from the type import. The tape only consumes the `FlowTrade`
+    shape; side rendering is delegated to `OrderFlowChart` via the
+    `side` field on each `FlowTrade`.
+
+11. `src/components/ui/ConfidenceIntervalBadge.tsx` (1 fix) — Removed
+    `import * as React from 'react'`. The file has no `React.X`
+    references and uses no hooks; with `jsx: 'react-jsx'` (set in
+    `tsconfig.json`) the automatic JSX runtime injects React without
+    an explicit import.
+
+12. `src/components/ui/StatisticalSignificanceBadge.tsx` (1 fix) —
+    Same as #11: removed the unused `import * as React from 'react'`.
+
+13. `src/components/ui/VirtualTable.tsx` (2 fixes) —
+    (a) Removed `useCallback` from the React import list (the module-
+    scope `RowComponent` is already a stable reference, so no
+    `useCallback` wrapper is needed — a comment at line 138 already
+    explains this).
+    (b) Fixed TS2739 on the `rowProps={rowProps}` prop by declaring
+    `ariaAttributes` on the `RowComponent` prop type. react-window v2
+    infers the `RowProps` generic from BOTH `rowComponent` and
+    `rowProps`. Without `ariaAttributes` on the row component, TS
+    couldn't tell that `index` / `style` are react-window's reserved
+    props (to be stripped via `ExcludeForbiddenKeys_2`), so it inferred
+    `RowProps = RowComponentProps & { index, style }` and then
+    rejected our `RowComponentProps` (which lacks `index` / `style`)
+    on the `rowProps` prop. Declaring all three reserved props
+    (`ariaAttributes`, `index`, `style`) on `RowComponent` lets TS
+    correctly infer `RowProps = RowComponentProps`. Also imported
+    `type CSSProperties` from `react` to avoid relying on the global
+    React namespace.
+
+### Additional (untracked-test) errors fixed
+
+The original task list named 13 files (21 errors). The actual `tsc`
+output flagged 27 errors across 17 files — six additional errors
+lived in untracked test files created by recent (W27-W28) agents
+that hadn't been committed yet. These were all real TS errors that
+would have blocked `bun run build`, so they were fixed too:
+
+14. `src/components/CapitalAllocatorPanel.test.tsx` (2 fixes) —
+    Widened the `input: string` parameter type on two
+    `mockImplementation` callbacks to `input: string | URL | Request`
+    to match the global `fetch` signature. TS2345 fires because
+    `strictFunctionTypes` makes function parameters contravariant —
+    a function accepting only `string` can't be assigned to a slot
+    expecting a function accepting `string | URL | Request`.
+
+15. `src/components/LiveSafetyGatePanel.test.tsx` (1 fix) — Removed
+    the unused `mockFetchReject` helper. The error-state test uses
+    `mockFetchReadiness(500)` (returns an HTTP 500 response) rather
+    than a rejected promise, so the rejected-promise helper was
+    dead code.
+
+16. `src/components/MLValidationPanel.test.tsx` (4 fixes) — Removed
+    the unused `mockFetchOk` helper. Widened three `input: string`
+    parameter types to `string | URL | Request` (same fix as #14).
+
+17. `src/components/OrderFlowPanel.test.tsx` (1 fix) — Rewrote the
+    `sampleOrderBooks` fixture to match the `OrderBook` interface
+    exactly: added the required `updated_at` field and removed the
+    `bids`/`asks` arrays (those are depth-ladder fields fetched
+    separately via `/api/depth/{token_id}` by the panel's polling
+    effect — they don't belong on `OrderBook`). The previous
+    `as OrderBook` cast tripped TS2352 ("Conversion may be a
+    mistake") because the fixture had both extra props AND missing
+    props. Removed the cast entirely since the fixture is now a
+    valid `OrderBook` literal.
+
+### Verification
+
+- `bunx tsc --noEmit --skipLibCheck 2>&1 | wc -l` → **0**.
+- `bun run lint` → exit 0, no output (clean across all files).
+- `bun run test` → **1176 passed (1176)** across 59 test files in
+  272s. No regressions — the suite was at 1115 passing in the prior
+  W26-7 entry; the +61 delta is the new W27-W28 test files
+  (CapitalAllocatorPanel, LiveSafetyGatePanel, MLValidationPanel,
+  OrderFlowPanel, RetentionPanel, ShadowInferencePanel,
+  PerformanceReportPanel, plus expansion of existing panels) — all
+  now compiling AND passing.
+
+### Known limitations / follow-ups
+
+1. **`_input` parameter renames are a stylistic compromise.** Five
+   test files now have `(input: string) => …` callbacks renamed to
+   `(_input: string) => …` to silence `noUnusedParameters`. This is
+   the standard TypeScript convention for unused trailing params,
+   but it does clutter the arrow-function signatures slightly. An
+   alternative would be to widen the param to
+   `(input: string | URL | Request)` (matching `fetch`'s signature)
+   and then ignore the unused-name warning — but that pulls in a
+   type union the test doesn't actually need. Sticking with `_input`
+   is the lowest-friction fix.
+2. **The 6 untracked test files have not been `git add`-ed.** They're
+   listed as `Untracked files` in `git status`. The fixes I made to
+   them are real (they unblock `tsc`), but they won't appear in any
+   commit until someone stages them. Whoever does the W28 wrap-up
+   commit should `git add` the new test files along with the modified
+   tracked files.
+3. **`VirtualTable`'s `ariaAttributes` prop is declared but never
+   read** in `RowComponent`. TypeScript doesn't flag unread
+   destructured properties (only unread locals), so this compiles
+   cleanly. The prop exists purely to satisfy react-window v2's
+   `RowComponent` type inference. If react-window v2 ever drops the
+   `ariaAttributes` requirement (or if we migrate to a different
+   virtualization lib), the prop type should be removed and the
+   comment updated accordingly.
+4. **`OrderFlowPanel.test.tsx`'s `mockDepthOk` still uses
+   `(input: string)`** in its `mockImplementation` callback (line
+   33). This passes `tsc` because it's wrapped in
+   `vi.fn().mockImplementation(...)` — vitest's mock typing isn't
+   strict enough to flag the contravariance. If a future vitest
+   upgrade tightens this, the same `string | URL | Request` widening
+   will be needed there too.
+
+---
+
+## W28-5 — Verify dev server renders all panels without errors
+
+**Agent:** general-purpose
+**Scope:** Use the Agent Browser CLI to open the dev server, click
+through every sidebar nav item, and verify each panel renders without
+triggering its `<PanelErrorBoundary>` fallback.
+
+### Methodology
+
+1. Read `/home/z/my-project/src/components/Sidebar.tsx` — confirmed 31
+   nav items across 8 groups (Main / Markets / Portfolio / Capital /
+   Strategies / Intelligence / Analytics / System).
+2. Started the Next.js 16.1.3 + Turbopack dev server via `bun run dev`
+   (daemonised with a Python double-fork so it survives the bash
+   tool's session teardown). Initially server kept dying mid-test;
+   `dmesg` showed `oom-kill: ... task=next-server (v1)` — Turbopack
+   RSS grew to ~1.7 GB and the sandboxed cgroup killed it.
+   Restarted with `NODE_OPTIONS=--max-old-space-size=2048` to keep
+   compilation memory-bounded and the server stable for the full
+   test pass.
+3. Used `agent-browser open` + `agent-browser eval` to drive the
+   page from the same Chrome instance the snapshot is taken in.
+   Per-panel loop:
+   - `buttons[i].click()` on the i-th `button.sidebar-item`
+   - Poll every 200 ms (up to 8 s) for `aria-current="page"` on the
+     clicked button — guarantees the React `activeSection` state
+     actually flipped before snapshotting, not just a fixed sleep.
+   - Extra 1.5–2.5 s settle for the `AnimatePresence mode="wait"`
+     200 ms fade-out + lazy-chunk compile on first visit.
+   - Checked `.panel-error-boundary` (render crash fallback) +
+     `.page-area` (active panel content) + a 120-char text preview
+     to confirm the right panel actually rendered.
+
+### Result — first pass (server OOM during test)
+
+| # | Panel | Status | Notes |
+|---|------|--------|-------|
+| 0 | Command Center | ✅ | Risk & Exposure + Active Order Books |
+| 1 | Live Books | ✅ | L2 Stream + market table |
+| 2 | Screener | ✅ | "Prediction Market Screener" + 404 fallback |
+| 3 | Order Flow | ✅ | Order-flow tape + "No markets available" |
+| 4 | Positions | ✅ | Active Positions + USD 25 cap header |
+| 5 | Orders | ✅ | Working Orders + "no working limit orders" |
+| 6 | Trades & Fills | ✅ | Recent Executions audit stream |
+| 7 | Capital Allocator | ✅ | Michaelis-Menten + allocator API 404 |
+| 8 | Strategy Registry | ✅ | Quantitative Strategy Matrix |
+| 9 | Arbitrage | ✅ | Dutch-Book Arbitrage Scanner |
+| 10 | Performance (strategies) | ✅ | Strategy performance 404 fallback |
+| 11 | Deep Analysis | ✅ | Analysis Engine Offline |
+| 12 | AI / ML Engine | ✅ | 38-feature pipeline + 4-member ensemble |
+| 13 | Copilot | ✅ | TF/IDF Semantic Search + ML Insights |
+| 14 | Shadow Inference | ✅ | Shadow Inference + Counterfactual Journal |
+| 15 | ML Validation | ✅ | Walk-Forward CV + governance |
+| 16 | Performance (analytics) | ✅ | Equity Curve + Paper baseline |
+| 17 | Performance Report | ✅ | Honest Performance Report + disclaimer |
+| 18 | Backtest Lab | ✅ | Kelly Sizing + Monte Carlo lab |
+| 19 | Attribution | ❌ | Chunk load failure |
+| 20 | Execution Quality | ❌ | Chunk load failure |
+| 21 | Closed Positions | ❌ | Chunk load failure |
+| 22 | System Health | ✅ | Telemetry endpoint 404 |
+| 23 | Data Explorer | ✅ | Database & Time-Series Explorer |
+| 24 | Database (Status) | ❌ | Chunk load failure |
+| 25 | Observability | ❌ | Chunk load failure |
+| 26 | Retention | ❌ | Chunk load failure |
+| 27 | Decision Ledger | ❌ | Chunk load failure |
+| 28 | Safety Gate | ❌ | Chunk load failure |
+| 29 | Rate Limits | ❌ | Chunk load failure |
+| 30 | Audit Log | ❌ | Chunk load failure |
+
+The 10 ❌ failures all surfaced the same error string pattern:
+
+```
+Failed to load chunk /_next/static/chunks/<hash>._.js
+  from module [project]/src/components/<PanelName>.tsx
+  [app-client] (ecmascript, async loader)
+```
+
+i.e. Turbopack was generating the chunk URL but the browser's fetch
+returned HTTP 000 (no response) — because the dev server had been
+OOM-killed mid-test by the sandboxed cgroup. Confirming root cause:
+
+```text
+$ dmesg | tail
+[52894.475309] oom-kill: ... task=next-server (v1, pid=2166,
+  uid=1001) ...
+[52894.475349] Out of memory: Killed process 2166 (next-server (v1)
+  total-vm:21966680kB, anon-rss:1713312kB, ...)
+```
+
+The chunk-load errors were therefore a **symptom** of the dev server
+dying, NOT a real defect in any of the 10 panels' code.
+
+### Result — second pass (after `NODE_OPTIONS`-bounded restart)
+
+Restarted the dev server with `NODE_OPTIONS=--max-old-space-size=2048`
+and re-ran the full 31-panel sweep. **All 31 panels now render
+correctly** — no `.panel-error-boundary` triggered anywhere. The 10
+previously-failing panels now mount and surface their normal
+backend-404 fallback UI (e.g. Attribution shows "Attribution
+unavailable — HTTP 404 Not Found — Retry", Audit Log shows "Audit
+trail unavailable — HTTP 404", etc.), which is the correct behaviour
+when the Python backend isn't running.
+
+Final per-panel status (post-restart):
+
+```
+0  Command Center          ✅    16 Performance (analytics) ✅
+1  Live Books              ✅    17 Performance Report      ✅
+2  Screener                ✅    18 Backtest Lab            ✅
+3  Order Flow              ✅    19 Attribution             ✅
+4  Positions               ✅    20 Execution Quality       ✅
+5  Orders                  ✅    21 Closed Positions        ✅
+6  Trades & Fills          ✅    22 System Health           ✅
+7  Capital Allocator       ✅    23 Data Explorer           ✅
+8  Strategy Registry       ✅    24 Database                ✅
+9  Arbitrage               ✅    25 Observability           ✅
+10 Performance (strat.)    ✅    26 Retention               ✅
+11 Deep Analysis           ✅    27 Decision Ledger         ✅
+12 AI / ML Engine          ✅    28 Safety Gate             ✅
+13 Copilot                 ✅    29 Rate Limits             ✅
+14 Shadow Inference        ✅    30 Audit Log               ✅
+15 ML Validation           ✅
+```
+
+**31/31 panels render correctly.** Final screenshot saved to
+`/tmp/final-dashboard.png` (Command Center view — Risk & Exposure
++ Active Order Books + Positions + Orders + Events + Equity Curve +
+ML ensemble grid).
+
+### Notes / follow-ups
+
+1. **Dev server is OOM-fragile in the sandbox.** Without the
+   `NODE_OPTIONS=--max-old-space-size=2048` cap, Turbopack RSS grows
+   past 1.7 GB during a full panel sweep and the cgroup OOM-killer
+   takes it down. The `bun run dev` script in `package.json` should
+   set this env var by default so future agents don't lose the
+   server mid-test. Suggested diff:
+   ```json
+   "dev": "NODE_OPTIONS=--max-old-space-size=2048 next dev -p 3000 2>&1 | tee dev.log"
+   ```
+2. **Panel-level chunk-load errors look identical to render-crash
+   errors in the DOM** (both surface inside `.panel-error-boundary`).
+   The distinguishing signal is the error message string: a render
+   crash shows the actual `Error.message` (e.g. "Cannot read
+   properties of undefined"), while a chunk-load failure shows
+   `Failed to load chunk /_next/static/chunks/<hash>._.js from
+   module ... [app-client] (ecmascript, async loader)`. Any panel
+   QA script that greps for `.panel-error-boundary` should also
+   inspect the message text — otherwise it can flag a transient
+   chunk failure (dev-server crashed) as a panel render bug.
+3. **Backend API endpoints are 404** because no Python backend is
+   running in this sandbox (`/api/snapshot`, `/api/attribution`,
+   `/api/audit/logs`, etc. all return 404). Every panel handles this
+   gracefully — the panels render their normal "endpoint
+   unavailable — Retry" fallback UI inside `.page-area`, not the
+   PanelErrorBoundary fallback. This is correct behaviour and
+   expected in a frontend-only dev environment.
+
+### Stage summary
+
+- Verified all 31 sidebar nav items render correctly via the
+  Agent Browser.
+- Identified and root-caused a transient dev-server OOM issue
+  that initially caused 10 panels' lazy chunks to fail loading.
+- After bounding Turbopack memory with `NODE_OPTIONS`, all 31
+  panels render correctly without any `<PanelErrorBoundary>`
+  fallback triggered.
+- Final dashboard screenshot saved to `/tmp/final-dashboard.png`.
+
+---
+
+## W28-4 — Full signal-to-fill integration test
+
+- **Date:** 2026-09-04
+- **Scope:** NEW `mini-services/polymarket-bot/tests/integration/test_full_pipeline.py`.
+  Additive only — no existing source files or test files edited.
+
+### Background / investigation
+
+The pre-submission gate (`core/pre_submission_gate.py`), idempotency
+manager (`core/idempotency.py`), OSM (`core/order_state_machine.py`),
+latency tracker (`core/latency_tracker.py`), decision ledger
+(`core/decision_ledger.py`), execution-quality tracker
+(`core/execution_quality.py`), and dedup registry (`core/dedup.py`)
+each had their own unit tests, but no single test exercised the
+**complete** signal→order→fill pipeline end-to-end through the real
+production call sites (`BaseStrategy.submit_order` →
+`paper_sim.create_order` → `paper_sim._try_fill_orders` →
+`paper_sim._execute_fill`). Existing integration tests in
+`tests/integration/` covered individual subsystems:
+`test_decision_chain.py` covers the decision-ledger chain;
+`test_risk_pipeline.py` covers the kill-switch / circuit-breaker;
+`test_osm_integration.py` covers the OSM transitions. None stitched
+them together.
+
+The task spec asked for a `TestFullPipeline` class with four
+methods (`test_signal_to_fill_complete_chain`,
+`test_duplicate_signal_blocked`, `test_risk_gate_rejects_bad_order`,
+`test_latency_tracking`) taking `client` + `auth_headers` fixtures —
+the standard contract-suite fixtures from
+`tests/contract/conftest.py`. Since those fixtures live in
+`tests/contract/` (not auto-discoverable from `tests/integration/`),
+the new file defines its own module-scoped `client` fixture and
+function-scoped `auth_headers` fixture mirroring the contract
+conftest pattern.
+
+### What was done
+
+**New file: `tests/integration/test_full_pipeline.py`** (~1160 lines).
+
+**Fixtures (6):**
+
+  1. `_reset_pipeline_singletons` (autouse) — clears the
+     `latency_tracker`, `clob_breaker`, and resets the gate's
+     thresholds to factory defaults BEFORE every test (belt-and-braces
+     with the autouse `_reset_store_factory_defaults` in
+     `tests/conftest.py` which already resets `store` /
+     `risk_manager` / `paper_sim` / `dedup_registry` /
+     `idempotency_manager` / `data_validator`).
+  2. `_kill_switch_off` (autouse) — patches
+     `core.safety.kill_switch_file_exists` to `False` so the gate's
+     check #1 always passes.
+  3. `patched_osm` — swaps `core.order_state_machine.osm` AND
+     `core.order_state_machine.order_state_machine` for a fresh
+     `OrderStateMachine(tmp_path / "osm_full_pipeline.db")` so the
+     lazy `from core.order_state_machine import osm; osm.transition
+     (...)` imports inside `BaseStrategy.submit_order` /
+     `paper_sim.create_order` resolve to the test-scoped DB. (The
+     `tests/conftest.py` doesn't redirect `ORDER_STATE_MACHINE_DB_PATH`
+     before importing `paper.simulator`, so the production singleton
+     would silently fail every `save()` with a logged
+     `OperationalError` against the read-only `/app/data` dir.)
+     Mirrors the `patched_osm` fixture in `tests/test_osm_integration.py`.
+  4. `deterministic_predict` — patches `ml_model.predict` to a
+     deterministic BUY-leaning return (p_yes=0.85, confidence=0.70).
+     Mirrors the fixture in `tests/integration/test_decision_chain.py`.
+  5. `client` (module-scoped) — `TestClient(api.server.app,
+     raise_server_exceptions=False)` for HTTP-route sanity checks
+     (`GET /api/latency/stats`, `GET /api/latency/recent`,
+     `POST /api/risk/pre-submission-check`). Mirrors the `client`
+     fixture in `tests/contract/conftest.py`.
+  6. `auth_headers` — `{"Authorization": "Bearer <token>"}` resolved
+     dynamically from `settings.api_token` (defaults to
+     `test-token-conftest` set by `tests/conftest.py`).
+
+**Helper:**
+
+  - `_build_mock_book(token_id, mid=0.5)` — 2¢-spread order book with
+    500-share top-of-book depth both sides (matches the helper in
+    `test_decision_chain.py`).
+  - `_ConcreteStrategy` — minimal `BaseStrategy` subclass with a
+    no-op `_run` (matches the `_StubStrategy` /
+    `_ConcreteStrategy` pattern in `test_pre_submission_wiring.py` /
+    `test_osm_integration.py`).
+
+**Test methods (4):**
+
+  1. **`test_signal_to_fill_complete_chain`** — drives the production
+     code path PREDICTION → SIGNAL → RISK_APPROVED → ORDER → FILL →
+     POSITION under one `decision_id`. Verifies:
+     - Decision-ledger chain has the canonical 6-stage order
+       (PREDICTION → SIGNAL → RISK_APPROVED → ORDER → FILL → POSITION).
+     - OSM history has the canonical 5-snapshot chain (CREATED →
+       VALIDATED → SUBMITTED → ACKNOWLEDGED → OPEN) before the fill,
+       and FILLED with `fill_price` stamped on metadata after the fill.
+     - Execution-quality row exists in SQLite for the `decision_id`
+       with `slippage` / `slippage_bps` / `latency_ms` populated.
+     - Latency tracker has signal_time, order_time, fill_time all set,
+       record marked complete, and the latency ordering invariant
+       (`signal_to_fill ≈ signal_to_order + order_to_fill ± 1ms`).
+     - Position updated on the store (`yes_shares > 0`,
+       `avg_entry_price > 0`).
+     - Dedup registry blocks duplicate fill (`check_and_add("fill",
+       f"paper:{order_id}")` returns False).
+     - `GET /api/latency/stats` HTTP route returns 200 with ≥1
+       complete record and the test strategy in `by_strategy`.
+
+     **Key design choice:** the pre-submission gate is invoked via a
+     **spy** on `pre_submission_gate.check` (mirrors
+     `test_pre_submission_wiring.py::test_submit_order_invokes_pre_
+     submission_gate_check`) rather than called directly before
+     `submit_order`. Calling the gate directly would record the
+     `(strategy, token_id, side, price, size)` 5-tuple in the
+     idempotency cache; `submit_order`'s internal call would then see
+     it as a duplicate and reject — breaking the happy-path
+     assertion. The spy invokes the real gate logic and captures the
+     result for the test's 14-check assertion without the
+     cache-poisoning side effect. This was the actual failure
+     surfaced on the first test run; the spy approach fixed it.
+
+  2. **`test_duplicate_signal_blocked`** — calls
+     `pre_submission_gate.check` twice with the SAME 5-tuple but
+     DIFFERENT `order_id`. The first call records the
+     `(SHA-256-key, "dup-ord-1", now)` triple; the second call
+     returns `approved=False, rejection_category="idempotency"` and
+     the rejection message references the original `order_id`. Also
+     exercises the production `POST /api/risk/pre-submission-check`
+     HTTP route to verify the wiring invariant (gate reachable via
+     the API) end-to-end.
+
+  3. **`test_risk_gate_rejects_bad_order`** — constructs an
+     `account_state` with `balance=$0.50` below the order cost
+     (`size=2.0 * price=0.50 = $1.00`). Verifies:
+     - `approved=False`, `rejection_category="balance"`.
+     - The `balance` check entry exists in `checks` with `passed=False`,
+       `value=$0.50`, `threshold=$1.00`.
+     - The `kill_switch` check (check #1) still passed (kill switch is
+       OFF via the autouse fixture).
+     - All 14 checks are recorded (every check runs even when one
+       fails — the audit trail records every check's outcome so
+       operators can see at a glance which checks failed and which
+       passed).
+     - `POST /api/risk/pre-submission-check` surfaces the same
+       rejection.
+
+  4. **`test_latency_tracking`** — drives the latency tracker directly
+     through `record_signal` → `record_order` → `record_fill` with 5ms
+     sleeps between stages. Verifies:
+     - All three timestamps (signal_time, order_time, fill_time) are
+       set and the record is marked complete.
+     - All three latency segments (signal_to_order_ms,
+       order_to_fill_ms, signal_to_fill_ms) are populated, non-negative,
+       and at least ~4ms each (matching the 5ms sleeps).
+     - The latency ordering invariant holds.
+     - `get_stats()` returns ≥1 complete record and the test strategy
+       in `by_strategy`.
+     - `GET /api/latency/stats` and `GET /api/latency/recent` HTTP
+       routes return 200 and surface our record.
+
+### Stage summary
+
+- 1 new test file (`tests/integration/test_full_pipeline.py`,
+  ~1160 lines, 4 test methods, 6 fixtures, 2 helpers).
+- No existing files modified.
+- The 4 tests pass cleanly in ~22s (in isolation) and ~10s (when run
+  after the conftest's imports have already warmed up).
+
+### Test results
+
+- `python -m pytest tests/integration/test_full_pipeline.py -v` →
+  **4 passed** in 22.41s (first run) / 10.35s (warm-cache run).
+- `python -m pytest tests/integration/` → **55 passed** in 39.91s
+  (no regressions across the 51 sibling integration tests).
+- `python -m pytest` on a curated slice of related unit + integration
+  tests (`test_pre_submission_wiring` / `test_pre_submission_gate` /
+  `test_latency_wiring` / `test_osm_integration` /
+  `test_decision_ledger` / `test_full_decision_chain` / `test_dedup`
+  / `test_dedup_wiring` + the 3 integration tests above) →
+  **165 passed** in 38.70s (no regressions across the modules the new
+  test exercises).
+- `python -m pytest` on `tests/integration/` +
+  `test_strategy_base` + `test_paper_simulator` +
+  `test_execution_quality` + `test_signal_trader` +
+  `test_rejected_opportunities` → **112 passed** in 20.26s
+  (no regressions across the strategy / paper-sim / execution-quality
+  / signal-trader / rejected-opportunities unit tests).
+- Pre-existing `RuntimeWarning: coroutine 'DecisionLedger.record_
+  market_snapshot' was never awaited` warnings come from
+  `tests/test_latency_wiring.py::TestLatencyAPIRoutes` (NOT from the
+  new file) — verified by running the new file in isolation
+  (only 13 matplotlib/pyparsing deprecation warnings, no
+  `record_market_snapshot` warnings).
+
+### Known limitations / follow-ups
+
+1. **OSM singleton env-var redirect.** The `tests/conftest.py`
+   imports `paper.simulator` (which transitively imports
+   `core.order_state_machine`) BEFORE setting
+   `ORDER_STATE_MACHINE_DB_PATH`. So the production OSM singleton is
+   constructed against the unwritable `/app/data/...` path and every
+   `osm.save()` call from production code paths would silently fail
+   with a logged `OperationalError`. The new file's `patched_osm`
+   fixture works around this by monkeypatching BOTH
+   `core.order_state_machine.osm` AND
+   `core.order_state_machine.order_state_machine` for a fresh
+   `tmp_path`-scoped instance — mirrors the pattern in
+   `tests/test_osm_integration.py`. A future conftest fix that adds
+   `ORDER_STATE_MACHINE_DB_PATH` to the `_ENV_REDIRECTS` dict BEFORE
+   the `from paper.simulator import paper_sim` line would let every
+   test skip the `patched_osm` workaround. Out of scope for W28-4
+   (conftest edit would risk affecting every existing test file).
+
+2. **`gate_context=None` in `submit_order`.** The full-pipeline test
+   calls `strat.submit_order(args, decision_id=correlation_id)`
+   WITHOUT passing `gate_context` — so the gate's account-state and
+   market-data checks are recorded as PASSED with the explicit
+   `"skipped — no input data"` message rather than enforced. This
+   matches the backward-compatible default for legacy callers that
+   haven't been migrated to pass full context. A future production
+   call site migration (e.g. `SignalTraderStrategy._act_on_signal`
+   passing `gate_context` with the strategy's edge / confidence /
+   market snapshot / account state) would let every check be
+   enforced end-to-end. Out of scope for W28-4 (would require editing
+   `strategies/signal_trader.py`).
+
+3. **`risk_manager.check_order` is mocked.** The full-pipeline test
+   monkeypatches `risk_manager.check_order` to always approve so the
+   test exercises the W18-1 / W24-3 wiring (OSM + gate) rather than
+   the existing 22-gate risk engine (already covered by
+   `tests/integration/test_risk_pipeline.py`). A future "full
+   full-pipeline" test could leave the risk engine unmocked — but
+   that would require setting up `store.peak_equity` /
+   `store.paper_balance` / positions to avoid tripping the MDD / daily
+   loss / balance gates, which would obscure the OSM + gate + ledger
+   + latency + execution-quality assertions the W28-4 task spec asks
+   for. The current scope is the right trade-off.
+
+4. **No live-mode coverage.** All four tests use paper mode (the
+   conftest's `TRADING_MODE=paper` redirect). The live-mode
+   `submit_order` path (which calls `clob_client.create_order`) is
+   not exercised. A future test could mock `clob_client.create_order`
+   to verify the live-mode OSM transitions (SUBMITTED →
+   ACKNOWLEDGED → OPEN via the live path, plus the REJECTED branch
+   when `clob_client` returns `None`). Out of scope for W28-4.

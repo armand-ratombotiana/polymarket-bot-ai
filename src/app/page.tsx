@@ -165,14 +165,11 @@ const DatabaseStatusPanel = lazyPanel(() => import('@/components/DatabaseStatusP
 import DepthChartModal from '@/components/DepthChartModal'
 import MarketChartModal from '@/components/MarketChartModal'
 import StrategyConfigModal from '@/components/StrategyConfigModal'
-// W17-6 — Legacy ShortcutsModal kept for any consumer that hasn't
-// migrated; page.tsx itself uses the new KeyboardCheatSheet below.
-// Mounted only when `legacyShortcutsOpen` flips true (e.g. via the
-// ⌨️ icon in TopStatusBar, which still wires to the legacy modal so
-// existing tests / muscle memory continue to work). The new
-// KeyboardCheatSheet is opened via the `?` shortcut OR the floating
-// ShortcutHint button.
-import ShortcutsModal from '@/components/ShortcutsModal'
+// W17-6 → W28-1 — Legacy `ShortcutsModal` import removed (was unused —
+// the panel declared it but never mounted it). The new
+// `KeyboardCheatSheet` (drawer-style, opened via the `?` shortcut OR
+// the floating `ShortcutHint` button) is the single keyboard-help
+// surface in the app.
 import KeyboardCheatSheet from '@/components/KeyboardCheatSheet'
 import ShortcutHint from '@/components/ShortcutHint'
 // W17-6 — Keyboard-shortcut catalog + hook. The catalog is the

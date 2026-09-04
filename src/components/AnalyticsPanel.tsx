@@ -153,8 +153,11 @@ function AnalyticsPanel() {
   // verdict + the small-sample warning banner regardless of p.
   const isSmallSample = n < 30
   const winRatePct = (data.win_rate * 100).toFixed(1)
-  const ciLowPct = data.win_rate_ci_low != null ? (data.win_rate_ci_low * 100).toFixed(1) : null
-  const ciHighPct = data.win_rate_ci_high != null ? (data.win_rate_ci_high * 100).toFixed(1) : null
+  // W28-1 — `ciLowPct` / `ciHighPct` (the percentage-formatted CI
+  // bounds) were unused after the W26-6 redesign — the CI is rendered
+  // directly from `data.win_rate_ci_low` / `_ci_high` (raw floats) by
+  // the `ConfidenceIntervalBadge` downstream. Removed to silence
+  // TS6133.
 
   // W26-6 — Compute the win-rate significance verdict client-side.
   // Two sources feed into it:

@@ -223,7 +223,7 @@ function mockFetchNotOk(status = 500, statusText = 'Internal Server Error') {
 }
 
 function mockFetchRouteGetPost(getPayload: unknown, postPayload: unknown) {
-  return vi.fn().mockImplementation((input: string, init?: RequestInit) => {
+  return vi.fn().mockImplementation((_input: string, init?: RequestInit) => {
     const method = init?.method ?? 'GET'
     if (method === 'POST') {
       return Promise.resolve({
@@ -415,7 +415,7 @@ describe('StrategyPerformancePanel', () => {
   })
 
   it('shows a dismissible banner when toggle fails', async () => {
-    const impl = vi.fn().mockImplementation((input: string, init?: RequestInit) => {
+    const impl = vi.fn().mockImplementation((_input: string, init?: RequestInit) => {
       const method = init?.method ?? 'GET'
       if (method === 'POST') {
         return Promise.resolve({

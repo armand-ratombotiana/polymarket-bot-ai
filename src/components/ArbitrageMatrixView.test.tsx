@@ -68,7 +68,7 @@ function mockFetchOk(payload: unknown) {
 }
 
 function mockFetchRouteGetPost(getPayload: unknown, postPayload: unknown) {
-  return vi.fn().mockImplementation((input: string, init?: RequestInit) => {
+  return vi.fn().mockImplementation((_input: string, init?: RequestInit) => {
     const method = init?.method ?? 'GET'
     if (method === 'POST') {
       return Promise.resolve({
@@ -85,24 +85,10 @@ function mockFetchRouteGetPost(getPayload: unknown, postPayload: unknown) {
   })
 }
 
-function mockFetchRouteByUrl(routes: Record<string, unknown>) {
-  return vi.fn().mockImplementation((input: string) => {
-    for (const [fragment, payload] of Object.entries(routes)) {
-      if (typeof input === 'string' && input.includes(fragment)) {
-        return Promise.resolve({
-          ok: true,
-          status: 200,
-          json: async () => payload,
-        } as Response)
-      }
-    }
-    return Promise.resolve({
-      ok: true,
-      status: 200,
-      json: async () => ({}),
-    } as Response)
-  })
-}
+// W28-1 — `mockFetchRouteByUrl` (a URL-fragment dispatch helper)
+// was scaffolded but never wired into a test — removed to silence
+// TS6133. If a future test needs per-URL routing, restore from git
+// history (W8-era) or reach for `mockFetchRouteGetPost` above.
 
 // ── Tests ────────────────────────────────────────────────────────────────────
 
@@ -270,7 +256,7 @@ describe('ArbitrageMatrixView', () => {
 
   it('shows a failure banner when the execute endpoint returns an error status', async () => {
     vi.mocked(fetch).mockImplementation(
-      vi.fn().mockImplementation((input: string, init?: RequestInit) => {
+      vi.fn().mockImplementation((_input: string, init?: RequestInit) => {
         if (init?.method === 'POST') {
           return Promise.resolve({
             ok: false,
@@ -302,7 +288,7 @@ describe('ArbitrageMatrixView', () => {
 
   it('shows a failure banner when the execute fetch throws a network error', async () => {
     vi.mocked(fetch).mockImplementation(
-      vi.fn().mockImplementation((input: string, init?: RequestInit) => {
+      vi.fn().mockImplementation((_input: string, init?: RequestInit) => {
         if (init?.method === 'POST') {
           return Promise.reject(new Error('Network error: ECONNRESET'))
         }

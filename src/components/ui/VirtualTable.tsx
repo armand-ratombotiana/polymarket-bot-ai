@@ -33,7 +33,12 @@
 'use client'
 
 import { List, useListRef } from 'react-window'
-import { ReactNode, useMemo, useCallback } from 'react'
+// W28-1 — `useCallback` removed from the import list (TS6133 —
+// RowComponent is a stable module-scope function, so no
+// useCallback wrapper is needed). `type CSSProperties` added so we
+// can annotate RowComponent's `style` prop without relying on the
+// global React namespace.
+import { type CSSProperties, ReactNode, useMemo } from 'react'
 
 export interface Column {
   key: string
@@ -63,13 +68,30 @@ interface RowComponentProps {
   onRowClick?: (row: any) => void
 }
 
+// W28-1 — react-window v2's `List` expects `rowComponent` to accept
+// `{ ariaAttributes, index, style } & RowProps`. Declaring all three
+// reserved props here lets TS infer `RowProps = RowComponentProps`
+// (the props we forward via `rowProps`) without `index` / `style`
+// leaking in and tripping `ExcludeForbiddenKeys_2<RowProps>` on the
+// `rowProps` prop. We don't destructure `ariaAttributes` (we don't
+// render it — VirtualTable supplies its own ARIA via the `role`
+// attributes on the row/cell divs), and TS doesn't flag unread
+// properties in a destructuring pattern (only unread locals).
 function RowComponent({
   index,
   style,
   columns,
   data,
   onRowClick,
-}: RowComponentProps & { index: number; style: React.CSSProperties }) {
+}: RowComponentProps & {
+  ariaAttributes: {
+    'aria-posinset': number
+    'aria-setsize': number
+    role: 'listitem'
+  }
+  index: number
+  style: CSSProperties
+}) {
   const row = data[index]
   return (
     <div

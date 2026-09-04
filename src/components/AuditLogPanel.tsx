@@ -34,8 +34,7 @@ import {
   Download,
   FileText,
   Filter,
-  Inbox,
-  Loader2,
+  // W28-1 — `Inbox` + `Loader2` removed (unused imports, TS6133).
   RefreshCw,
   Search,
   X,
@@ -383,20 +382,14 @@ function SeverityBadge({ severity }: { severity: Severity }) {
   )
 }
 
-interface AuditRowProps {
-  log: AuditLog
-  severity: Severity
-  expanded: boolean
-  onToggle: () => void
-}
-
 // W16-6 — AuditRow used to render BOTH the visible row + the inline
 // expansion as adjacent <tr>s. With VirtualTable, the row is rendered
 // by VirtualTable's `rowComponent` (cells are inline-styled <div>s) and
 // the expansion is rendered by <EventDetailPanel> below the virtualized
-// list. This component is now just a type-holder for the props the
-// VirtualTable render function receives — kept for backwards compat
-// with any future caller that imports it.
+// list. This component was retired in W16-6; the legacy
+// `AuditRowProps` interface + `_AuditRow` type alias (kept as a
+// type-holder for "future importers") were removed in W28-1 — they
+// were never exported, so the compat shim was a no-op (TS6196).
 //
 // The actual row rendering lives inside the `auditColumns` useMemo in
 // the main panel component (so it can close over `expandedId` and
@@ -499,10 +492,6 @@ function EventDetailPanel({ log, severity, onClose }: EventDetailPanelProps) {
     </div>
   )
 }
-
-// (AuditRow is no longer rendered — kept as a type alias so consumers
-// that imported it don't break.)
-type _AuditRow = AuditRowProps
 
 // ── Main Component ─────────────────────────────────────────────────────────
 

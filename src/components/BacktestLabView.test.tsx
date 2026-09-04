@@ -19,7 +19,7 @@
 // Note: BacktestLabView does NOT auto-poll — it only fetches on user action.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { render, screen, waitFor, act, fireEvent } from '@testing-library/react'
+import { render, screen, waitFor, fireEvent } from '@testing-library/react'
 import BacktestLabView from './BacktestLabView'
 
 // ── Sample payload ──────────────────────────────────────────────────────────

@@ -24,7 +24,9 @@
 
 'use client'
 
-import * as React from 'react'
+// W28-1 — `import * as React from 'react'` removed (TS6133 — no
+// `React.X` references; with `jsx: 'react-jsx'` no explicit React
+// import is needed and the file uses no hooks).
 import {
   Tooltip,
   TooltipTrigger,

@@ -43,7 +43,6 @@ import {
   useMemo,
   useRef,
   useState,
-  type KeyboardEvent as ReactKeyboardEvent,
 } from 'react'
 import {
   SHORTCUT_CATEGORIES,

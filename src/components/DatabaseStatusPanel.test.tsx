@@ -166,7 +166,7 @@ function mockFetchNotOk(status = 500, statusText = 'Internal Server Error') {
 // Distinguish GET vs POST calls so the retry button test can return a
 // different payload for POST /api/system/db-retry.
 function mockFetchRouteGetPost(getPayload: unknown, postPayload: unknown) {
-  return vi.fn().mockImplementation((input: string, init?: RequestInit) => {
+  return vi.fn().mockImplementation((_input: string, init?: RequestInit) => {
     const method = init?.method ?? 'GET'
     if (method === 'POST') {
       return Promise.resolve({

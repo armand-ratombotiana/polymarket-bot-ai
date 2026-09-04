@@ -26,7 +26,10 @@
 
 import { useMemo, useRef, useState, useEffect, useCallback } from 'react'
 import { chartTheme } from './theme'
-import type { FlowSide, FlowTrade } from './OrderFlowChart'
+// W28-1 — `FlowSide` removed from the type import (unused — the tape
+// only consumes `FlowTrade` shape; side rendering is delegated to
+// OrderFlowChart via the `side` field on each `FlowTrade`).
+import type { FlowTrade } from './OrderFlowChart'
 
 export interface TradeTapeProps {
   /** Recent trades (newest-first OR oldest-first — the tape sorts). */
