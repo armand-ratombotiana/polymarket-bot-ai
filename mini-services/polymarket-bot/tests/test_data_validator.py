@@ -688,6 +688,15 @@ async def test_book_poller_apply_book_skips_duplicate_snapshot(monkeypatch: pyte
     mock_ts.record_tick = AsyncMock(return_value=True)
     monkeypatch.setattr("core.timescale_db.timescale_db", mock_ts)
 
+    # W25-5: book_poller routes through db_manager, not timescale_db directly.
+    # Mock db_manager.record_snapshot so we can assert it was called.
+    mock_db = MagicMock()
+    mock_db.record_snapshot = AsyncMock(return_value=True)
+    mock_db.is_postgres = False
+    mock_db.is_sqlite = True
+    monkeypatch.setattr("core.database_manager.db_manager", mock_db)
+
+
     poller = BookPoller()
     poller.set_tokens(["T1"])
 
@@ -700,15 +709,15 @@ async def test_book_poller_apply_book_skips_duplicate_snapshot(monkeypatch: pyte
     await poller._apply_book("T1", book_data)
     await asyncio.sleep(0)  # let fire-and-forget tasks settle
 
-    assert mock_ts.record_snapshot.call_count == 1
-    first_call_count = mock_ts.record_snapshot.call_count
+    assert mock_db.record_snapshot.call_count == 1
+    first_call_count = mock_db.record_snapshot.call_count
 
     # Second call with IDENTICAL data — duplicate hash hit.
     await poller._apply_book("T1", book_data)
     await asyncio.sleep(0)
 
     # record_snapshot NOT called again — duplicate was skipped.
-    assert mock_ts.record_snapshot.call_count == first_call_count
+    assert mock_db.record_snapshot.call_count == first_call_count
 
     # The validator saw exactly 1 valid + 1 duplicate.
     stats = fresh_validator.get_stats()
