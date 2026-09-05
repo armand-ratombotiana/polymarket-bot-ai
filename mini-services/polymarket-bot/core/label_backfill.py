@@ -474,6 +474,149 @@ class LabelBackfillEngine:
 
     # ── Stats / observability ──────────────────────────────────────────────────
 
+    # ── W33-4 — Market-event-driven label recording ─────────────────────
+
+    def record_outcome(
+        self,
+        token_id: str,
+        outcome: int,
+        market: dict | None = None,
+    ) -> dict[str, Any]:
+        """Record the resolved outcome for a token (called on
+        ``MARKET_RESOLVED``).
+
+        W33-4 — wires market-resolution events into the ML label
+        pipeline. Called by ``ingestion.market_events.MarketEventIngester``
+        whenever a ``MARKET_RESOLVED`` event is detected, so the
+        resolved label lands in the ``ml_feature_store`` immediately
+        rather than waiting for the daily backfill cycle.
+
+        Behaviour:
+          1. Calls ``timescale_db.mark_resolved_outcomes(token_id,
+             resolved_yes)`` — updates ``outcome_resolved`` on every
+             existing feature-store row for the token (the canonical
+             training-label write).
+          2. When a ``market`` dict is supplied (or one is found in
+             the ``market_discovery.catalog``), runs the full
+             ``_process_market`` path so a fresh labelled sample is
+             also created (mirrors the daily backfill pass for this
+             one token).
+          3. Returns a status dict so the caller can surface the
+             result (e.g. for the API response or log line).
+
+        Args:
+            token_id: The Polymarket market token id.
+            outcome: ``1`` if YES won, ``0`` if NO won. Any other
+                value is clamped to ``{0, 1}`` (truthy → 1).
+            market: Optional market dict (when the caller already has
+                the Gamma payload). When ``None``, the engine tries
+                to look the market up in
+                ``core.market_discovery.market_discovery.catalog``.
+
+        Returns:
+            ``{"token_id": str, "outcome": int, "rows_updated": int,
+            "label_added": int, "label_skipped": int, "error": str | None}``.
+            ``rows_updated`` is the count of existing feature-store
+            rows whose ``outcome_resolved`` was set;
+            ``label_added`` / ``label_skipped`` are the counts from
+            the ``_process_market`` pass (both 0 when no market dict
+            is available).
+        """
+        outcome_int = 1 if outcome else 0
+        resolved_yes = bool(outcome_int)
+        rows_updated = 0
+        label_added = 0
+        label_skipped = 0
+        err: str | None = None
+
+        # 1. Update outcome_resolved on every existing feature-store row.
+        try:
+            rows_updated = timescale_db.mark_resolved_outcomes(
+                token_id, resolved_yes,
+            )
+        except Exception as e:  # noqa: BLE001 — defensive
+            log.warning(
+                "[label_backfill] record_outcome: mark_resolved_outcomes "
+                "failed for %s: %s", token_id, e,
+            )
+            err = str(e)
+
+        # 2. Optionally create a fresh labelled sample via
+        # ``_process_market``. Late import so the ``ml.features``
+        # dependency is only pulled in when the caller actually supplies
+        # a market dict (the daily backfill loop already pulls it in
+        # once a day).
+        market_dict = market
+        if market_dict is None:
+            try:
+                from core.market_discovery import market_discovery
+                market_dict = market_discovery.catalog.get(token_id)
+            except Exception as e:  # noqa: BLE001 — defensive
+                log.debug(
+                    "[label_backfill] record_outcome: market_discovery "
+                    "lookup failed for %s: %s", token_id, e,
+                )
+                market_dict = None
+
+        if market_dict is not None:
+            try:
+                from ml.features import N_FEATURES, extract_features
+            except Exception as e:  # noqa: BLE001 — defensive
+                log.debug(
+                    "[label_backfill] record_outcome: ml.features "
+                    "unavailable: %s", e,
+                )
+                N_FEATURES = None  # type: ignore[assignment]
+                extract_features = None  # type: ignore[assignment]
+
+            if N_FEATURES is not None and extract_features is not None:
+                try:
+                    # ``_process_market`` is async — drive it via the
+                    # running loop when one exists, else via
+                    # ``asyncio.run``. The market dict may need its
+                    # ``outcomePrices`` populated so the YES/NO outcome
+                    # resolves; the caller is responsible for passing
+                    # a complete dict.
+                    async def _run() -> tuple[int, int]:
+                        return await self._process_market(
+                            market_dict, extract_features, N_FEATURES,
+                        )
+                    try:
+                        loop = asyncio.get_running_loop()
+                        # We're already in an event loop — schedule a
+                        # task and wait. (``run_until_complete`` cannot
+                        # be called on a running loop.)
+                        task = loop.create_task(_run())
+                        # NOTE: we deliberately DO NOT await here —
+                        # ``record_outcome`` is a SYNC method (called
+                        # from ``MarketEventIngester.record_event``).
+                        # The label-write happens fire-and-forget; the
+                        # caller checks ``rows_updated`` for the
+                        # synchronous outcome.
+                        # Discard the task reference to avoid the
+                        # "task never awaited" warning; the asyncio
+                        # loop retains it until completion.
+                        task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+                    except RuntimeError:
+                        # No running loop — drive synchronously.
+                        label_added, label_skipped = asyncio.run(_run())
+                except Exception as e:  # noqa: BLE001 — defensive
+                    log.debug(
+                        "[label_backfill] record_outcome: _process_market "
+                        "failed for %s: %s", token_id, e,
+                    )
+                    if err is None:
+                        err = str(e)
+
+        return {
+            "token_id": token_id,
+            "outcome": outcome_int,
+            "rows_updated": rows_updated,
+            "label_added": label_added,
+            "label_skipped": label_skipped,
+            "error": err,
+        }
+
     @property
     def stats(self) -> dict[str, Any]:
         """Return a snapshot of the engine's lifetime telemetry."""

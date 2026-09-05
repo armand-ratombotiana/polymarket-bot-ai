@@ -192,6 +192,39 @@ except Exception:  # noqa: BLE001 — sibling modules must never break the packa
     SnapshotSource = None  # type: ignore[assignment,misc]
     get_feature_pipeline = None  # type: ignore[assignment]
 
+# ── W33-4 — market event ingester (defensive) ────────────────────────────────
+# Mirrors the ``ingestion.dead_letter`` / ``ingestion.checkpoint`` /
+# ``ingestion.health`` defensive import — the module is pure SQLite and
+# does NOT depend on ``core.timescale_db``, but it imports
+# ``ingestion.raw_vault`` (defensively) so the import is wrapped in
+# try/except so a transient sibling failure doesn't cascade.
+try:  # pragma: no cover — defensive
+    from ingestion.market_events import (
+        ALERT_EVENT_TYPES,
+        DEFAULT_DB_PATH as MARKET_EVENTS_DEFAULT_DB_PATH,
+        DEFAULT_EVENT_LIMIT as MARKET_EVENTS_DEFAULT_LIMIT,
+        EVENT_TYPES as MARKET_EVENT_TYPES,
+        LIQUIDITY_CHANGE_THRESHOLD,
+        MAX_EVENT_LIMIT,
+        POLL_INTERVAL_SECONDS as MARKET_EVENTS_POLL_INTERVAL,
+        MarketEvent,
+        MarketEventIngester,
+        MarketState,
+        market_event_ingester,
+    )
+except Exception:  # noqa: BLE001 — sibling modules must never break the package
+    MarketEvent = None  # type: ignore[assignment,misc]
+    MarketState = None  # type: ignore[assignment,misc]
+    MarketEventIngester = None  # type: ignore[assignment,misc]
+    market_event_ingester = None  # type: ignore[assignment]
+    MARKET_EVENT_TYPES = None  # type: ignore[assignment]
+    ALERT_EVENT_TYPES = None  # type: ignore[assignment]
+    MARKET_EVENTS_DEFAULT_DB_PATH = None  # type: ignore[assignment]
+    MARKET_EVENTS_POLL_INTERVAL = None  # type: ignore[assignment]
+    MARKET_EVENTS_DEFAULT_LIMIT = None  # type: ignore[assignment]
+    MAX_EVENT_LIMIT = None  # type: ignore[assignment]
+    LIQUIDITY_CHANGE_THRESHOLD = None  # type: ignore[assignment]
+
 
 __all__ = [
     # W31-4 — DLQ + checkpoint + health (always available)
@@ -249,4 +282,16 @@ __all__ = [
     "FeatureProvenance",
     "SnapshotSource",
     "get_feature_pipeline",
+    # W33-4 — market event ingester (defensive)
+    "MarketEvent",
+    "MarketState",
+    "MarketEventIngester",
+    "market_event_ingester",
+    "MARKET_EVENT_TYPES",
+    "ALERT_EVENT_TYPES",
+    "MARKET_EVENTS_DEFAULT_DB_PATH",
+    "MARKET_EVENTS_POLL_INTERVAL",
+    "MARKET_EVENTS_DEFAULT_LIMIT",
+    "MAX_EVENT_LIMIT",
+    "LIQUIDITY_CHANGE_THRESHOLD",
 ]

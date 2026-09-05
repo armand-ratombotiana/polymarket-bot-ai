@@ -9072,3 +9072,151 @@ async def get_ingestion_provenance(
         )
     return tracker.get_provenance(token_id)
 
+
+# ── W33-4 — Market event ingestion endpoint ─────────────────────────────────
+# Additive: appends a single read-only endpoint under ``/api/ingestion/*``
+# so an operator (or a future React panel) can query the market lifecycle
+# event timeline that the W33-4 ``ingestion.market_events.market_event_ingester``
+# singleton records on every detected transition.
+#
+#   GET  /api/ingestion/market-events   market lifecycle events timeline
+#
+# Auth enforced by ``enforce_api_auth`` (this path is NOT in ``PUBLIC_PATHS``).
+# Rate-limited by ``READ_LIMIT`` so a dashboard polling every 15 s can't
+# starve the trading path. The endpoint reads directly from the
+# ``market_event_ingester`` SQLite store — no in-memory cache, so the
+# response always reflects the latest ``record_event`` call.
+
+
+def _resolve_market_event_ingester():
+    """Return the module-level ``market_event_ingester`` singleton, or
+    ``None`` when its construction failed at module-import time.
+
+    Mirrors the ``_resolve_lineage_tracker`` defensive-access pattern.
+    The W33-4 ``ingestion.market_events`` module's singleton is
+    constructed defensively (a SQLite ``_init_db`` failure is logged +
+    swallowed, falling back to ``/tmp/market_events.db``), so this
+    helper practically never returns ``None`` in production — but a
+    downstream consumer still needs to guard against ``None`` because
+    the endpoint no-ops with a 503 when the singleton is unavailable.
+
+    Lazy import: the ``ingestion.market_events`` module is imported
+    INSIDE this helper (NOT at the top of ``api/server.py``) so the
+    production ``api.server`` module imports cleanly even when a
+    sibling ``tests/ingestion/`` package shadows our top-level
+    ``ingestion`` package during pytest collection (mirrors the
+    ``_resolve_lineage_tracker`` defensive-import pattern).
+    """
+    try:
+        from ingestion.market_events import market_event_ingester as _singleton
+    except ImportError:  # pragma: no cover — defensive
+        return None
+    if _singleton is None:
+        return None
+    return _singleton
+
+
+@app.get("/api/ingestion/market-events", tags=["ingestion"])
+@limiter.limit(READ_LIMIT)
+async def get_market_events(
+    request: Request,  # noqa: ARG001 — slowapi requires the `request` arg
+    token_id: str | None = Query(
+        None,
+        description=(
+            "Optional filter — when set, only events whose ``token_id`` "
+            "column matches are returned (e.g. the lifecycle timeline "
+            "for a single market). ``None`` (default) returns every "
+            "event across every market."
+        ),
+    ),
+    event_type: str | None = Query(
+        None,
+        description=(
+            "Optional event-type filter. Must be one of "
+            "``MARKET_CREATED`` / ``MARKET_SUSPENDED`` / "
+            "``MARKET_REOPENED`` / ``MARKET_CLOSED`` / "
+            "``MARKET_RESOLVED`` / ``MARKET_LIQUIDITY_CHANGED``. "
+            "``None`` (default) returns every event type."
+        ),
+    ),
+    limit: int = Query(
+        50,
+        ge=1,
+        le=1000,
+        description=(
+            "Maximum events to return (default 50, hard ceiling 1000 "
+            "for response-size hygiene)."
+        ),
+    ),
+):
+    """Get market lifecycle events.
+
+    Returns the most recent events recorded by
+    ``ingestion.market_events.market_event_ingester`` (the W33-4
+    SQLite-backed event tracker), ordered by ``timestamp`` descending
+    (most recent first). Each event carries the full ``payload`` (the
+    Gamma market dict at the moment of detection, parsed back from
+    JSON to a Python object) so a debugger can inspect what triggered
+    the event classification.
+
+    Args:
+        token_id: Optional token filter (e.g. ``"71321"``). When set,
+            only events for that market are returned.
+        event_type: Optional event-type filter. When set, only events
+            of that type are returned.
+        limit: Maximum events to return (default 50, hard ceiling
+            1000).
+
+    Returns:
+        ``{"events": [...], "count": N, "ingester_stats": {...},
+        "generated_at": float}`` — the ``ingester_stats`` block
+        mirrors ``MarketEventIngester.stats`` so the operator can see
+        the running event_count / alert_count / last_poll_at alongside
+        the recent events.
+
+    Returns HTTP 503 with an ``{"error": "market event ingester
+    unavailable"}`` body when the singleton could not be constructed
+    at module-import time (extremely rare — the constructor falls back
+    to ``/tmp/market_events.db`` on a non-writable default path).
+    """
+    ingester = _resolve_market_event_ingester()
+    if ingester is None:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "error": "market event ingester unavailable",
+                "generated_at": time.time(),
+            },
+        )
+    # Defensive: validate ``event_type`` against the canonical vocabulary
+    # so a typo doesn't silently return an empty result list (the DB
+    # layer accepts any TEXT value so the query would just match zero
+    # rows). Mirrors the ``raw_vault`` validation convention.
+    if event_type is not None:
+        try:
+            from ingestion.market_events import EVENT_TYPES as _ALLOWED
+        except ImportError:  # pragma: no cover — defensive
+            _ALLOWED = frozenset()  # type: ignore[assignment]
+        if _ALLOWED and event_type not in _ALLOWED:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"event_type must be one of {sorted(_ALLOWED)} or "
+                    f"omitted; got {event_type!r}"
+                ),
+            )
+
+    events = ingester.get_events(
+        token_id=token_id,
+        event_type=event_type,
+        limit=limit,
+    )
+    return {
+        "events": events,
+        "count": len(events),
+        "ingester_stats": ingester.stats,
+        "token_id_filter": token_id,
+        "event_type_filter": event_type,
+        "generated_at": time.time(),
+    }
+

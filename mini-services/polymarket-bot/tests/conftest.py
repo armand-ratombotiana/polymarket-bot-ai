@@ -159,6 +159,17 @@ _ENV_REDIRECTS: dict[str, str] = {
     # sees a deterministic path (mirrors the W31-1 ``RAW_VAULT_DB_PATH``
     # convention).
     "LINEAGE_DB_PATH": str(_TMP_ROOT / "lineage.db"),
+    # W33-4 — market event ingester SQLite db. Module-level singleton
+    # ``ingestion.market_events.market_event_ingester`` is constructed at
+    # import time and would otherwise try to mkdir ``/app/data``
+    # (read-only in the sandbox) — same defensive pattern as the other
+    # *_DB env redirects above. The ingester itself falls back to
+    # ``/tmp/market_events.db`` on a non-writable default path, but
+    # redirecting explicitly keeps every SQLite store co-located under
+    # the conftest sandbox so a test that asserts on the ingester's
+    # stats sees a deterministic path (mirrors the W32-4
+    # ``LINEAGE_DB_PATH`` convention).
+    "MARKET_EVENTS_DB_PATH": str(_TMP_ROOT / "market_events.db"),
     # Force the canonical trading mode to paper + live disabled so risk-gate
     # tests don't short-circuit at the shadow / live-trading gates inside
     # ``InstitutionalRiskEngine.check_order``.

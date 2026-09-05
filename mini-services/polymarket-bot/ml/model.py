@@ -14,6 +14,8 @@ Architecture:
 """
 from __future__ import annotations
 
+import asyncio
+import concurrent.futures
 import logging
 import os
 import pickle
@@ -57,6 +59,71 @@ try:
 except (ImportError, OSError):
     _LGBM_AVAILABLE = False
     log.warning("[ml_model] LightGBM not available — using 3-member ensemble (RF+GB+SGD)")
+
+
+# ── W33-2 — Feature pipeline wiring ─────────────────────────────────────────
+#
+# ``MarketMLModel.predict_proba`` is a SYNCHRONOUS API (callers like
+# ``core/analysis_engine.py`` call it without ``await``). The feature
+# pipeline's ``get_features`` / ``get_feature_age`` are ASYNC (the
+# underlying snapshot source — ``core.database_manager.db_manager`` —
+# exposes an ``async def get_snapshots``). To let the ML model score a
+# token by id alone (no pre-extracted feature vector), the predict path
+# bridges sync→async via ``_run_async`` below.
+#
+# Three runtime modes are handled:
+#   1. No running loop (sync caller, e.g. an HTTP handler running in a
+#      sync worker thread, or a unit test) — ``asyncio.run`` creates a
+#      fresh loop, runs the coroutine to completion, tears it down.
+#   2. A running loop in THIS thread (the production path inside the
+#      asyncio-driven strategy / API) — we can't ``run_until_complete``
+#      on the already-running loop. A one-shot ``ThreadPoolExecutor``
+#      spins up an isolated loop in a separate worker thread so the
+#      outer loop is never re-entered. The worker thread is torn down
+#      as soon as the coroutine resolves (max_workers=1 keeps the
+#      pool cheap and prevents unbounded thread growth).
+#   3. No running loop AND no current thread — falls through to the
+#      ``asyncio.run`` path via the ``RuntimeError`` raised by
+#      ``get_running_loop``.
+#
+# Any exception raised inside the coroutine propagates to the sync
+# caller (so the predict path's existing try/except still catches it
+# and falls back to ``features[0]`` / 0.5 as appropriate).
+FEATURE_FRESHNESS_THRESHOLD_SECONDS = 60.0
+
+
+def _run_async(coro):
+    """Run an async coroutine to completion from a sync caller.
+
+    Bridges the sync ``MarketMLModel.predict_proba`` / ``predict_proba_at``
+    API to the async feature-pipeline API. See the W33-2 module-level
+    comment for the three runtime modes.
+
+    Args:
+        coro: An unstarted ``Coroutine`` object (the return value of
+              calling an ``async def`` function — NOT a future).
+
+    Returns:
+        The coroutine's resolved value.
+
+    Raises:
+        Whatever the coroutine raises — the caller is expected to wrap
+        the call in a ``try/except`` matching its own fallback policy.
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        # No running loop in this thread — ``asyncio.run`` is the cleanest
+        # path (creates + tears down a fresh loop).
+        return asyncio.run(coro)
+
+    # A loop is already running in this thread. Run the coroutine in a
+    # separate worker thread's own loop so we don't re-enter the running
+    # loop (which would raise ``RuntimeError: This event loop is already
+    # running``).
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(asyncio.run, coro)
+        return future.result()
 
 
 def _synthetic_training_data(n: int = 3000) -> tuple[np.ndarray, np.ndarray]:
@@ -184,6 +251,15 @@ class MarketMLModel:
         self.n_real_samples: int = 0
         self.n_synthetic_samples: int = 0
 
+        # W33-3 — Model version stamp. Read from the model registry at
+        # construction time so the W33-3 contract validator can confirm
+        # the live feature vector matches the version's expected feature
+        # count BEFORE the predict path is invoked. Updated in
+        # ``fit_initial()`` after ``model_registry.register_version``
+        # mints a new version string (so a freshly-retrained model
+        # advertises its own version rather than the prior champion's).
+        self.version: str = model_registry.active_version
+
         # W11-5: post-hoc calibration metrics — populated by ``fit_initial()``
         # after the post-hoc ``ProbabilityCalibrator`` is fit on the held-out
         # calibration fold. Initialised to ``{"is_fit": False}`` so the
@@ -209,6 +285,21 @@ class MarketMLModel:
         self._gb_brier_window: deque[float] = deque(maxlen=self._BRIER_WINDOW)
         self._sgd_brier_window: deque[float] = deque(maxlen=self._BRIER_WINDOW)
         self._lgbm_brier_window: deque[float] = deque(maxlen=self._BRIER_WINDOW)
+
+        # W33-2 — Feature-pipeline handle for token-id-only ``predict_proba``
+        # calls. Resolved lazily on the first call that needs it (so a
+        # fresh ``MarketMLModel()`` constructed in a unit test that only
+        # exercises the explicit-features path doesn't trigger the
+        # ``ingestion.feature_pipeline`` import chain). Tests inject a
+        # fake pipeline via this attribute for hermeticity (see
+        # ``tests/test_ml_feature_wiring.py``).
+        self._feature_pipeline: Any = None
+        # Last feature-age observed by ``predict_proba`` (seconds). Exposed
+        # so tests (and a future ``/api/ml/metrics`` field) can assert on
+        # the freshness path without parsing log records. ``None`` when
+        # ``predict_proba`` was called with explicit features (no
+        # freshness check was run).
+        self.last_feature_age: float | None = None
 
     # ── W20-2 — Real-data training path ──────────────────────────────────────
     #
@@ -709,6 +800,14 @@ class MarketMLModel:
                 "cv_min_train_size": cv_min_train_size,
             },
         )
+        # W33-3 — Cache the freshly-minted version on the instance so
+        # the predict path's contract validator can confirm the live
+        # feature vector matches this version's expected feature count
+        # before invoking the ensemble. ``model_registry.register_version``
+        # does NOT auto-promote the new version to ``active`` — we cache
+        # the version explicitly so a freshly-retrained model advertises
+        # its OWN training version rather than the prior champion's.
+        self.version = version_str
 
         # W16-2 — Record the per-version feature-importance snapshot to
         # the ML feature store. Done AFTER ``model_registry.register_version``
@@ -837,9 +936,194 @@ class MarketMLModel:
     def is_fitted(self) -> bool:
         return self.rf is not None
 
-    def predict_proba(self, features: np.ndarray, token_id: str = "") -> float:
+    def predict_proba(
+        self,
+        features: np.ndarray | None = None,
+        token_id: str | None = None,
+    ) -> float:
+        """Return ``p_yes`` — the ensemble's calibrated probability the market resolves YES.
+
+        W33-2 — supports two call modes:
+
+        * **Explicit features** (backward-compatible with every existing
+          call site, e.g. ``core/analysis_engine.py``): pass a 38-dim
+          ``features`` array. The pipeline is bypassed entirely and the
+          existing ``predict()`` path is taken. The ``token_id`` is
+          forwarded for provenance bookkeeping but is NOT used to fetch
+          features.
+
+        * **Token-id-only** (new in W33-2): pass ``features=None`` with a
+          ``token_id``. The model resolves the process-wide
+          :class:`ingestion.feature_pipeline.FeaturePipeline` singleton
+          and asks it for the point-in-time-correct feature vector at
+          ``time.time()``. If the pipeline returns ``None`` (no snapshot
+          at-or-before ``as_of``), the model returns the neutral 0.5
+          prediction and logs a warning. Before scoring, the model also
+          checks feature freshness via :meth:`get_feature_age` and logs
+          a warning when the most recent snapshot is older than
+          :data:`FEATURE_FRESHNESS_THRESHOLD_SECONDS` (60 s). The
+          prediction is still made against the stale features — the
+          freshness check is informational only, matching the W33-2
+          spec ("still predict, but with reduced confidence" — the
+          existing confidence formula ``|p_yes - 0.5| * 2`` already
+          narrows to zero as p_yes approaches 0.5, so a stale-feature
+          penalty naturally reduces confidence if the ensemble's
+          blended probability regresses toward 0.5).
+
+        Args:
+            features: Optional 1-D float ndarray of length
+                :data:`~ml.features.N_FEATURES`. When omitted, the model
+                fetches features for ``token_id`` from the feature
+                pipeline.
+            token_id: Market token identifier. Required when
+                ``features`` is ``None`` (otherwise the call returns
+                ``0.5`` — there's nothing to score). Forwarded to
+                :meth:`predict` for provenance when ``features`` is
+                provided.
+
+        Returns:
+            The calibrated ``p_yes`` in ``[0.01, 0.99]`` on the success
+            path; ``0.5`` (neutral) when features could not be obtained
+            from the pipeline. The existing ``predict()`` fallback tuple
+            ``(float(features[0]), 0.5)`` applies when the ensemble
+            raises internally.
+        """
+        # W33-2 — Token-id-only path: fetch features from the pipeline.
+        if features is None and token_id:
+            features, stale = self._fetch_features_from_pipeline(token_id)
+            if features is None:
+                log.warning(
+                    "[ml_model] No features available for %s — using default 0.5",
+                    token_id,
+                )
+                return 0.5
+            if stale:
+                log.warning(
+                    "[ml_model] Stale features for %s (%.0fs old) — predicting with reduced confidence",
+                    token_id,
+                    self.last_feature_age or 0.0,
+                )
+
+        if features is None:
+            # No features and no token_id — nothing to score.
+            return 0.5
+
+        p, _ = self.predict(features, token_id=token_id or "")
+        return p
+
+    def predict_proba_at(self, token_id: str, timestamp: float) -> float:
+        """Point-in-time ``predict_proba`` for backtest replay.
+
+        W33-2 — fetches the feature vector the model WOULD have seen at
+        wall-clock time ``timestamp`` (via the pipeline's point-in-time
+        snapshot filter: only rows with ``observation_ts <= timestamp``
+        are considered) and scores it through the same ``predict()``
+        path as live serving. A replay at T0 thus produces the exact
+        feature vector + prediction the model would have produced at
+        T0 — no look-ahead bias.
+
+        Returns ``0.5`` when the pipeline has no snapshot at-or-before
+        ``timestamp`` (the same neutral-fallback semantics as
+        :meth:`predict_proba`'s token-id-only path).
+
+        Args:
+            token_id: Market token to score.
+            timestamp: Epoch float (UTC seconds). The pipeline's
+                point-in-time filter uses this as the upper bound on
+                snapshot ``timestamp`` — future snapshots are excluded.
+
+        Returns:
+            The calibrated ``p_yes`` in ``[0.01, 0.99]`` on the success
+            path; ``0.5`` (neutral) when no features are available at
+            or before ``timestamp``.
+        """
+        if not token_id:
+            return 0.5
+        try:
+            pipe = self._resolve_feature_pipeline()
+            # Point-in-time freshness check — measure age against
+            # ``timestamp`` (NOT wall clock) so the warning is itself
+            # PIT-correct.
+            try:
+                age = _run_async(pipe.get_feature_age(token_id, as_of=timestamp))
+            except Exception:  # noqa: BLE001 — defensive
+                age = None
+            self.last_feature_age = age
+            if age is not None and age > FEATURE_FRESHNESS_THRESHOLD_SECONDS:
+                log.warning(
+                    "[ml_model] Stale features for %s at as_of=%.0f (%.0fs old)",
+                    token_id, timestamp, age,
+                )
+
+            features = _run_async(pipe.get_features(token_id, timestamp=timestamp))
+        except Exception as e:  # noqa: BLE001 — defensive
+            log.debug("[ml_model] predict_proba_at pipeline fetch failed: %s", e)
+            self.last_feature_age = None
+            return 0.5
+        if features is None:
+            return 0.5
         p, _ = self.predict(features, token_id=token_id)
         return p
+
+    def _fetch_features_from_pipeline(
+        self, token_id: str
+    ) -> tuple[np.ndarray | None, bool]:
+        """Fetch features + freshness flag from the resolved feature pipeline.
+
+        W33-2 helper factored out of :meth:`predict_proba` so the same
+        fetch + freshness logic is shared with :meth:`predict_proba_at`
+        (modulo timestamp handling — ``predict_proba_at`` resolves
+        ``as_of`` explicitly, this helper uses ``time.time()``).
+
+        Args:
+            token_id: Market token to fetch features for.
+
+        Returns:
+            A ``(features, stale)`` tuple where ``features`` is the
+            38-dim ndarray or ``None`` (no snapshot available), and
+            ``stale`` is ``True`` when the most recent snapshot is older
+            than :data:`FEATURE_FRESHNESS_THRESHOLD_SECONDS`. ``stale``
+            is ``False`` when the pipeline returned ``None`` (no
+            freshness check was run) or when the snapshot is fresh.
+        """
+        try:
+            pipe = self._resolve_feature_pipeline()
+            try:
+                age = _run_async(pipe.get_feature_age(token_id))
+            except Exception:  # noqa: BLE001 — defensive
+                age = None
+            self.last_feature_age = age
+            features = _run_async(pipe.get_features(token_id, timestamp=time.time()))
+        except Exception as e:  # noqa: BLE001 — defensive
+            log.debug("[ml_model] pipeline feature fetch failed: %s", e)
+            self.last_feature_age = None
+            return None, False
+        if features is None:
+            return None, False
+        stale = age is not None and age > FEATURE_FRESHNESS_THRESHOLD_SECONDS
+        return features, stale
+
+    def _resolve_feature_pipeline(self) -> Any:
+        """Return the model's feature-pipeline handle, lazy-resolving the singleton.
+
+        W33-2 — the pipeline handle is resolved on first use so module
+        import is cheap and side-effect free. Tests override the
+        ``self._feature_pipeline`` instance attribute directly to inject
+        a fake (no monkey-patching of the module-level singleton
+        required). Production callers get the process-wide
+        :class:`ingestion.feature_pipeline.FeaturePipeline` (the same
+        singleton the strategy / API use).
+        """
+        if self._feature_pipeline is not None:
+            return self._feature_pipeline
+        # Lazy import — avoids the circular import path
+        # ``ml.model`` → ``ingestion.feature_pipeline`` → ``ml.features`` →
+        # (already loaded). The deferred resolution also keeps a fresh
+        # ``MarketMLModel()`` constructed in a unit test that doesn't
+        # exercise the token-id path from triggering the import chain.
+        from ingestion.feature_pipeline import get_feature_pipeline
+        self._feature_pipeline = get_feature_pipeline()
+        return self._feature_pipeline
 
     def predict_confidence(self, features: np.ndarray, token_id: str = "") -> float:
         _, conf = self.predict(features, token_id=token_id)
@@ -990,6 +1274,52 @@ class MarketMLModel:
         return {"rf": round(w_rf, 4), "gb": round(w_gb, 4), "sgd": round(w_sgd, 4), "lgbm": round(w_lgbm, 4)}
 
     def predict(self, features: np.ndarray, token_id: str = "") -> tuple[float, float]:
+        # W33-3 — Feature contract validation. Runs BEFORE the
+        # unfitted-model check so a malformed feature vector (wrong
+        # length, NaN / Inf, out-of-range value, train/serve schema
+        # mismatch) returns a neutral ``(0.5, 0.0)`` prediction
+        # rather than feeding the model an out-of-distribution input
+        # (which could produce a confidently-wrong probability). The
+        # validator is imported lazily so a missing
+        # ``ingestion.contract_validator`` module (e.g. a parallel
+        # agent's branch hasn't landed) doesn't crash the predict
+        # path — the missing module is logged and the predict path
+        # falls through to the existing unfitted / exception handlers.
+        try:
+            from ingestion.contract_validator import contract_validator
+            _cv_result = contract_validator.validate_features(
+                features, model_version=self.version
+            )
+            if not _cv_result.is_valid:
+                log.error(
+                    "[ml_model] Feature contract violation "
+                    "(version=%s token=%s): %s",
+                    self.version,
+                    token_id,
+                    "; ".join(_cv_result.errors),
+                )
+                # Neutral prediction + zero confidence — the input was
+                # invalid so the model's output has no calibration
+                # basis. ``0.5`` is the uninformative prior on a binary
+                # outcome; ``0.0`` confidence surfaces the violation in
+                # downstream consumers (strategy gate, shadow
+                # inference, drift detector).
+                return 0.5, 0.0
+        except ImportError:  # pragma: no cover — defensive
+            log.debug(
+                "[ml_model] ingestion.contract_validator not importable — "
+                "skipping feature contract check",
+                exc_info=True,
+            )
+        except Exception as e:  # noqa: BLE001 — defensive
+            # The validator's contract is "never raises" — but a
+            # future override might break that. Don't let a broken
+            # validator take down the predict path; log and continue.
+            log.warning(
+                "[ml_model] Feature contract validator raised: %s — "
+                "continuing with predict path", e,
+            )
+
         if self.rf is None or self.gb is None:
             return float(features[0]), 0.5
 

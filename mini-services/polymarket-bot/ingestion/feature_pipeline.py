@@ -344,6 +344,41 @@ class FeaturePipeline:
         self._persist(token_id, vec, provenance)
         return vec, provenance
 
+    async def get_feature_age(
+        self,
+        token_id: str,
+        as_of: Optional[float] = None,
+    ) -> Optional[float]:
+        """Return the age in seconds of the most recent snapshot for ``token_id``.
+
+        W33-2 — used by :meth:`ml.model.MarketMLModel.predict_proba` for the
+        feature-freshness check. The ML model is permitted (with a logged
+        warning) to score against stale features when the most-recent
+        snapshot is older than the freshness threshold (default 60 s), but
+        a sub-second age is the healthy steady state.
+
+        ``as_of`` defaults to ``time.time()`` (live serving). Pass an
+        explicit epoch float for backtest replay — the age is then measured
+        against ``as_of``, NOT the wall clock, so a replay at T0 sees the
+        freshness the model would have seen at T0.
+
+        Returns ``None`` when the token has no snapshot at-or-before
+        ``as_of`` (the model should treat this identically to "no
+        features available" — i.e. fall back to the neutral 0.5 prediction
+        via :meth:`MarketMLModel.predict_proba`'s fallback path).
+        """
+        as_of = float(as_of) if as_of is not None else time.time()
+        rows = await self._fetch_snapshot_window(token_id, limit=1)
+        if not rows:
+            return None
+        ts = self._row_ts(rows[0])
+        if ts is None:
+            return None
+        # Age is non-negative — a snapshot with ts > as_of (a future
+        # snapshot leaking past the PIT window) is treated as 0.0 so
+        # the freshness check doesn't surface a nonsensical negative age.
+        return max(0.0, as_of - ts)
+
     async def predict(
         self,
         token_id: str,
@@ -388,6 +423,48 @@ class FeaturePipeline:
             token_id, ml_model=ml_model, timestamp=timestamp, market=market
         )
         return None if result is None else result[0]
+
+    def invalidate(self, token_id: str) -> bool:
+        """Invalidate cached state for ``token_id``.
+
+        W33-4 — called by ``ingestion.market_events.MarketEventIngester``
+        on ``MARKET_RESOLVED`` so the next prediction uses fresh data
+        rather than the resolved market's stale price history (a
+        resolved market's mid converges to 0.0 or 1.0, which would
+        contaminate the Hurst / momentum / rolling-vol estimators on
+        the next call).
+
+        Clears the per-token rolling price-history deque inside
+        ``ml.features._price_history`` (the only state the pipeline
+        itself caches — the snapshot window is fetched fresh from the
+        snapshot source on every ``get_features`` call, so there's no
+        other cache to invalidate).
+
+        Args:
+            token_id: The Polymarket market token id whose cached
+                state should be cleared.
+
+        Returns:
+            ``True`` when a cached entry was found and cleared;
+            ``False`` when the token had no cached entry (no-op).
+        """
+        try:
+            from ml import features as _feat
+        except Exception as e:  # noqa: BLE001 — defensive
+            log.debug(
+                "[feature_pipeline] invalidate: ml.features unavailable: %s",
+                e,
+            )
+            return False
+        history = _feat._price_history
+        if token_id in history:
+            history.pop(token_id, None)
+            log.debug(
+                "[feature_pipeline] invalidated cached price history for %s",
+                token_id,
+            )
+            return True
+        return False
 
     # ── Helpers ──────────────────────────────────────────────────────────
 

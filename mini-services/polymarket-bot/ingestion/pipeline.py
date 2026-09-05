@@ -104,6 +104,100 @@ def _load_default_lineage():
         return None
 
 
+def _load_default_contract_validator():
+    """Lazy import of the W33-3 data-contract validator singleton.
+
+    Imported lazily so the pipeline module imports cleanly even if the
+    W33-3 ``ingestion.contract_validator`` module is unavailable (e.g.
+    a parallel agent's branch hasn't landed its file yet — mirrors the
+    ``_load_default_lineage`` pattern).
+
+    Returns ``None`` on import failure so the pipeline's contract-
+    validation gate no-ops rather than crashing every ``process`` call.
+    A test injects a fresh ``DataContractValidator()`` for hermetic
+    isolation (mirrors the per-test ``DataValidator()`` fixture in
+    ``tests/test_data_validator.py``).
+    """
+    try:
+        from ingestion.contract_validator import contract_validator
+        return contract_validator
+    except ImportError:  # pragma: no cover — defensive
+        return None
+
+
+def _load_default_dead_letter_queue():
+    """Lazy import of the W31-4 ``dead_letter_queue`` singleton.
+
+    Imported lazily so the pipeline module imports cleanly even if the
+    DLQ module is unavailable or the underlying SQLite path is
+    unwritable in the sandbox (the constructor logs an ERROR but
+    does not raise — see ``ingestion.dead_letter.DeadLetterQueue._init_db``).
+
+    Returns ``None`` on import failure so the pipeline's DLQ routing
+    no-ops rather than crashing every ``process`` call. A test injects
+    a fresh ``DeadLetterQueue(db_path=tmp_path / ...)`` for hermetic
+    isolation (mirrors the per-test ``dlq`` fixture in
+    ``tests/test_ingestion_infra.py``).
+    """
+    try:
+        from ingestion.dead_letter import dead_letter_queue
+        return dead_letter_queue
+    except ImportError:  # pragma: no cover — defensive
+        return None
+
+
+def _synthetic_invalid_result(contract_name: str, error: str) -> Any:
+    """Build a ``ContractResult(is_valid=False)`` for the raise-fallback case.
+
+    Used when the contract validator itself raised (the validator's
+    contract is "never raises" — a custom override might break that).
+    Treating the raise as a contract violation keeps the record out of
+    the ML predict path; the error message names the raise so the
+    operator can spot the broken validator in the DLQ dashboard.
+    """
+    try:
+        from ingestion.contract_validator import ContractResult
+        return ContractResult(
+            contract=contract_name,
+            is_valid=False,
+            errors=[error],
+            warnings=[],
+            checked_fields=0,
+        )
+    except ImportError:  # pragma: no cover — defensive
+        # Should never happen — the lazy import succeeded when the
+        # validator singleton was wired. Fall back to a duck-typed
+        # plain object with the same attribute shape so the caller's
+        # ``contract_result.is_valid`` / ``.errors`` access still works.
+        class _Fallback:
+            is_valid = False
+            errors = [error]
+            warnings = []  # type: list[str]
+            checked_fields = 0
+        return _Fallback()
+
+
+def _resolve_contract_name(event_type: str) -> str | None:
+    """Map a pipeline ``event_type`` to its data-contract name.
+
+    Lazy import of ``ingestion.contract_validator.event_type_to_contract``
+    so the pipeline module doesn't force the contract_validator module
+    to load at pipeline-import time (mirrors the lazy-import pattern
+    in ``_load_default_lineage`` / ``_load_default_contract_validator``).
+
+    Returns ``None`` when:
+      * the contract_validator module isn't importable (defensive);
+      * the event_type doesn't map to a contract (``"order_book"`` /
+        ``"market_info"`` / ``"news"`` — these skip both the W24-4
+        validator AND the contract validator).
+    """
+    try:
+        from ingestion.contract_validator import event_type_to_contract
+    except ImportError:  # pragma: no cover — defensive
+        return None
+    return event_type_to_contract(event_type)
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -199,6 +293,8 @@ class Pipeline:
         enricher: Callable[[PipelineRecord], dict[str, Any]] | None = None,
         router: Callable[[PipelineRecord], None] | None = None,
         lineage: Any | None = None,
+        contract_validator: Any | None = None,
+        dead_letter_queue: Any | None = None,
     ) -> None:
         self._vault = vault or raw_vault
         self._validator = validator or _default_validator
@@ -210,6 +306,37 @@ class Pipeline:
         # force a PG connection at import time). Tests inject a no-op
         # router to keep the test hermetic.
         self._router = router
+        # W33-3 — data contract validator. ``None`` (the default) defers
+        # to the module-level ``contract_validator`` singleton (lazy
+        # import via ``_load_default_contract_validator`` so the
+        # pipeline doesn't force the ``ingestion.contract_validator``
+        # module to load at pipeline-import time — mirrors the
+        # ``_load_default_lineage`` pattern). A test injects a fresh
+        # ``DataContractValidator()`` instance for hermetic isolation
+        # of the counters. Passing ``False`` (or any falsy non-None
+        # value) explicitly DISABLES the contract check — used by
+        # tests that exercise the pipeline's other stages without
+        # caring about the contract gate.
+        self._contract_validator = (
+            contract_validator
+            if contract_validator is not None
+            else _load_default_contract_validator()
+        )
+        # W33-3 — dead-letter queue. When the contract validator
+        # rejects a record, the record is forwarded to the DLQ with
+        # ``reason="contract_violation"`` so an operator can spot it
+        # via ``GET /api/ingestion/dead-letter``. ``None`` (default)
+        # defers to the module-level ``dead_letter_queue`` singleton
+        # (lazy import — the singleton's ``_init_db`` is wrapped in
+        # try/except so an unwritable default path doesn't crash the
+        # pipeline). Passing ``False`` explicitly DISABLES the DLQ
+        # forward (used by tests that don't care about the DLQ side-
+        # effect).
+        self._dead_letter_queue = (
+            dead_letter_queue
+            if dead_letter_queue is not None
+            else _load_default_dead_letter_queue()
+        )
         # W32-4 — lineage tracker. ``None`` defaults to the module-level
         # ``lineage_tracker`` singleton (loaded lazily so a missing
         # ``ingestion.lineage`` module doesn't crash the pipeline
@@ -421,8 +548,114 @@ class Pipeline:
         if quality_state == "valid":
             try:
                 rec.normalized_payload = self._normalizer(rec) or normalized
-                rec.enriched_payload = self._enricher(rec)
-                rec.feature_ready = bool(rec.enriched_payload)
+
+                # ── W33-3 — Contract validation ─────────────────────────
+                # After normalization, before enrichment: validate the
+                # normalized payload against the named data contract so a
+                # schema mismatch (missing field, out-of-range value,
+                # future timestamp) is caught BEFORE the enriched fields
+                # are computed and BEFORE the record reaches the ML
+                # feature store. On violation the record is reclassified
+                # as ``quality_state="invalid"`` and forwarded to the
+                # dead-letter queue with ``reason="contract_violation"``
+                # so an operator can spot the violation in the W31-4 DLQ
+                # dashboard.
+                #
+                # Skipped when:
+                #   * no contract validator is wired (test override or
+                #     the lazy singleton import failed);
+                #   * the event_type doesn't map to a contract (e.g.
+                #     ``"order_book"`` / ``"market_info"`` / ``"news"``).
+                if self._contract_validator and quality_state == "valid":
+                    contract_name = _resolve_contract_name(rec.event_type)
+                    if contract_name is not None:
+                        try:
+                            contract_result = self._contract_validator.validate(
+                                rec.normalized_payload, contract=contract_name
+                            )
+                        except Exception as e:  # noqa: BLE001 — defensive
+                            # The validator's contract is "never raises" —
+                            # a custom validator override might break that
+                            # contract. Treat the raise itself as a
+                            # contract violation so the record is parked
+                            # in the DLQ rather than silently dropped.
+                            logger.exception(
+                                "[pipeline] contract validator raised on "
+                                "source=%s source_id=%s contract=%s: %s",
+                                source, source_id, contract_name, e,
+                            )
+                            contract_result = _synthetic_invalid_result(
+                                contract_name,
+                                f"validator raised: {type(e).__name__}: {e}",
+                            )
+                        if not contract_result.is_valid:
+                            err = "; ".join(contract_result.errors)
+                            rec.quality_state = "invalid"
+                            rec.error_reason = (
+                                f"Contract violation ({contract_name}): {err}"
+                            )
+                            quality_state = "invalid"
+                            with self._lock:
+                                self._invalid_count += 1
+                                self._valid_count -= 1
+                            # Best-effort DLQ forward. Wrapped in
+                            # try/except so a transient DLQ write
+                            # failure (e.g. SQLite ``database is
+                            # locked``) doesn't downgrade the
+                            # classification further — the record's
+                            # ``quality_state`` is already ``invalid``
+                            # so the routing stage below will skip it.
+                            if self._dead_letter_queue:
+                                try:
+                                    self._dead_letter_queue.add(
+                                        source=source,
+                                        record_type=event_type,
+                                        payload=(
+                                            rec.normalized_payload
+                                            if isinstance(
+                                                rec.normalized_payload, dict
+                                            )
+                                            else {"raw": str(raw_payload)}
+                                        ),
+                                        reason="contract_violation",
+                                        error=err,
+                                        metadata={
+                                            "contract": contract_name,
+                                            "warnings": list(
+                                                contract_result.warnings
+                                            ),
+                                        },
+                                    )
+                                except Exception as e:  # noqa: BLE001
+                                    logger.warning(
+                                        "[pipeline] DLQ add failed for "
+                                        "source=%s source_id=%s: %s",
+                                        source, source_id, e,
+                                    )
+                            # Skip enrichment + lineage — invalid
+                            # records don't need derived fields, and
+                            # the lineage edges should reflect the
+                            # raw → normalized path only (no enrich).
+                            rec.processing_time = time.time()
+                            latency_ms = max(
+                                0.0,
+                                (rec.processing_time - ing_ts) * 1000.0,
+                            )
+                            with self._lock:
+                                self._recent_processing_times.append(
+                                    rec.processing_time
+                                )
+                                self._recent_latencies_ms.append(latency_ms)
+                            return PipelineResult(
+                                record=rec,
+                                quality_state=rec.quality_state,
+                                error_reason=rec.error_reason,
+                                observation_id=rec.observation_id,
+                            )
+
+                if quality_state == "valid":
+                    rec.enriched_payload = self._enricher(rec)
+                    rec.feature_ready = bool(rec.enriched_payload)
                 # W32-4 — record the lineage edges for the normalize +
                 # enrich transformations. Best-effort + idempotent
                 # (re-processing the same record on a replay produces
