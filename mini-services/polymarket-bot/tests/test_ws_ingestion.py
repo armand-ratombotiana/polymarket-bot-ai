@@ -265,7 +265,7 @@ def _ws_price_change_msg(
         "asset_id": token_id,
         "changes": [
             {"side": "BUY", "price": "0.48", "size": "150"},
-            {"side": "SELL", "price": "0.52", "size": "0"},  # tombstone
+            {"side": "SELL", "price": "0.51", "size": "0"},  # tombstone
         ],
         "timestamp": str(int(time.time() * 1000)),
     }
@@ -791,6 +791,12 @@ async def test_ws_connection_mock_connects_and_pumps_messages(
     factory = FakeConnectFactory([fake_ws])
     ws_manager._connect_factory = factory
 
+    # Capture the real ``asyncio.sleep`` BEFORE monkeypatching so the
+    # test's own ``await real_asyncio_sleep(...)`` calls below don't get
+    # intercepted by ``fast_sleep`` (which would set ``_running=False``
+    # prematurely before the background task has had a chance to run).
+    real_asyncio_sleep = asyncio.sleep
+
     # Patch asyncio.sleep in the ws_ingestion namespace so the
     # reconnect loop's post-listen sleep doesn't actually wait.
     async def fast_sleep(_delay: float) -> None:
@@ -805,8 +811,11 @@ async def test_ws_connection_mock_connects_and_pumps_messages(
     # The background task's ``async for raw in ws`` exits when the
     # FakeWS exhausts its message list, then sleeps via the patched
     # ``asyncio.sleep`` which flips ``_running=False``.
-    await asyncio.sleep(0.1)
-    await asyncio.sleep(0)
+    # Use the captured real sleep so the wait itself isn't intercepted
+    # by ``fast_sleep`` (which would skip the wait entirely and leave
+    # the background task without a chance to run).
+    await real_asyncio_sleep(0.1)
+    await real_asyncio_sleep(0)
     await ws_manager.stop()
 
     # The factory was called with the configured URI.
@@ -854,6 +863,12 @@ async def test_reconnect_with_exponential_backoff(
     # the backoff sequence doubles each iteration.
     sleep_delays: list[float] = []
 
+    # Capture the real ``asyncio.sleep`` BEFORE monkeypatching so the
+    # test's own ``await real_asyncio_sleep(...)`` calls below don't get
+    # intercepted by ``fast_sleep`` (which would prevent the background
+    # task from getting a chance to run the reconnect loop).
+    real_asyncio_sleep = asyncio.sleep
+
     async def fast_sleep(delay: float) -> None:
         sleep_delays.append(delay)
         # Stop the loop after the third sleep (the second socket's
@@ -864,8 +879,8 @@ async def test_reconnect_with_exponential_backoff(
     monkeypatch.setattr("ingestion.ws_ingestion.asyncio.sleep", fast_sleep)
 
     await ws_manager.start()
-    await asyncio.sleep(0.2)
-    await asyncio.sleep(0)
+    await real_asyncio_sleep(0.2)
+    await real_asyncio_sleep(0)
     await ws_manager.stop()
 
     # Two connect attempts — first socket dropped, second succeeded.

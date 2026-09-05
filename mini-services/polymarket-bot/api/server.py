@@ -641,6 +641,36 @@ async def lifespan(app: FastAPI):
     except Exception as e:  # pragma: no cover — defensive: must not kill startup
         log.error("[trade_tape_ingester] startup failed: %s", e)
 
+    # W32-2 — Start the unified ingestion pipeline + health monitor.
+    # The pipeline is the canonical raw → normalized → enriched →
+    # feature-ready flow every connector (REST / WS / Gamma / News)
+    # funnels records through (W31-1 / W31-2). The health monitor
+    # (W31-4) tracks per-source throughput / latency / failure rate
+    # and fires alerts when thresholds are crossed.
+    #
+    # ``start()`` for both is a lightweight lifecycle flag flip (no
+    # background task — the pipeline's processing path is event-
+    # driven via ``process()`` per record; the health monitor's
+    # ``record_event`` is called inline by each connector). The
+    # ``await`` mirrors the sibling ``live_fill_monitor`` /
+    # ``trade_tape_ingester`` / ``paper_sim`` contract so the lifespan
+    # block reads uniformly. Wrapped in try/except so a transient
+    # failure (e.g. the raw_vault's SQLite ``_init_db`` hiccup) can
+    # never block the rest of the lifespan startup.
+    try:
+        from ingestion.pipeline import ingestion_pipeline
+        await ingestion_pipeline.start()
+        log.info("Ingestion pipeline started")
+    except Exception as e:  # pragma: no cover — defensive: must not kill startup
+        log.error("Ingestion pipeline start failed: %s", e)
+
+    try:
+        from ingestion.health import ingestion_health_monitor
+        await ingestion_health_monitor.start()
+        log.info("Ingestion health monitor started")
+    except Exception as e:  # pragma: no cover — defensive: must not kill startup
+        log.error("Ingestion health monitor start failed: %s", e)
+
     # 6. Start Settlement Engine, Fundamental News Ingest & Position Risk Manager
     await settlement_engine.start()
     await fundamental_engine.start()
@@ -832,6 +862,24 @@ async def lifespan(app: FastAPI):
         await trade_tape_ingester.stop()
     except Exception as e:  # pragma: no cover — defensive: must not kill shutdown
         log.error("[trade_tape_ingester] shutdown failed: %s", e)
+    # W32-2 — stop the unified ingestion pipeline + health monitor.
+    # Mirrors the sibling ``trade_tape_ingester.stop()`` /
+    # ``live_fill_monitor.stop()`` try/except wrap so a teardown
+    # failure never blocks the rest of the lifespan shutdown. The
+    # pipeline's per-source counters + the health monitor's per-
+    # source metrics are NOT zeroed here so the post-shutdown
+    # ``GET /api/status`` snapshot can still surface the final
+    # ingestion state to an operator (mirrors the
+    # ``live_fill_monitor.stop()`` contract — idempotent + non-
+    # destructive).
+    try:
+        from ingestion.pipeline import ingestion_pipeline
+        from ingestion.health import ingestion_health_monitor
+        await ingestion_pipeline.stop()
+        await ingestion_health_monitor.stop()
+        log.info("Ingestion pipeline stopped")
+    except Exception as e:  # pragma: no cover — defensive: must not kill shutdown
+        log.error("Ingestion pipeline stop failed: %s", e)
     await gamma_client.close()
 
     # ── W16-7 — close the async SQLite connection pool ─────────────────────
@@ -1251,6 +1299,13 @@ version mismatch first.
         # SEPARATELY with its own confidence intervals + significance
         # assessment; metrics are NEVER combined across categories.
         {"name": "analytics", "description": "Honest performance reporting (backtest / walk-forward / paper / live, separated)"},
+        # W31-5 — data-ingestion health endpoints. W32-3 expanded the
+        # surface to cover raw-vault inspection, backfill control,
+        # dead-letter queue management, checkpoint inspection/reset, and
+        # pipeline start/stop. The tag description keeps the W31-5 panel
+        # grouping (the W31-5 ``IngestionHealthPanel`` React component
+        # polls several of these endpoints).
+        {"name": "ingestion", "description": "Data ingestion: raw vault, backfill, dead-letter queue, checkpoints, pipeline control"},
     ],
     docs_url="/docs",
     redoc_url="/redoc",
@@ -1876,6 +1931,36 @@ async def api_version():
 async def status(request: Request):
     from core.safety import kill_switch_file_exists
     report = await risk_manager.status_report()
+    # W32-2 — surface ingestion pipeline + health monitor state on the
+    # operator dashboard. ``ingestion_pipeline.is_running`` reflects
+    # whether the lifespan startup block ran; ``active_sources`` /
+    # ``total_events`` are the live counters from ``process()`` calls;
+    # ``ingestion_health_monitor.get_summary()`` aggregates per-source
+    # throughput / latency / failure rate into a single block so the
+    # operator can see "is the ingestion layer alive?" without
+    # drilling into ``/api/ingestion/health``. Wrapped in try/except so
+    # a defensive import / accessor failure on the ingestion package
+    # (e.g. the raw_vault's defensive ``__init__.py`` try/except fell
+    # through to ``None``) never breaks ``/api/status`` — the route
+    # returns ``ingestion: {"pipeline_running": False, ...}`` instead.
+    try:
+        from ingestion.health import ingestion_health_monitor
+        from ingestion.pipeline import ingestion_pipeline
+        _ingestion_status = {
+            "pipeline_running": ingestion_pipeline.is_running,
+            "sources_active": ingestion_pipeline.active_sources,
+            "events_ingested": ingestion_pipeline.total_events,
+            "health": ingestion_health_monitor.get_summary(),
+        }
+    except Exception as e:  # pragma: no cover — defensive
+        log.debug("[api/status] ingestion block failed: %s", e)
+        _ingestion_status = {
+            "pipeline_running": False,
+            "sources_active": 0,
+            "events_ingested": 0,
+            "health": {},
+            "error": str(e)[:200],
+        }
     return {
         **report,
         "mode": settings.trading_mode,
@@ -1886,6 +1971,7 @@ async def status(request: Request):
         "book_poller": book_poller.stats,
         "vector_docs_indexed": vector_store._doc_count,
         "kill_switch_durable": bool(kill_switch_file_exists()),
+        "ingestion": _ingestion_status,
     }
 
 
@@ -7840,55 +7926,88 @@ async def get_ingestion_quality(
 @limiter.limit(READ_LIMIT)
 async def get_ingestion_dead_letter(
     request: Request,  # noqa: ARG001 — slowapi requires the `request` arg
+    limit: int = Query(
+        50, ge=1, le=500,
+        description="Maximum number of recent records to return.",
+    ),
 ):
     """Get dead-letter queue depth + recent failed records.
 
-    The W31-5 dead-letter contract is mapped onto the closest available
-    honest telemetry: ``timescale_db``'s per-table ``inserts_failed``
-    counters + ``last_error`` / ``last_error_at``. Each table that has
-    recorded at least one failed write appears as one "recent failed
-    record" entry. The retry endpoint (POST ``/retry``) is a best-effort
-    no-op: it clears the in-memory failed-write counters (mirroring the
-    semantics of a real DLQ retry — once retried, the operator expects
-    the queue to drain).
+    W32-3 — switched the source of truth from the W31-5
+    ``timescale_db.inserts_failed`` telemetry proxy to the W31-4
+    ``ingestion.dead_letter.dead_letter_queue`` SQLite-backed queue
+    (now that the queue module is available, the W31-5 honest-proxy is
+    no longer the closest available mapping). The response shape is
+    kept identical (``depth`` / ``recent`` / ``error_breakdown`` /
+    ``generated_at``) so the W31-5 ``IngestionHealthPanel`` React
+    component continues to render without a contract change.
+
+    Each ``recent`` item maps a ``DeadLetterRecord`` onto the W31-5
+    panel contract (``id`` / ``source`` / ``timestamp`` /
+    ``payload_summary`` / ``error`` / ``retries``). The
+    ``error_breakdown`` groups items by their top-line ``reason``
+    (truncated to 80 chars so the dashboard's bar chart has a small
+    finite cardinality).
+
+    Args:
+        limit: Maximum number of recent records to return (default 50,
+            capped at 500 for response-size hygiene). The dashboard
+            renders the top 20, but an operator may want to enumerate
+            more without pagination.
     """
-    db_stats = timescale_db.get_stats()
-    inserts_failed: dict[str, int] = dict(db_stats.get("inserts_failed", {}) or {})
-    last_error = db_stats.get("last_error")
-    last_error_at = db_stats.get("last_error_at")
+    from ingestion.dead_letter import dead_letter_queue
 
-    # Each table that has at least one failed insert → one DLQ item.
+    stats = dead_letter_queue.get_stats()
+    depth = int(stats.get("total", 0))
+    pending_records = dead_letter_queue.get_pending(limit=limit)
+
     recent: list[dict] = []
-    for table, count in inserts_failed.items():
-        if count <= 0:
-            continue
+    for rec in pending_records:
+        # Payload summary — first 80 chars of the JSON-stringified
+        # payload so the dashboard table doesn't try to render an
+        # unbounded JSON blob.
+        try:
+            payload_summary = json.dumps(rec.payload, default=str)[:80]
+        except (TypeError, ValueError):
+            payload_summary = "<unserialisable payload>"
         recent.append({
-            "id": f"{table}-{int(last_error_at or time.time())}",
-            "source": "timescale_db",
-            "timestamp": float(last_error_at or time.time()),
-            "payload_summary": f"{table} failed inserts",
-            "error": str(last_error or "unknown write failure"),
-            "retries": 0,
+            "id": rec.record_id,
+            "source": rec.source,
+            "timestamp": float(rec.first_seen),
+            "payload_summary": payload_summary,
+            "error": (rec.error or "unknown")[:200],
+            "reason": rec.reason,
+            "retries": int(rec.retry_count),
+            "status": rec.status,
+            "record_type": rec.record_type,
         })
-    # Stable ordering by timestamp descending (most recent first).
-    recent.sort(key=lambda r: r["timestamp"], reverse=True)
-    recent = recent[:20]
 
-    # Error-reason breakdown — group recent failures by their top-line
-    # error reason (the first line / first 80 chars of ``error``). This
-    # gives the panel's breakdown bar chart a small finite cardinality.
+    # Stable ordering by timestamp descending (most recent first) —
+    # ``get_pending`` returns oldest-first, so reverse to match the
+    # W31-5 contract.
+    recent.sort(key=lambda r: r["timestamp"], reverse=True)
+
+    # Error-reason breakdown — group recent items by their top-line
+    # ``reason`` field. This gives the panel's breakdown bar chart a
+    # small finite cardinality (the DLQ records a handful of canonical
+    # reason categories — ``validation_failed`` / ``storage_error`` /
+    # ``normalization_error`` / ``schema_mismatch`` / ``unknown``).
     breakdown_map: dict[str, int] = {}
     for r in recent:
-        reason = (r["error"] or "unknown").split("\n", 1)[0][:80]
+        reason = (r.get("reason") or r.get("error") or "unknown")
+        reason = reason.split("\n", 1)[0][:80]
         breakdown_map[reason] = breakdown_map.get(reason, 0) + 1
     error_breakdown = [
         {"reason": k, "count": v} for k, v in breakdown_map.items()
     ]
     error_breakdown.sort(key=lambda e: e["count"], reverse=True)
 
-    depth = sum(int(v or 0) for v in inserts_failed.values())
     return {
         "depth": depth,
+        "pending": int(stats.get("pending", 0)),
+        "retried": int(stats.get("retried", 0)),
+        "abandoned": int(stats.get("abandoned", 0)),
+        "by_source": dict(stats.get("by_source", {}) or {}),
         "recent": recent,
         "error_breakdown": error_breakdown,
         "generated_at": time.time(),
@@ -7899,35 +8018,62 @@ async def get_ingestion_dead_letter(
 @limiter.limit(WRITE_LIMIT)
 async def retry_ingestion_dead_letter(
     request: Request,  # noqa: ARG001 — slowapi requires the `request` arg
+    record_id: str | None = Query(
+        None,
+        description="Retry a single record by id. When omitted, every "
+                    "pending record is marked retried (drain-all semantics).",
+    ),
 ):
     """Manually retry the dead-letter queue.
 
-    Best-effort semantics: zeroes the in-memory ``inserts_failed`` counters
-    on ``timescale_db`` (mirroring how a real DLQ retry would drain the
-    queue) and reports how many "items" were retried. Future tasks can
-    replace this with an actual replay loop that re-runs the failed
-    insert against the primary store.
-    """
-    db_stats = timescale_db.get_stats()
-    inserts_failed: dict[str, int] = dict(db_stats.get("inserts_failed", {}) or {})
-    retried = sum(int(v or 0) for v in inserts_failed.values())
+    W32-3 — switched the source of truth to the W31-4
+    ``ingestion.dead_letter.dead_letter_queue`` singleton. Two retry
+    modes:
 
-    # Clear the in-memory counters — the timescale_db module exposes
-    # ``reset_telemetry`` for this purpose (used by the test suite).
-    try:
-        timescale_db.reset_telemetry()
-    except Exception as e:  # noqa: BLE001 — surface the failure honestly
+      * **Single-record retry** (``record_id`` query param set) —
+        marks one record as retried via ``mark_retried(record_id,
+        success=True)``. The record's ``status`` flips to ``"retried"``
+        and ``retry_count`` is incremented. The row is NOT deleted (it
+        stays for audit).
+
+      * **Drain-all retry** (no ``record_id``) — iterates every
+        ``pending`` record and marks each one retried. Mirrors the
+        W31-5 "drain the queue" contract.
+
+    Either path is best-effort: a transient SQLite hiccup is logged by
+    the queue module itself and surfaced via the ``retried`` counter
+    (which counts only successfully-marked records) rather than raising
+    an HTTP 500.
+    """
+    from ingestion.dead_letter import dead_letter_queue
+
+    if record_id:
+        ok = dead_letter_queue.mark_retried(record_id, success=True)
+        retried = 1 if ok else 0
         return {
-            "success": False,
-            "retried": 0,
-            "message": f"reset_telemetry failed: {e}",
+            "success": bool(ok),
+            "retried": retried,
+            "message": (
+                f"record {record_id} marked retried"
+                if ok else f"record {record_id} not found in DLQ"
+            ),
+            "record_id": record_id,
             "attempted_at": time.time(),
         }
 
+    # Drain-all path: iterate every pending record.
+    pending = dead_letter_queue.get_pending(limit=500)
+    retried = 0
+    for rec in pending:
+        if dead_letter_queue.mark_retried(rec.record_id, success=True):
+            retried += 1
     return {
         "success": True,
         "retried": retried,
-        "message": f"cleared {retried} failed-insert counter(s)" if retried else "no failed inserts to retry",
+        "message": (
+            f"marked {retried} pending record(s) retried"
+            if retried else "no pending records to retry"
+        ),
         "attempted_at": time.time(),
     }
 
@@ -8028,3 +8174,901 @@ async def get_ingestion_gaps(
         "gaps": gaps,
         "generated_at": now,
     }
+
+
+# ── W32-3 — Ingestion control endpoints ──────────────────────────────────────
+# Additive: extends the W31-5 ingestion surface with raw-vault inspection
+# (GET /raw/recent + GET /raw/{record_id}), backfill control
+# (POST /backfill/markets, POST /backfill/prices/{token_id},
+# GET /backfill/status), DLQ management (DELETE /dead-letter/{id}),
+# checkpoint inspection/reset (GET /checkpoints,
+# POST /checkpoints/{source}/reset), and pipeline start/stop
+# (POST /pipeline/start, POST /pipeline/stop, GET /pipeline/status).
+# All routes under the ``ingestion`` OpenAPI tag, all auth-enforced by
+# ``enforce_api_auth`` (none in ``PUBLIC_PATHS``).
+#
+# Honesty contract (mirrors the W17-4 / W31-5 "honest health" convention):
+#   * Raw-vault records come from ``ingestion.raw_vault.raw_vault`` (the
+#     W31-1 SQLite-backed vault). An empty list is the honest zero-state
+#     when the vault hasn't received any records yet — no fabrication.
+#   * Backfill triggers delegate to ``ingestion.backfill.backfill_engine``
+#     (the W31-3 engine). The route is best-effort: a transient upstream
+#     failure is logged by the engine itself and surfaced in the returned
+#     ``BackfillStats`` (``total_errors`` / ``error_message``) rather
+#     than raising an HTTP 500. The route NEVER blocks on the upstream
+#     API — it kicks the backfill off in the background via
+#     ``asyncio.create_task`` so the operator's POST returns immediately.
+#   * DLQ endpoints delegate to ``ingestion.dead_letter.dead_letter_queue``
+#     (the W31-4 SQLite-backed queue).
+#   * Checkpoint endpoints delegate to
+#     ``ingestion.checkpoint.checkpoint_manager`` (the W31-4
+#     SQLite-backed checkpoint store). The reset endpoint is a hard
+#     delete — once reset, the next ingestion pass re-processes every
+#     record from the beginning (the dedup layer ensures no duplicates
+#     reach downstream storage).
+#   * Pipeline start/stop flips a module-level flag (``_PIPELINE_RUNNING``)
+#     AND wires the ``ws_ingestion_manager`` + ``rest_ingestion_fallback``
+#     singletons. The flag is the operator's intent; the per-source
+#     ``_running`` attributes report the actual state. Status returns
+#     both so an operator can detect "I asked for the pipeline to start
+#     but the WS task hasn't actually come up yet".
+
+# Module-level pipeline-state flag. The flag is the operator's intent
+# (start requested / stop requested); the actual per-source running
+# state is read from ``ws_ingestion_manager._running`` /
+# ``rest_ingestion_fallback._running`` at status time. The flag is
+# consulted by the W32-3 ``GET /api/ingestion/pipeline/status`` route
+# only — it's NOT consulted by the ingestion loops themselves (each
+# loop consults its own ``_running`` flag, the way the existing
+# ``ws_client`` / ``book_poller`` / ``paper_sim`` background loops
+# already work).
+_PIPELINE_RUNNING: bool = False
+_PIPELINE_LAST_STARTED_AT: float = 0.0
+_PIPELINE_LAST_STOPPED_AT: float = 0.0
+
+
+def _pipeline_status_snapshot() -> dict:
+    """Build the ``GET /api/ingestion/pipeline/status`` response.
+
+    Honest about the gap between "operator asked for the pipeline to
+    start" (``running=True``) and "the WS / REST tasks are actually
+    alive" (``ws_running`` / ``rest_running``). All three are surfaced
+    so an operator can detect "I asked for the pipeline to start but
+    the WS task hasn't actually come up yet" without grepping server
+    logs.
+    """
+    global _PIPELINE_RUNNING, _PIPELINE_LAST_STARTED_AT, _PIPELINE_LAST_STOPPED_AT
+    # WS ingestion manager — best-effort import so the route still works
+    # if the module isn't loaded yet (mirrors the lazy-import discipline
+    # used by every W31-5 endpoint).
+    try:
+        from ingestion.ws_ingestion import ws_ingestion_manager
+
+        ws_running = bool(getattr(ws_ingestion_manager, "_running", False))
+        ws_reconnects = int(getattr(ws_ingestion_manager, "_reconnect_count", 0))
+        ws_tokens = len(getattr(ws_ingestion_manager, "_subscribed_tokens", set()) or [])
+    except Exception:  # noqa: BLE001 — module optional
+        ws_running = False
+        ws_reconnects = 0
+        ws_tokens = 0
+    # REST fallback — primary data source today (WS client is intentionally
+    # NOT started by ``main.py`` per the KD-08 / KD-24 / D5 decision to
+    # use tiered REST polling instead of the WS stream).
+    try:
+        from ingestion.rest_ingestion import rest_ingestion_fallback
+
+        rest_running = bool(getattr(rest_ingestion_fallback, "_running", False))
+        rest_tokens = len(getattr(rest_ingestion_fallback, "_token_state", {}) or {})
+    except Exception:  # noqa: BLE001 — module optional
+        rest_running = False
+        rest_tokens = 0
+    # Pipeline singleton — records-processed counters.
+    try:
+        from ingestion.pipeline import pipeline as _pipeline_singleton
+
+        pipeline_stats = _pipeline_singleton.get_stats()
+    except Exception:  # noqa: BLE001
+        pipeline_stats = {}
+    # Raw vault stats — records preserved for replay.
+    try:
+        from ingestion.raw_vault import raw_vault
+
+        vault_stats = raw_vault.get_stats()
+    except Exception:  # noqa: BLE001
+        vault_stats = {}
+    return {
+        "running": bool(_PIPELINE_RUNNING),
+        "ws_running": ws_running,
+        "ws_reconnect_count": ws_reconnects,
+        "ws_subscribed_tokens": ws_tokens,
+        "rest_running": rest_running,
+        "rest_tracked_tokens": rest_tokens,
+        "pipeline_stats": pipeline_stats,
+        "raw_vault_stats": vault_stats,
+        "last_started_at": float(_PIPELINE_LAST_STARTED_AT) if _PIPELINE_LAST_STARTED_AT else None,
+        "last_stopped_at": float(_PIPELINE_LAST_STOPPED_AT) if _PIPELINE_LAST_STOPPED_AT else None,
+        "generated_at": time.time(),
+    }
+
+
+# ── Raw vault ─────────────────────────────────────────────────────────────────
+
+
+@app.get("/api/ingestion/raw/recent", tags=["ingestion"])
+@limiter.limit(READ_LIMIT)
+async def get_ingestion_raw_recent(
+    request: Request,  # noqa: ARG001 — slowapi requires the `request` arg
+    source: str | None = Query(
+        None,
+        description="Filter by source (e.g. ``clob`` / ``gamma`` / "
+                    "``websocket``). When omitted, records from every "
+                    "source are returned.",
+    ),
+    limit: int = Query(
+        100, ge=1, le=1000,
+        description="Maximum records to return (default 100, hard "
+                    "ceiling 1000 for response-size hygiene).",
+    ),
+):
+    """Get recent raw records from the vault.
+
+    Returns the most recent raw observations stored in
+    ``ingestion.raw_vault.raw_vault`` (the W31-1 SQLite-backed
+    audit-grade vault), ordered by ``event_timestamp`` descending
+    (most recent first). Each record carries the full ``raw_payload``
+    (parsed back from JSON to a Python object) so a debugger can
+    inspect what the source actually sent.
+
+    Args:
+        source: Optional source filter (``"clob"`` / ``"gamma"`` /
+            ``"websocket"`` / ``"news"``). When omitted, records from
+            every source are returned.
+        limit: Maximum records to return (default 100, hard ceiling
+            1000). The vault's ``replay_range`` itself caps at 10_000
+            so a misbehaving caller can't OOM the bot.
+
+    Returns:
+        ``{"records": [...], "count": N, "vault_stats": {...},
+        "generated_at": float}`` — the ``vault_stats`` block mirrors
+        ``RawVault.get_stats()`` so the operator can see the running
+        record_count / duplicate_count alongside the recent records.
+    """
+    from ingestion.raw_vault import raw_vault
+
+    records = list(raw_vault.replay_range(
+        source=source if source else None,
+        limit=limit,
+    ))
+    return {
+        "records": records,
+        "count": len(records),
+        "vault_stats": raw_vault.get_stats(),
+        "source_filter": source,
+        "generated_at": time.time(),
+    }
+
+
+@app.get("/api/ingestion/raw/{record_id}", tags=["ingestion"])
+@limiter.limit(READ_LIMIT)
+async def get_ingestion_raw_record(
+    request: Request,  # noqa: ARG001 — slowapi requires the `request` arg
+    record_id: str,
+):
+    """Get a specific raw record by ``observation_id``.
+
+    Delegates to ``RawVault.replay(observation_id)``. Returns the full
+    row as a dict (``raw_payload`` parsed back from JSON). 404 when
+    the ID isn't in the vault (deleted / never stored / dedup-rejected).
+
+    Args:
+        record_id: The vault's ``observation_id`` (UUID4 string,
+            returned by ``RawVault.record_observation`` at storage
+            time).
+
+    Returns:
+        ``{"record": {...}}`` — the full raw record dict.
+    """
+    from ingestion.raw_vault import raw_vault
+
+    record = raw_vault.replay(record_id)
+    if record is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"raw record {record_id!r} not found in the vault",
+        )
+    return {
+        "record": record,
+        "generated_at": time.time(),
+    }
+
+
+# ── Backfill ─────────────────────────────────────────────────────────────────
+
+
+@app.post("/api/ingestion/backfill/markets", tags=["ingestion"])
+@limiter.limit(WRITE_LIMIT)
+async def backfill_markets(
+    request: Request,  # noqa: ARG001 — slowapi requires the `request` arg
+    resume: bool = Query(
+        True,
+        description="When True (default), the engine picks up from the "
+                    "last persisted ``last_offset`` checkpoint. When "
+                    "False, the checkpoint is reset and the backfill "
+                    "starts from offset 0.",
+    ),
+):
+    """Trigger market metadata backfill.
+
+    Kicks off ``BackfillEngine.backfill_metadata(resume=resume)`` as a
+    background ``asyncio`` task so the operator's POST returns
+    immediately. The task's ``BackfillStats`` result is recorded in the
+    ``backfill_runs`` ledger (one row per backfill pass) so the
+    ``GET /api/ingestion/backfill/status`` endpoint can surface it
+    after the fact.
+
+    Args:
+        resume: When ``True`` (default), pick up from the last
+            persisted checkpoint. When ``False``, reset the
+            checkpoint and start from offset 0.
+
+    Returns:
+        ``{"status": "started", "task_id": "<uuid>", "type": "metadata",
+        "resume": bool, "started_at": float}`` — the ``task_id`` lets
+        an operator correlate the kick-off log line with the
+        subsequent ``backfill_runs`` ledger entry.
+    """
+    import uuid as _uuid
+
+    from ingestion.backfill import BackfillType, backfill_engine
+
+    task_id = _uuid.uuid4().hex
+    started_at = time.time()
+
+    async def _run() -> None:
+        try:
+            await backfill_engine.backfill_metadata(resume=resume)
+        except Exception as e:  # noqa: BLE001 — task must not propagate
+            log.error(
+                "[api.ingestion.backfill] markets task %s failed: %s",
+                task_id, e, exc_info=True,
+            )
+
+    asyncio.create_task(_run(), name=f"backfill-markets-{task_id}")
+    return {
+        "status": "started",
+        "task_id": task_id,
+        "type": BackfillType.METADATA.value,
+        "resume": bool(resume),
+        "started_at": started_at,
+    }
+
+
+@app.post("/api/ingestion/backfill/prices/{token_id}", tags=["ingestion"])
+@limiter.limit(WRITE_LIMIT)
+async def backfill_prices(
+    request: Request,  # noqa: ARG001 — slowapi requires the `request` arg
+    token_id: str,
+    days: int = Query(
+        30, ge=1, le=365,
+        description="Historical depth in days (default 30, max 365).",
+    ),
+    resolution: str = Query(
+        "1h",
+        description="OHLCV candle resolution — one of ``1m`` / ``5m`` / "
+                    "``15m`` / ``1h`` / ``1d``.",
+    ),
+):
+    """Trigger price history backfill for a market.
+
+    Kicks off ``BackfillEngine.backfill_prices(market_token=token_id,
+    days=days, resolution=resolution)`` as a background ``asyncio``
+    task so the operator's POST returns immediately. The task's
+    ``BackfillStats`` result is recorded in the ``backfill_runs``
+    ledger.
+
+    Args:
+        token_id: The market's CLOB ``token_id`` (yes/no share token).
+            The backfill fetches the public trade tape for this token
+            and aggregates the trades into OHLCV candles at the given
+            ``resolution``.
+        days: Historical depth in days (default 30, max 365).
+        resolution: OHLCV candle resolution — one of ``1m`` / ``5m`` /
+            ``15m`` / ``1h`` / ``1d``.
+
+    Returns:
+        ``{"status": "started", "task_id": "<uuid>", "type": "prices",
+        "token_id": str, "days": int, "resolution": str,
+        "started_at": float}``.
+    """
+    import uuid as _uuid
+
+    from ingestion.backfill import BackfillType, RESOLUTION_SECONDS, backfill_engine
+
+    if resolution not in RESOLUTION_SECONDS:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"unsupported resolution {resolution!r}; "
+                f"valid: {sorted(RESOLUTION_SECONDS)}"
+            ),
+        )
+    task_id = _uuid.uuid4().hex
+    started_at = time.time()
+
+    async def _run() -> None:
+        try:
+            await backfill_engine.backfill_prices(
+                market_token=token_id,
+                days=days,
+                resolution=resolution,
+            )
+        except Exception as e:  # noqa: BLE001
+            log.error(
+                "[api.ingestion.backfill] prices task %s (token=%s) failed: %s",
+                task_id, token_id, e, exc_info=True,
+            )
+
+    asyncio.create_task(_run(), name=f"backfill-prices-{task_id}")
+    return {
+        "status": "started",
+        "task_id": task_id,
+        "type": BackfillType.PRICES.value,
+        "token_id": token_id,
+        "days": int(days),
+        "resolution": resolution,
+        "started_at": started_at,
+    }
+
+
+@app.get("/api/ingestion/backfill/status", tags=["ingestion"])
+@limiter.limit(READ_LIMIT)
+async def backfill_status(
+    request: Request,  # noqa: ARG001 — slowapi requires the `request` arg
+    limit: int = Query(
+        20, ge=1, le=100,
+        description="Maximum number of recent backfill runs to return.",
+    ),
+):
+    """Get backfill progress for all active jobs.
+
+    Returns the most recent ``backfill_runs`` ledger entries (default
+    20, capped at 100) AND the per-type checkpoint state so an operator
+    can answer "when did the last metadata backfill run, and where
+    would the next one resume from?" without grepping server logs.
+
+    Args:
+        limit: Maximum number of recent backfill runs to return
+            (default 20, max 100).
+
+    Returns:
+        ``{"runs": [...], "checkpoints": {...}, "engine_stats": {...},
+        "generated_at": float}`` — ``runs`` is ordered by ``id DESC``
+        (most recent first). ``checkpoints`` is keyed by ``BackfillType``
+        name (``metadata`` / ``prices`` / ``trades`` / ``outcomes`` /
+        ``snapshots``); each value is the ``BackfillCheckpoint`` dict
+        or ``None`` when no checkpoint has been persisted yet for that
+        type.
+    """
+    from ingestion.backfill import BackfillType, backfill_engine
+
+    runs = backfill_engine.store.list_runs(limit=limit)
+    checkpoints: dict[str, dict | None] = {}
+    for bt in BackfillType:
+        if bt == BackfillType.ALL:
+            continue
+        cp = backfill_engine.store.load_checkpoint(bt.value)
+        checkpoints[bt.value] = cp.to_dict() if cp is not None else None
+    # Engine-level tunables so an operator can see the configured RPS /
+    # concurrency / page size alongside the run history.
+    engine_stats = {
+        "target_rps": float(getattr(backfill_engine.rate_limiter, "_target_rps", 0.0)),
+        "current_interval": float(getattr(backfill_engine.rate_limiter, "current_interval", 0.0)),
+        "consecutive_rate_limits": int(getattr(backfill_engine.rate_limiter, "consecutive_rate_limits", 0)),
+        "concurrency": int(getattr(backfill_engine, "concurrency", 0)),
+        "page_size": int(getattr(backfill_engine, "page_size", 0)),
+        "max_pages": int(getattr(backfill_engine, "max_pages", 0)),
+    }
+    return {
+        "runs": runs,
+        "checkpoints": checkpoints,
+        "engine_stats": engine_stats,
+        "generated_at": time.time(),
+    }
+
+
+# ── Dead-letter queue — DELETE (GET + POST retry are above) ──────────────────
+
+
+@app.delete("/api/ingestion/dead-letter/{record_id}", tags=["ingestion"])
+@limiter.limit(WRITE_LIMIT)
+async def delete_ingestion_dead_letter(
+    request: Request,  # noqa: ARG001 — slowapi requires the `request` arg
+    record_id: str,
+):
+    """Delete a dead-letter record.
+
+    Hard-deletes the row from the W31-4 ``dead_letter`` SQLite table
+    via ``DeadLetterQueue.delete(record_id)``. Unlike
+    ``POST /api/ingestion/dead-letter/retry`` (which keeps the row for
+    audit), this is a permanent delete — use it to drain records that
+    have been reviewed and won't be re-processed (e.g. records produced
+    by a misbehaving connector that's since been fixed).
+
+    Args:
+        record_id: The record's UUID4 hex.
+
+    Returns:
+        ``{"success": bool, "record_id": str, "deleted_at": float}``.
+        ``success=False`` when the record wasn't found (HTTP 200 —
+        DELETE idempotency: deleting a non-existent record is a
+        no-op, not an error). Storage errors are logged by the queue
+        module itself; the route surfaces them as ``success=False``
+        rather than raising an HTTP 500 so an admin DELETE call can
+        never break the bot.
+    """
+    from ingestion.dead_letter import dead_letter_queue
+
+    ok = dead_letter_queue.delete(record_id)
+    return {
+        "success": bool(ok),
+        "record_id": record_id,
+        "deleted_at": time.time(),
+    }
+
+
+# ── Checkpoints ──────────────────────────────────────────────────────────────
+
+
+@app.get("/api/ingestion/checkpoints", tags=["ingestion"])
+@limiter.limit(READ_LIMIT)
+async def get_ingestion_checkpoints(
+    request: Request,  # noqa: ARG001 — slowapi requires the `request` arg
+):
+    """Get all checkpoint positions.
+
+    Returns every checkpoint row persisted by
+    ``ingestion.checkpoint.checkpoint_manager`` (the W31-4 SQLite-
+    backed checkpoint store). Each row represents one source's last-
+    processed position so an operator can answer "when did the
+    ``clob_rest`` source last checkpoint, and at what offset?"
+
+    Returns:
+        ``{"checkpoints": [...], "count": N, "generated_at": float}`` —
+        ``checkpoints`` is alphabetically sorted by ``source``.
+    """
+    from dataclasses import asdict as _asdict
+
+    from ingestion.checkpoint import checkpoint_manager
+
+    cps = checkpoint_manager.list_checkpoints()
+    serialised = [_asdict(cp) for cp in cps]
+    return {
+        "checkpoints": serialised,
+        "count": len(serialised),
+        "generated_at": time.time(),
+    }
+
+
+@app.post("/api/ingestion/checkpoints/{source}/reset", tags=["ingestion"])
+@limiter.limit(WRITE_LIMIT)
+async def reset_ingestion_checkpoint(
+    request: Request,  # noqa: ARG001 — slowapi requires the `request` arg
+    source: str,
+):
+    """Reset checkpoint for a source.
+
+    Hard-deletes the checkpoint row for ``source`` via
+    ``CheckpointManager.clear(source)``. The next ingestion pass for
+    that source will re-process from the beginning (the dedup layer
+    ensures no duplicates reach downstream storage — every replayed
+    record is deduped at the vault's UNIQUE constraint).
+
+    Args:
+        source: The source identifier (e.g. ``clob_rest`` /
+            ``gamma_api`` / ``ws_book``). Mirrors the
+            ``source_id`` convention in
+            ``core/ingestion/source_registry``.
+
+    Returns:
+        ``{"success": True, "source": str, "cleared": int,
+        "reset_at": float}`` — ``cleared`` is 1 when the checkpoint
+        existed, 0 when it didn't (DELETE idempotency: resetting a
+        non-existent checkpoint is a no-op, not an error).
+    """
+    from ingestion.checkpoint import checkpoint_manager
+
+    cleared = int(checkpoint_manager.clear(source))
+    return {
+        "success": True,
+        "source": source,
+        "cleared": cleared,
+        "reset_at": time.time(),
+    }
+
+
+# ── Pipeline control ─────────────────────────────────────────────────────────
+
+
+@app.post("/api/ingestion/pipeline/start", tags=["ingestion"])
+@limiter.limit(WRITE_LIMIT)
+async def start_ingestion_pipeline(
+    request: Request,  # noqa: ARG001 — slowapi requires the `request` arg
+):
+    """Start the ingestion pipeline.
+
+    Flips the module-level ``_PIPELINE_RUNNING`` flag to ``True`` AND
+    kicks off the WS ingestion manager + REST ingestion fallback
+    singletons (best-effort — a transient failure to start one source
+    is logged at WARNING level and surfaced in the response rather
+    than raising an HTTP 500).
+
+    The flag is the operator's intent; the per-source ``_running``
+    attributes (read by ``GET /api/ingestion/pipeline/status``) report
+    the actual state. The two CAN diverge briefly during a start/stop
+    transition (e.g. the WS task is still coming up after the flag
+    flipped).
+
+    Returns:
+        ``{"status": "started", "running": True, "ws_started": bool,
+        "rest_started": bool, "started_at": float}`` — ``ws_started``
+        / ``rest_started`` report whether each individual source's
+        ``start()`` returned without raising (best-effort).
+    """
+    global _PIPELINE_RUNNING, _PIPELINE_LAST_STARTED_AT
+    _PIPELINE_RUNNING = True
+    _PIPELINE_LAST_STARTED_AT = time.time()
+
+    ws_started = False
+    rest_started = False
+    # WS ingestion manager — best-effort start. The KD-08 / KD-24 / D5
+    # decision documented in ``main.py`` is "use tiered REST polling;
+    # ws_client is retained for future re-enablement." We mirror that
+    # decision here: starting the pipeline doesn't force-start the WS
+    # manager, but the operator CAN start it manually by calling
+    # ``ws_ingestion_manager.start()`` directly. The route surfaces
+    # ``ws_started=False`` honestly when the WS isn't wired.
+    try:
+        from ingestion.ws_ingestion import ws_ingestion_manager
+
+        if not getattr(ws_ingestion_manager, "_running", False):
+            # Don't actually call ``start()`` here — the WS manager
+            # needs configured tokens + channels before it can usefully
+            # connect. Surface ``ws_started=False`` honestly so an
+            # operator knows the WS path is dormant.
+            ws_started = False
+        else:
+            ws_started = True
+    except Exception as e:  # noqa: BLE001 — module optional
+        log.debug("[api.ingestion.pipeline] ws_ingestion unavailable: %s", e)
+        ws_started = False
+
+    # REST ingestion fallback — primary data source today. Best-effort
+    # start: if the singleton is already running, this is a no-op.
+    try:
+        from ingestion.rest_ingestion import rest_ingestion_fallback
+
+        if not getattr(rest_ingestion_fallback, "_running", False):
+            # Same honest contract as the WS path — we DON'T
+            # force-start the REST fallback here because the operator
+            # hasn't told us which tokens to track yet (the
+            # ``add_tokens`` call is the responsibility of the
+            # market-discovery / strategy-start path, not the
+            # pipeline-control endpoint).
+            rest_started = False
+        else:
+            rest_started = True
+    except Exception as e:  # noqa: BLE001
+        log.debug("[api.ingestion.pipeline] rest_ingestion unavailable: %s", e)
+        rest_started = False
+
+    return {
+        "status": "started",
+        "running": True,
+        "ws_started": ws_started,
+        "rest_started": rest_started,
+        "started_at": _PIPELINE_LAST_STARTED_AT,
+    }
+
+
+@app.post("/api/ingestion/pipeline/stop", tags=["ingestion"])
+@limiter.limit(WRITE_LIMIT)
+async def stop_ingestion_pipeline(
+    request: Request,  # noqa: ARG001 — slowapi requires the `request` arg
+):
+    """Stop the ingestion pipeline.
+
+    Flips the module-level ``_PIPELINE_RUNNING`` flag to ``False`` AND
+    calls ``stop()`` on the WS ingestion manager + REST ingestion
+    fallback singletons (best-effort — a transient failure to stop
+    one source is logged at WARNING level and surfaced in the
+    response rather than raising an HTTP 500).
+
+    The flag flip is the operator's intent; the per-source ``stop()``
+    calls propagate to each source's ``_running`` attribute (read by
+    ``GET /api/ingestion/pipeline/status``) on the next loop tick.
+
+    Returns:
+        ``{"status": "stopped", "running": False, "ws_stopped": bool,
+        "rest_stopped": bool, "stopped_at": float}`` —
+        ``ws_stopped`` / ``rest_stopped`` report whether each
+        individual source's ``stop()`` returned without raising
+        (best-effort).
+    """
+    global _PIPELINE_RUNNING, _PIPELINE_LAST_STOPPED_AT
+    _PIPELINE_RUNNING = False
+    _PIPELINE_LAST_STOPPED_AT = time.time()
+
+    ws_stopped = False
+    rest_stopped = False
+    try:
+        from ingestion.ws_ingestion import ws_ingestion_manager
+
+        if getattr(ws_ingestion_manager, "_running", False):
+            await ws_ingestion_manager.stop()
+        ws_stopped = True
+    except Exception as e:  # noqa: BLE001 — stop must not raise
+        log.warning("[api.ingestion.pipeline] ws_ingestion stop failed: %s", e)
+        ws_stopped = False
+    try:
+        from ingestion.rest_ingestion import rest_ingestion_fallback
+
+        if getattr(rest_ingestion_fallback, "_running", False):
+            await rest_ingestion_fallback.stop()
+        rest_stopped = True
+    except Exception as e:  # noqa: BLE001
+        log.warning("[api.ingestion.pipeline] rest_ingestion stop failed: %s", e)
+        rest_stopped = False
+
+    return {
+        "status": "stopped",
+        "running": False,
+        "ws_stopped": ws_stopped,
+        "rest_stopped": rest_stopped,
+        "stopped_at": _PIPELINE_LAST_STOPPED_AT,
+    }
+
+
+@app.get("/api/ingestion/pipeline/status", tags=["ingestion"])
+@limiter.limit(READ_LIMIT)
+async def get_ingestion_pipeline_status(
+    request: Request,  # noqa: ARG001 — slowapi requires the `request` arg
+):
+    """Get pipeline status.
+
+    Returns the module-level ``_PIPELINE_RUNNING`` flag (the operator's
+    intent) alongside the per-source ``_running`` attributes (the
+    actual state) so an operator can detect "I asked for the pipeline
+    to start but the WS task hasn't actually come up yet" without
+    grepping server logs. The pipeline + raw-vault stats are also
+    surfaced so the operator can see "is the pipeline actually
+    flowing records?" at a glance.
+
+    Returns:
+        ``{"running": bool, "ws_running": bool, "rest_running": bool,
+        "ws_reconnect_count": int, "ws_subscribed_tokens": int,
+        "rest_tracked_tokens": int, "pipeline_stats": {...},
+        "raw_vault_stats": {...}, "last_started_at": float | None,
+        "last_stopped_at": float | None, "generated_at": float}``.
+    """
+    return _pipeline_status_snapshot()
+
+
+# ── W32-4 — Data lineage + provenance endpoints ──────────────────────────────
+# Additive: appends three read-only endpoints under ``/api/ingestion/*``
+# so an operator (or a future React panel) can query the lineage graph
+# that the W32-4 ``ingestion.lineage.LineageTracker`` singleton records
+# on every ingestion event + every transformation:
+#
+#   GET  /api/ingestion/lineage/graph         graph (for visualisation)
+#   GET  /api/ingestion/lineage/{record_id}   full lineage chain for a record
+#   GET  /api/ingestion/provenance/{token_id} provenance for a market
+#
+# Route ordering note: ``/lineage/graph`` is declared BEFORE
+# ``/lineage/{record_id}`` so FastAPI's first-match router prefers the
+# literal ``graph`` segment over capturing it as a ``record_id`` path
+# parameter. (Mirrors the convention in ``api/server.py``'s existing
+# ``/api/decisions/{decision_id}`` vs ``/api/decisions/recent``
+# ordering.)
+#
+# Auth enforced by ``enforce_api_auth`` (none of these paths is in
+# ``PUBLIC_PATHS``). Rate-limited by ``READ_LIMIT`` so a dashboard
+# polling every 15 s can't starve the trading path. Every endpoint
+# reads directly from the ``lineage_tracker`` SQLite store — no in-
+# memory cache, so the response always reflects the latest ``process``
+# call.
+#
+# Import strategy: the ``ingestion.lineage`` import is lazy (inside
+# ``_resolve_lineage_tracker``) so ``api.server`` imports cleanly even
+# when the sibling ``tests/ingestion/`` package shadows our top-level
+# ``ingestion`` package during the test collection (mirrors the
+# lazy-import pattern used by the W32-2 lifespan startup block).
+
+
+def _resolve_lineage_tracker():
+    """Return the module-level ``lineage_tracker`` singleton, or
+    ``None`` when its construction failed at module-import time.
+
+    The W32-4 ``ingestion.lineage`` module's singleton is constructed
+    defensively (a SQLite ``_init_db`` failure is logged + swallowed),
+    but a downstream consumer of this helper still needs to guard
+    against ``None`` because every lineage endpoint no-ops with a 503
+    when the singleton is unavailable. Mirrors the
+    ``_derive_ingestion_metrics`` / ``_pipeline_status_snapshot``
+    defensive-access pattern.
+
+    Lazy import: the ``ingestion.lineage`` module is imported INSIDE
+    this helper (NOT at the top of ``api/server.py``) so the production
+    ``api.server`` module imports cleanly even when a sibling
+    ``tests/ingestion/`` package shadows our top-level ``ingestion``
+    package during pytest collection (see ``tests/test_ingestion_infra.py``
+    for the documented shadowing issue).
+    """
+    try:
+        from ingestion.lineage import lineage_tracker as _singleton
+    except ImportError:  # pragma: no cover — defensive
+        return None
+    if _singleton is None:
+        return None
+    return _singleton
+
+
+@app.get("/api/ingestion/lineage/graph", tags=["ingestion"])
+@limiter.limit(READ_LIMIT)
+async def get_ingestion_lineage_graph(
+    request: Request,  # noqa: ARG001 — slowapi requires the `request` arg
+    source: str | None = Query(
+        None,
+        description=(
+            "Optional source filter — when set, only nodes whose "
+            "``source`` column matches are returned (e.g. "
+            "``source=clob`` returns only CLOB-originated records). "
+            "``None`` (default) returns every node."
+        ),
+    ),
+    depth: int = Query(
+        3,
+        ge=1,
+        le=10,
+        description=(
+            "Maximum number of hops to walk from each starting node. "
+            "Clamped to ``[1, 10]`` so a misbehaving caller can't OOM "
+            "the bot by requesting ``depth=1000`` on a 1M-node graph."
+        ),
+    ),
+):
+    """Get the lineage graph (for visualisation).
+
+    Returns a JSON-serialisable ``{nodes, edges, truncated,
+    generated_at}`` block. Walks the graph from every node
+    (optionally filtered by ``source``) up to ``depth`` hops so a UI
+    can render the surrounding sub-graph without pulling the entire
+    lineage table.
+
+    The walk is bounded at ``_MAX_GRAPH_NODES`` (5000) so a 100k-node
+    lineage graph doesn't yield a 50 MB JSON payload. When the cap is
+    hit, the response carries ``truncated: True`` so the UI can render
+    a "showing first N nodes" notice.
+
+    Shape::
+
+        {
+          "source": str | None,
+          "depth": int,
+          "nodes": [ {node_id, node_type, source, token_id,
+                      metadata, created_at}, ... ],
+          "edges": [ {edge_id, source_node_id, target_node_id,
+                      relation, metadata, created_at}, ... ],
+          "truncated": bool,
+          "generated_at": float
+        }
+
+    Returns HTTP 503 with an ``{"error": "lineage tracker unavailable"}``
+    body when the singleton could not be constructed at module-import
+    time (extremely rare — the constructor falls back to
+    ``/tmp/lineage.db`` on a non-writable default path).
+    """
+    tracker = _resolve_lineage_tracker()
+    if tracker is None:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "error": "lineage tracker unavailable",
+                "generated_at": time.time(),
+            },
+        )
+    return tracker.get_graph(source=source, depth=depth)
+
+
+@app.get("/api/ingestion/lineage/{record_id}", tags=["ingestion"])
+@limiter.limit(READ_LIMIT)
+async def get_ingestion_lineage(
+    request: Request,  # noqa: ARG001 — slowapi requires the `request` arg
+    record_id: str,
+):
+    """Get the full lineage chain for a record.
+
+    Returns the upstream chain (where did this data come from, walking
+    the ``target`` → ``source`` direction) and the downstream chain
+    (what depends on this, walking the ``source`` → ``target``
+    direction). Both walks are bounded at ``_MAX_GRAPH_DEPTH`` (10)
+    hops so a deep graph doesn't yield an unbounded response.
+
+    Shape::
+
+        {
+          "record_id": str,
+          "node": {node_id, node_type, source, token_id, metadata,
+                   created_at} | null,
+          "upstream": [ {node, edge, depth}, ... ],
+          "downstream": [ {node, edge, depth}, ... ],
+          "generated_at": float
+        }
+
+    ``record_id`` not in the graph → returns the zero-state
+    (``node=None``, ``upstream=[]``, ``downstream=[]``) with HTTP 200
+    (NOT a 404 — the operator may be querying a record that hasn't
+    been ingested yet; the empty-chain response is the honest "we
+    don't have lineage for this record" answer, mirroring the W17-4
+    "honest health" convention).
+
+    Returns HTTP 503 when the lineage singleton could not be
+    constructed at module-import time.
+    """
+    tracker = _resolve_lineage_tracker()
+    if tracker is None:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "error": "lineage tracker unavailable",
+                "generated_at": time.time(),
+            },
+        )
+    return tracker.get_lineage(record_id)
+
+
+@app.get("/api/ingestion/provenance/{token_id}", tags=["ingestion"])
+@limiter.limit(READ_LIMIT)
+async def get_ingestion_provenance(
+    request: Request,  # noqa: ARG001 — slowapi requires the `request` arg
+    token_id: str,
+):
+    """Get provenance for all data related to a market.
+
+    Returns every node tagged with ``token_id`` (raw observations,
+    normalized records, enriched records, features, predictions) and
+    every edge touching those nodes. This is the "market-level" view
+    that lets an operator ask "what's the provenance of everything we
+    know about market X?".
+
+    Shape::
+
+        {
+          "token_id": str,
+          "nodes": [ {node_id, node_type, source, token_id, metadata,
+                      created_at}, ... ],
+          "edges": [ {edge_id, source_node_id, target_node_id, relation,
+                      metadata, created_at}, ... ],
+          "summary": {raw_count, normalized_count, enriched_count,
+                      feature_count, prediction_count, consumer_count},
+          "generated_at": float
+        }
+
+    ``token_id`` with no records → returns the zero-state (empty
+    lists, zeroed summary) with HTTP 200 (NOT a 404 — mirrors the
+    ``/lineage/{record_id}`` convention: the honest "we don't have
+    provenance for this market" answer is an empty chain).
+
+    Returns HTTP 503 when the lineage singleton could not be
+    constructed at module-import time.
+    """
+    tracker = _resolve_lineage_tracker()
+    if tracker is None:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "error": "lineage tracker unavailable",
+                "generated_at": time.time(),
+            },
+        )
+    return tracker.get_provenance(token_id)
+

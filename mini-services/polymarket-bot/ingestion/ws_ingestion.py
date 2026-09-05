@@ -743,7 +743,7 @@ class WSIngestionManager:
                     "[ws_ingestion] Snapshot rejected for %s: %s",
                     token_id[:12], result.errors,
                 )
-            await _safe_record_metric(source_registry, SOURCE_ID, True, "")
+            await _safe_record_metric(SOURCE_ID, True, "")
             return None
 
         # Persist the normalised snapshot + raw ladder to TimescaleDB.
@@ -764,7 +764,7 @@ class WSIngestionManager:
                 asks_json=asks_payload or None,
             )
         )
-        await _safe_record_metric(source_registry, SOURCE_ID, True, "")
+        await _safe_record_metric(SOURCE_ID, True, "")
         return {
             "event_type": EVT_BOOK_SNAPSHOT,
             "token_id": token_id,
@@ -808,7 +808,7 @@ class WSIngestionManager:
         book.asks.sort(key=lambda x: x.price)
         book.updated_at = time.time()
         await store.update_order_book(book)
-        await _safe_record_metric(source_registry, SOURCE_ID, True, "")
+        await _safe_record_metric(SOURCE_ID, True, "")
         return {
             "event_type": EVT_PRICE_CHANGE,
             "token_id": token_id,
@@ -857,7 +857,7 @@ class WSIngestionManager:
                 self._health.messages_deduped += 1
             else:
                 self._health.messages_invalid += 1
-            await _safe_record_metric(source_registry, SOURCE_ID, True, "")
+            await _safe_record_metric(SOURCE_ID, True, "")
             return None
 
         norm = result.normalized_data
@@ -873,7 +873,7 @@ class WSIngestionManager:
                 taker_order_id=str(data.get("taker_order_id") or ""),
             )
         )
-        await _safe_record_metric(source_registry, SOURCE_ID, True, "")
+        await _safe_record_metric(SOURCE_ID, True, "")
         return {
             "event_type": EVT_TRADE,
             "token_id": token_id,
@@ -1157,15 +1157,26 @@ def _parse_book_levels(
 
 
 async def _safe_record_metric(
-    registry: Any, source_id: str, success: bool, err: str
+    source_id: str, success: bool, err: str, registry: Any = None
 ) -> None:
     """Fire-and-forget ``source_registry.record_metric``.
 
     The registry's PG write may block (asyncpg acquire) — wrap in
     ``asyncio.create_task`` so the WS pump is never blocked on the
     registry. Errors are swallowed (best-effort accounting).
+
+    ``registry`` is resolved lazily (importing
+    ``core.ingestion.source_registry.source_registry`` at call time) when
+    not supplied explicitly. The lazy import makes the helper usable from
+    call sites that don't already have a local ``source_registry``
+    reference (e.g. the ``_route_message`` exception handler), and
+    ensures tests that monkeypatch the singleton via
+    ``monkeypatch.setattr("core.ingestion.source_registry.source_registry", ...)``
+    pick up the patched instance at call time.
     """
     try:
+        if registry is None:
+            from core.ingestion.source_registry import source_registry as registry
         asyncio.create_task(registry.record_metric(source_id, success, err))
     except Exception:  # noqa: BLE001 — accounting must never block
         pass

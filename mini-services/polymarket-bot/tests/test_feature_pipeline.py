@@ -49,15 +49,61 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import sys
 import time
 from pathlib import Path
 from typing import Any
 
-# ── Bootstrap project root on sys.path (defensive; conftest.py also does this). ──
+# ── Defensive env-var redirect BEFORE importing any project module ─────────
+# Belt-and-braces with the same redirect in ``tests/conftest.py`` (which
+# pytest loads before this file). Mirrors the pattern in
+# ``tests/test_ingestion_infra.py`` so the ``ingestion.*`` and
+# ``core.timescale_db`` module-level singletons don't raise
+# PermissionError on the read-only ``/app/data`` sandbox path.
+_TMP_ROOT = Path("/tmp/pmbot_feature_pipeline_tests")
+_TMP_ROOT.mkdir(parents=True, exist_ok=True)
+
+_ENV_REDIRECTS: dict[str, str] = {
+    "MARKET_DB_PATH": str(_TMP_ROOT / "market_intelligence.db"),
+    "DLQ_DB_PATH": str(_TMP_ROOT / "dead_letter.db"),
+    "CHECKPOINT_DB_PATH": str(_TMP_ROOT / "checkpoints.db"),
+    "RAW_VAULT_DB_PATH": str(_TMP_ROOT / "raw_vault.db"),
+    "ALERT_DB_PATH": str(_TMP_ROOT / "alerts.db"),
+    "FEATURE_STORE_DB": str(_TMP_ROOT / "feature_store.db"),
+    "TRADING_MODE": "paper",
+    "LIVE_TRADING_ENABLED": "false",
+    "API_TOKEN": "test-token-feature-pipeline",
+    "CORS_ORIGINS": "http://localhost",
+}
+for _key, _val in _ENV_REDIRECTS.items():
+    os.environ.setdefault(_key, _val)
+
+# ── Defend against the sibling ``tests/ingestion/`` package shadowing our
+# top-level ``ingestion`` package. ──────────────────────────────────────────
+# Same situation + fix as ``tests/test_ingestion_infra.py``: pytest's default
+# ``prepend`` import mode inserts ``tests/`` at ``sys.path[0]`` during test
+# collection, which lets the sibling ``tests/ingestion/`` package shadow our
+# top-level ``polymarket-bot/ingestion/`` package. Without the ``remove``
+# step below, the project root ends up behind ``tests/`` in sys.path, and
+# ``from ingestion.feature_pipeline import ...`` resolves to
+# ``tests/ingestion/__init__.py`` (which has no ``feature_pipeline`` submodule).
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
-if str(_PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(_PROJECT_ROOT))
+_str_root = str(_PROJECT_ROOT)
+if _str_root in sys.path:
+    sys.path.remove(_str_root)
+sys.path.insert(0, _str_root)
+
+# Clear any cached ``ingestion`` / ``ingestion.*`` module pointing at the
+# ``tests/ingestion/`` directory so the next import resolves against the
+# freshly-prepended ``_PROJECT_ROOT``.
+for _mod_name in list(sys.modules):
+    if _mod_name != "ingestion" and not _mod_name.startswith("ingestion."):
+        continue
+    _mod = sys.modules.get(_mod_name)
+    _mod_file = getattr(_mod, "__file__", "") or ""
+    if "tests/ingestion" in _mod_file.replace("\\", "/"):
+        del sys.modules[_mod_name]
 
 import numpy as np  # noqa: E402  (sys.path must be set first)
 import pytest  # noqa: E402  (sys.path must be set first)
@@ -329,13 +375,17 @@ async def test_point_in_time_price_history_excludes_future():
     ]
     pipe = FeaturePipeline(db=MockSnapshotSource(rows), feature_store=None)
 
-    # as_of = 125 → history should be [0.4, 0.5, 0.55] (T=100, 110, 120)
-    # The 4th snapshot (T=130, mid=0.6) must NOT be in the history deque.
+    # as_of = 125 → snapshot_row is the most-recent PIT snapshot (T=120,
+    # mid=0.55); the rolling history deque is primed with the strictly-
+    # older rows (T=100, T=110) and then ``extract_features`` appends
+    # the snapshot_row's mid. The T=130 snapshot (mid=0.6) must NOT be
+    # in the deque.
     vec, provenance = await pipe.get_features_with_provenance("T1", timestamp=125.0)
     assert vec is not None
     assert provenance is not None
-    assert provenance.history_points_used == 3, (
-        f"Expected 3 historical points (T=100,110,120) before as_of=125, "
+    assert provenance.history_points_used == 2, (
+        f"Expected 2 historical points (T=100,110 strictly before "
+        f"snapshot_row at T=120) before as_of=125, "
         f"got {provenance.history_points_used}"
     )
 
@@ -343,12 +393,12 @@ async def test_point_in_time_price_history_excludes_future():
     # (only T=100, 110, 120 mids; T=130 mid excluded).
     history = list(_feat_mod._price_history.get("T1", []))
     # ``extract_features`` appends the current mid to the deque, so the
-    # deque has 3 historical mids + 1 current mid = 4 entries. The
+    # deque has 2 historical mids + 1 current mid = 3 entries. The
     # current mid is the snapshot at T=120 (mid=0.55) — the latest
     # snapshot at-or-before as_of=125.
-    assert len(history) == 4, f"Expected 4 entries (3 hist + 1 current), got {len(history)}"
-    assert history[:3] == [0.4, 0.5, 0.55], (
-        f"History should be [0.4, 0.5, 0.55] (point-in-time), got {history[:3]}"
+    assert len(history) == 3, f"Expected 3 entries (2 hist + 1 current), got {len(history)}"
+    assert history == [0.4, 0.5, 0.55], (
+        f"History should be [0.4, 0.5, 0.55] (point-in-time), got {history}"
     )
     assert 0.6 not in history, (
         f"Future mid 0.6 (T=130 > as_of=125) leaked into history: {history}"

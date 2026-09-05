@@ -129,8 +129,11 @@ describe('DecisionLedgerPanel', () => {
       // The Decisions chip shows count "2".
       expect(screen.getByText('2')).toBeInTheDocument()
     })
-    // The chip's label is "Decisions".
-    expect(screen.getByText('Decisions')).toBeInTheDocument()
+    // The chip's label is "Decisions" (rendered as "Decisions:" inside
+    // the StatChip — the trailing colon is appended by the StatChip
+    // component's ``{label}:`` template). Match with a regex so the
+    // assertion survives either rendering shape.
+    expect(screen.getByText(/^Decisions:?$/)).toBeInTheDocument()
   })
 
   it('passes the Authorization header via apiFetch on the initial poll', async () => {

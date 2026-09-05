@@ -531,6 +531,38 @@ class BackfillStore:
 
     # ── Run ledger ──────────────────────────────────────────────────────
 
+    def list_runs(self, limit: int = 20) -> list[dict]:
+        """Return the most recent ``backfill_runs`` ledger entries.
+
+        Used by the W32-3 ``GET /api/ingestion/backfill/status`` admin
+        endpoint so an operator can inspect every backfill pass (type /
+        started_at / ended_at / counters / error_message) without
+        grepping server logs. Ordered by ``id DESC`` (most recent
+        first), capped at ``limit`` (default 20, hard ceiling 100 so a
+        misbehaving caller can't OOM the bot by requesting millions of
+        rows).
+
+        Returns an empty list on storage error (logged + swallowed so
+        the admin endpoint can never break the bot's backfill loop).
+        """
+        cap = max(1, min(int(limit), 100))
+        try:
+            with self._conn() as conn:
+                cur = conn.execute(
+                    """
+                    SELECT id, type, started_at, ended_at, total_processed,
+                           total_added, total_skipped, total_errors, error_message
+                    FROM backfill_runs
+                    ORDER BY id DESC
+                    LIMIT ?
+                    """,
+                    (cap,),
+                )
+                return [dict(r) for r in cur.fetchall()]
+        except Exception as e:
+            log.error("[backfill] list_runs failed: %s", e)
+            return []
+
     def record_run(self, stats: BackfillStats, error: str | None = None) -> None:
         try:
             with self._conn() as conn:

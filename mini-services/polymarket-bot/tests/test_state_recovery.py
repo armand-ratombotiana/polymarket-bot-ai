@@ -124,6 +124,47 @@ def manager(tmp_path: Path) -> StateRecoveryManager:
     return StateRecoveryManager(tmp_path / "recovery_state.json")
 
 
+@pytest.fixture(autouse=True)
+def _reset_state_recovery_singleton_last_report() -> Any:
+    """W32-5 — reset the module-level singleton's ``_last_report`` BEFORE
+    and AFTER every test in this module so a prior test's ``recover()``
+    call cannot leak its cached report into the next test.
+
+    Why this exists
+    ---------------
+    The module-level ``state_recovery`` singleton (constructed at import
+    time in ``core/state_recovery.py``) caches the most recent
+    ``RecoveryReport`` on ``self._last_report`` so the
+    ``GET /api/system/recovery-report`` HTTP endpoint can surface it
+    without re-running recovery on every request. The shared
+    ``tests/conftest.py::_reset_store_factory_defaults`` autouse fixture
+    resets ``store`` / ``risk_manager`` / ``paper_sim`` / kill-switch
+    marker / dedup registry — but it does NOT touch the singleton's
+    ``_last_report`` (that's an internal field on the recovery manager,
+    not the store).
+
+    Without this reset, the skipped test
+    ``test_singleton_recover_then_get_last_report_round_trip`` would
+    intermittently fail when run after a sibling test that called
+    ``state_recovery.recover()``: the pre-condition assertion
+    ``assert state_recovery.get_last_report() is None`` would fail because
+    a prior test had already populated ``_last_report``.
+
+    Safety
+    ------
+    Idempotent: setting ``_last_report = None`` twice (pre-test + post-test)
+    is harmless. Tests that use ``monkeypatch.setattr(state_recovery,
+    "_last_report", ...)`` are unaffected — ``monkeypatch`` snapshots the
+    value at the time of the ``setattr`` call (which runs INSIDE the test
+    body, AFTER this fixture's pre-test reset), so its teardown restores
+    the post-reset value (``None``); this fixture's post-test reset then
+    redundantly sets it to ``None`` again.
+    """
+    state_recovery._last_report = None
+    yield
+    state_recovery._last_report = None
+
+
 def _write_state_file(path: Path, payload: dict[str, Any]) -> None:
     """Helper: write a JSON state file at ``path`` with the given payload."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -829,7 +870,6 @@ async def test_module_level_singleton_uses_default_recovery_state_path() -> None
     assert state_recovery._state_path.parent.exists() or True  # always true
 
 
-@pytest.mark.skip(reason="Passes in isolation — fails in full suite due to shared state ordering")
 async def test_singleton_recover_then_get_last_report_round_trip(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

@@ -197,6 +197,19 @@ class IngestionHealthMonitor:
         # so the same alert doesn't fire more than once per
         # ``ALERT_DEBOUNCE`` window.
         self._last_alert: dict[tuple[str, str], float] = {}
+        # W32-2 — lifecycle flag flipped by ``start()`` / ``stop()``
+        # (called from the FastAPI lifespan). The monitor's per-source
+        # bookkeeping is event-driven (every ``record_event`` call
+        # mutates the relevant ``SourceHealth``), so ``start()`` does
+        # NOT spin up a background task — it just flips ``_running``
+        # so the ``/api/status`` endpoint's ``health.is_running``
+        # field reflects "the lifespan has run" rather than "the
+        # module has been imported". The alert-evaluation cycle is
+        # driven by the operator dashboard's
+        # ``POST /api/ingestion/health/evaluate`` trigger and the
+        # background ``asyncio`` task in ``main.py`` (W31-4) — this
+        # flag does NOT gate that.
+        self._running: bool = False
 
     # ── Recording ──────────────────────────────────────────────────────────
 
@@ -316,6 +329,131 @@ class IngestionHealthMonitor:
                     return {}
                 return self._format_source(h)
             return {s: self._format_source(h) for s, h in self._sources.items()}
+
+    # ── W32-2 — Lifecycle + cross-source summary ──────────────────────────
+
+    async def start(self) -> None:
+        """Mark the monitor as running.
+
+        ``start()`` does NOT spin up a background task — the monitor's
+        per-source bookkeeping is event-driven (every ``record_event``
+        call mutates the relevant ``SourceHealth``). The alert-eval
+        cycle is driven by the operator dashboard's
+        ``POST /api/ingestion/health/evaluate`` trigger and the
+        background ``asyncio`` task in ``main.py`` (W31-4); this flag
+        only gates ``is_running`` so ``/api/status`` can surface
+        "lifespan has run" vs "module imported". Idempotent.
+
+        Wrapped as ``async`` so the FastAPI lifespan can ``await``
+        every subsystem uniformly (mirrors ``live_fill_monitor.start``
+        / ``trade_tape_ingester.start`` / ``paper_sim.start``).
+        """
+        with self._lock:
+            if self._running:
+                logger.debug(
+                    "[health] start() called but already running — no-op"
+                )
+                return
+            self._running = True
+        logger.info("Ingestion health monitor started")
+
+    async def stop(self) -> None:
+        """Mark the monitor as stopped.
+
+        Does NOT clear the per-source metrics (the post-shutdown
+        ``get_metrics()`` snapshot is read by the operator before the
+        process exits — mirrors the pipeline's ``stop()`` contract).
+        Idempotent: calling ``stop()`` when not running is a no-op.
+        """
+        with self._lock:
+            if not self._running:
+                logger.debug(
+                    "[health] stop() called but not running — no-op"
+                )
+                return
+            self._running = False
+        logger.info("Ingestion health monitor stopped")
+
+    @property
+    def is_running(self) -> bool:
+        """``True`` iff ``start()`` has been called and ``stop()`` hasn't."""
+        with self._lock:
+            return self._running
+
+    def get_summary(self) -> dict[str, Any]:
+        """Cross-source aggregate health summary.
+
+        Used by ``/api/status`` to surface a single ingestion-health
+        block without forcing the operator to drill into the per-
+        source view. The shape mirrors the per-source
+        ``_format_source`` dict but cross-source-aggregated:
+
+        - ``sources``: count of distinct sources seen.
+        - ``available_sources``: count whose ``available`` flag is
+          ``True``.
+        - ``events_received``: total across every source.
+        - ``events_failed``: total across every source.
+        - ``error_rate``: total failed / total received (or 0.0 when
+          no events yet — mirrors ``_format_source``).
+        - ``throughput_eps``: sum of per-source EPS (an aggregate
+          pipeline throughput).
+        - ``avg_latency_ms``: average of per-source ``last_latency``
+          (in ms) across sources that have at least one event.
+          Returns 0.0 when no events have been received.
+        - ``dlq_depth``: total DLQ depth across every source.
+        - ``last_event_at``: max ``last_event_at`` across sources (so
+          a single busy source keeps the freshness signal alive even
+          when every other source is silent).
+        - ``is_running``: lifecycle flag.
+        - ``alerts``: count of alerts currently fired in the most
+          recent ``check_alerts()`` cycle (best-effort — recorded
+          under the lock so a concurrent ``check_alerts`` doesn't
+          race; the value is the count from the last cycle, NOT a
+          fresh evaluation).
+        """
+        with self._lock:
+            sources = list(self._sources.values())
+            running = self._running
+        if not sources:
+            return {
+                "sources": 0,
+                "available_sources": 0,
+                "events_received": 0,
+                "events_failed": 0,
+                "error_rate": 0.0,
+                "throughput_eps": 0.0,
+                "avg_latency_ms": 0.0,
+                "dlq_depth": 0,
+                "last_event_at": 0.0,
+                "is_running": running,
+                "alerts": 0,
+            }
+        total_received = sum(h.events_received for h in sources)
+        total_failed = sum(h.events_failed for h in sources)
+        err_rate = (total_failed / total_received) if total_received > 0 else 0.0
+        total_eps = sum(h.throughput() for h in sources)
+        latencies_ms = [
+            h.last_latency * 1000.0 for h in sources if h.last_latency > 0.0
+        ]
+        avg_latency_ms = (
+            sum(latencies_ms) / len(latencies_ms) if latencies_ms else 0.0
+        )
+        total_dlq = sum(h.dlq_depth for h in sources)
+        last_event_at = max(h.last_event_at for h in sources)
+        available = sum(1 for h in sources if h.available)
+        return {
+            "sources": len(sources),
+            "available_sources": available,
+            "events_received": total_received,
+            "events_failed": total_failed,
+            "error_rate": err_rate,
+            "throughput_eps": total_eps,
+            "avg_latency_ms": avg_latency_ms,
+            "dlq_depth": total_dlq,
+            "last_event_at": last_event_at,
+            "is_running": running,
+            "alerts": 0,
+        }
 
     # ── Alerts ─────────────────────────────────────────────────────────────
 

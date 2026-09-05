@@ -73,6 +73,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -83,6 +84,26 @@ from ingestion.raw_vault import (
     raw_vault,
 )
 
+
+def _load_default_lineage():
+    """Lazy import of the lineage tracker singleton.
+
+    Imported lazily so the pipeline module imports cleanly even if the
+    W32-4 ``ingestion.lineage`` module is unavailable (e.g. a parallel
+    agent's branch hasn't landed its file yet). Mirrors the lazy-import
+    pattern in ``core.book_poller._apply_book`` and the W24-4 lazy
+    import inside ``_default_validator``.
+
+    Returns ``None`` on import failure so the pipeline's best-effort
+    lineage wiring no-ops rather than crashing every ``process`` call.
+    """
+    try:
+        from ingestion.lineage import lineage_tracker
+        return lineage_tracker
+    except ImportError:  # pragma: no cover — defensive
+        return None
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -91,6 +112,12 @@ logger = logging.getLogger(__name__)
 # Staleness thresholds. Mirrors the W24-4 ``data_validator`` rule:
 # > 300s in the past → reject (``quality_state="stale"``).
 STALE_REJECT_THRESHOLD_S = 300.0
+
+# W32-2 — rolling-window size for the in-pipeline EPS + latency
+# trackers. 1000 samples ≈ 100 s of history at 10 EPS, which is well
+# beyond the 60 s throughput window the dashboard polls. Mirrors the
+# ``SourceHealth.latencies`` bound in ``ingestion/health.py``.
+_PIPELINE_TRACKER_MAXLEN: int = 1000
 
 
 # ── Dataclasses ───────────────────────────────────────────────────────────────
@@ -171,6 +198,7 @@ class Pipeline:
         normalizer: Callable[[PipelineRecord], dict[str, Any]] | None = None,
         enricher: Callable[[PipelineRecord], dict[str, Any]] | None = None,
         router: Callable[[PipelineRecord], None] | None = None,
+        lineage: Any | None = None,
     ) -> None:
         self._vault = vault or raw_vault
         self._validator = validator or _default_validator
@@ -182,6 +210,14 @@ class Pipeline:
         # force a PG connection at import time). Tests inject a no-op
         # router to keep the test hermetic.
         self._router = router
+        # W32-4 — lineage tracker. ``None`` defaults to the module-level
+        # ``lineage_tracker`` singleton (loaded lazily so a missing
+        # ``ingestion.lineage`` module doesn't crash the pipeline
+        # import). A test injects a tmp_path-scoped tracker for
+        # hermetic isolation. ``None`` here also covers the defensive
+        # case where the singleton construction failed (lineage is
+        # then a no-op).
+        self._lineage = lineage if lineage is not None else _load_default_lineage()
         self._lock = threading.Lock()
         # Counters — surfaced via ``get_stats()``.
         self._processed_count: int = 0
@@ -190,6 +226,27 @@ class Pipeline:
         self._duplicate_count: int = 0
         self._stale_count: int = 0
         self._routed_count: int = 0
+        # W32-2 — lifecycle + per-source bookkeeping for the operator
+        # dashboard's ``/api/status`` ingestion block and the
+        # observability collector's data_source metrics. ``_running``
+        # is flipped by ``start()`` / ``stop()`` (called from the
+        # FastAPI lifespan); ``_sources`` is the set of unique source
+        # names that have called ``process()`` since startup so
+        # ``active_sources`` can answer "how many connectors are
+        # wired?" without a separate registry lookup. The two deques
+        # feed ``events_per_second`` / ``avg_latency_ms`` without
+        # coupling the pipeline to the health monitor's per-source
+        # bookkeeping (the two tracks are complementary: the health
+        # monitor tracks per-source latency; the pipeline tracks
+        # cross-source aggregate latency).
+        self._running: bool = False
+        self._sources: set[str] = set()
+        self._recent_processing_times: deque[float] = deque(
+            maxlen=_PIPELINE_TRACKER_MAXLEN
+        )
+        self._recent_latencies_ms: deque[float] = deque(
+            maxlen=_PIPELINE_TRACKER_MAXLEN
+        )
 
     # ── Public API ─────────────────────────────────────────────────────
 
@@ -235,6 +292,7 @@ class Pipeline:
 
         with self._lock:
             self._processed_count += 1
+            self._sources.add(source)
 
         # ── Stage 1: Validate ──────────────────────────────────────────
         try:
@@ -318,6 +376,44 @@ class Pipeline:
                 with self._lock:
                     self._duplicate_count += 1
                     self._valid_count -= 1
+            # W32-4 — record the lineage edge for this ingestion event
+            # (source:clob → obs_id). Best-effort: the lineage tracker's
+            # ``record_ingestion`` is wrapped in try/except so a
+            # SQLite write failure (e.g. a transient ``database is
+            # locked`` on the lineage.db) never breaks the pipeline.
+            # Skipped for duplicates (no obs_id) and for the defensive
+            # case where the lineage singleton is None (module import
+            # failed).
+            if obs_id is not None and self._lineage is not None:
+                token_id = None
+                if isinstance(normalized, dict):
+                    tid = normalized.get("token_id")
+                    if isinstance(tid, str) and tid:
+                        token_id = tid
+                # Fall back to the raw payload's token_id when the
+                # normalizer hasn't run yet (invalid / stale records
+                # skip the normalize stage but still carry the raw
+                # payload's token_id for provenance).
+                if token_id is None and isinstance(raw_payload, dict):
+                    tid = raw_payload.get("token_id")
+                    if isinstance(tid, str) and tid:
+                        token_id = tid
+                try:
+                    self._lineage.record_ingestion(
+                        observation_id=obs_id,
+                        source=source,
+                        source_id=source_id,
+                        event_type=event_type,
+                        token_id=token_id,
+                        payload_summary=str(raw_payload)[:200],
+                    )
+                except Exception as e:  # noqa: BLE001 — best-effort
+                    logger.warning(
+                        "[pipeline] lineage.record_ingestion failed for "
+                        "obs=%s: %s",
+                        obs_id,
+                        e,
+                    )
         else:
             rec.observation_id = None
 
@@ -327,6 +423,42 @@ class Pipeline:
                 rec.normalized_payload = self._normalizer(rec) or normalized
                 rec.enriched_payload = self._enricher(rec)
                 rec.feature_ready = bool(rec.enriched_payload)
+                # W32-4 — record the lineage edges for the normalize +
+                # enrich transformations. Best-effort + idempotent
+                # (re-processing the same record on a replay produces
+                # the same edges — the UNIQUE constraint makes the
+                # second recording a no-op). Skipped when the
+                # observation_id is missing (the vault rejected the
+                # row) or when the lineage singleton is None.
+                if rec.observation_id and self._lineage is not None:
+                    norm_id = f"norm:{rec.observation_id}"
+                    enr_id = f"enriched:{rec.observation_id}"
+                    token_id = None
+                    if isinstance(rec.normalized_payload, dict):
+                        tid = rec.normalized_payload.get("token_id")
+                        if isinstance(tid, str) and tid:
+                            token_id = tid
+                    try:
+                        self._lineage.record_transformation(
+                            from_id=rec.observation_id,
+                            to_id=norm_id,
+                            transform_type="normalize",
+                            token_id=token_id,
+                        )
+                        if rec.enriched_payload:
+                            self._lineage.record_transformation(
+                                from_id=norm_id,
+                                to_id=enr_id,
+                                transform_type="enrich",
+                                token_id=token_id,
+                            )
+                    except Exception as e:  # noqa: BLE001 — best-effort
+                        logger.warning(
+                            "[pipeline] lineage.record_transformation failed "
+                            "for obs=%s: %s",
+                            rec.observation_id,
+                            e,
+                        )
             except Exception as e:
                 logger.exception(
                     "[pipeline] normalizer/enricher raised on "
@@ -370,6 +502,18 @@ class Pipeline:
                 rec.error_reason = f"router raised: {type(e).__name__}: {e}"
 
         rec.processing_time = time.time()
+        # W32-2 — record the post-pipeline processing time + the
+        # end-to-end pipeline latency (``processing_time -
+        # ingestion_time``) so the ``events_per_second`` /
+        # ``avg_latency_ms`` properties can answer "how fast is the
+        # pipeline ingesting?" without coupling to the per-source
+        # health monitor. Clamped at 0 to absorb clock skew (the
+        # ``time.time()`` calls happen on the same wall clock, but
+        # a NTP jump between the two could yield a negative delta).
+        latency_ms = max(0.0, (rec.processing_time - ing_ts) * 1000.0)
+        with self._lock:
+            self._recent_processing_times.append(rec.processing_time)
+            self._recent_latencies_ms.append(latency_ms)
         return PipelineResult(
             record=rec,
             quality_state=rec.quality_state,
@@ -408,6 +552,140 @@ class Pipeline:
             self._duplicate_count = 0
             self._stale_count = 0
             self._routed_count = 0
+            self._sources.clear()
+            self._recent_processing_times.clear()
+            self._recent_latencies_ms.clear()
+
+    # ── W32-2 — Lifecycle + dashboard-reading properties ────────────────
+
+    async def start(self) -> None:
+        """Mark the pipeline as running.
+
+        The pipeline's processing path is event-driven (a connector
+        calls ``process()`` per record) so ``start()`` does NOT spin up
+        a background task — it just flips ``_running`` so the
+        ``/api/status`` endpoint's ``pipeline_running`` field reflects
+        "the lifespan has run" rather than "the module has been
+        imported". Idempotent: calling ``start()`` twice is a no-op.
+
+        Wrapped as ``async`` (mirrors the sibling ``live_fill_monitor``
+        / ``trade_tape_ingester`` / ``paper_sim`` lifecycle contract)
+        so the FastAPI lifespan can ``await`` every subsystem
+        uniformly. ``stop()`` is the inverse.
+        """
+        with self._lock:
+            if self._running:
+                logger.debug("[pipeline] start() called but already running — no-op")
+                return
+            self._running = True
+        logger.info("Ingestion pipeline started")
+
+    async def stop(self) -> None:
+        """Mark the pipeline as stopped.
+
+        Does NOT cancel any in-flight ``process()`` call (the pipeline
+        is synchronous — a connector holding the GIL will finish
+        naturally). Idempotent: calling ``stop()`` when not running is
+        a no-op. The counters + per-source set are NOT zeroed here so
+        the post-shutdown ``get_stats()`` snapshot can be read by an
+        operator before the process exits (mirrors the
+        ``live_fill_monitor.stop()`` contract).
+        """
+        with self._lock:
+            if not self._running:
+                logger.debug("[pipeline] stop() called but not running — no-op")
+                return
+            self._running = False
+        logger.info("Ingestion pipeline stopped")
+
+    @property
+    def is_running(self) -> bool:
+        """``True`` iff ``start()`` has been called and ``stop()`` hasn't.
+
+        Read directly under the ``_lock`` so a concurrent ``stop()``
+        can't observe a half-flipped state.
+        """
+        with self._lock:
+            return self._running
+
+    @property
+    def active_sources(self) -> int:
+        """Number of unique sources that have called ``process()``.
+
+        Returns the size of the ``_sources`` set rather than a list of
+        names so the ``/api/status`` JSON stays scalar-shaped (the
+        per-source detail is exposed via ``/api/ingestion/health``
+        which reads the health monitor's richer per-source view).
+        """
+        with self._lock:
+            return len(self._sources)
+
+    @property
+    def total_events(self) -> int:
+        """Total records the pipeline has accepted for processing.
+
+        Includes valid / invalid / stale / duplicate outcomes — the
+        caller can subtract ``failed_count`` for the "accepted +
+        forwarded" count. Mirrors the ``processed_count`` field in
+        ``get_stats()``.
+        """
+        with self._lock:
+            return self._processed_count
+
+    @property
+    def events_per_second(self) -> float:
+        """Pipeline-level events-per-second over the last 60 s.
+
+        Computed from the rolling ``_recent_processing_times`` deque
+        (bounded at ``_PIPELINE_TRACKER_MAXLEN`` samples). Returns 0.0
+        when no events have been processed yet or every sample in the
+        deque is older than the 60 s window. Mirrors the
+        ``SourceHealth.throughput()`` shape in ``ingestion/health.py``
+        but cross-source (the per-source throughput lives on the
+        health monitor — see ``GET /api/ingestion/health``).
+        """
+        now = time.time()
+        with self._lock:
+            if not self._recent_processing_times:
+                return 0.0
+            recent = [t for t in self._recent_processing_times if (now - t) <= 60.0]
+        if not recent:
+            return 0.0
+        span = max(now - min(recent), 1.0)
+        return len(recent) / span
+
+    @property
+    def avg_latency_ms(self) -> float:
+        """Arithmetic mean of the most recent pipeline latencies (ms).
+
+        Returns 0.0 when the pipeline hasn't processed any records.
+        Each sample is ``processing_time - ingestion_time`` per
+        record — this is the pipeline-stage latency (validate +
+        normalise + enrich + route), NOT the end-to-end
+        event-arrival latency (which the health monitor's
+        ``last_latency`` tracks separately from ``event_time``).
+        """
+        with self._lock:
+            if not self._recent_latencies_ms:
+                return 0.0
+            return sum(self._recent_latencies_ms) / len(self._recent_latencies_ms)
+
+    @property
+    def failed_count(self) -> int:
+        """Records the pipeline rejected (invalid + stale + duplicate).
+
+        ``duplicate`` is included because a duplicate is "work that
+        arrived but wasn't forwarded downstream" — the operator
+        dashboard's "failed records" metric should surface every
+        record that didn't land in the normalized store, not just
+        the schema-invalid ones.
+        """
+        with self._lock:
+            return (
+                self._invalid_count
+                + self._stale_count
+                + self._duplicate_count
+            )
 
 
 # ── Default stage implementations ─────────────────────────────────────────────
@@ -541,11 +819,20 @@ def _default_enricher(rec: PipelineRecord) -> dict[str, Any]:
 # time). Tests construct a fresh ``Pipeline(vault=...)`` per test.
 pipeline = Pipeline()
 
+# W32-2 — operator-facing alias. ``api/server.py``'s lifespan imports the
+# pipeline under the name ``ingestion_pipeline`` (mirrors the
+# ``ingestion_health_monitor`` naming used by the sibling health module)
+# so the startup / shutdown block reads as a uniform ``ingestion_*``
+# pair. Both names reference the same singleton instance — there's no
+# second ``Pipeline()`` construction.
+ingestion_pipeline = pipeline
+
 
 __all__ = [
     "Pipeline",
     "PipelineRecord",
     "PipelineResult",
     "pipeline",
+    "ingestion_pipeline",
     "STALE_REJECT_THRESHOLD_S",
 ]

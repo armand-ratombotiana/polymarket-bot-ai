@@ -546,6 +546,72 @@ async def _collect_queue_health() -> None:
         )
 
 
+# ── W32-2 — ingestion pipeline metrics ──────────────────────────────────────
+# Three ``data_source`` metrics sourced from the unified ingestion
+# pipeline singleton (``ingestion.pipeline.ingestion_pipeline``):
+#   * ``events_per_second`` — cross-source pipeline throughput over the
+#     last 60 s (mirrors ``SourceHealth.throughput()`` but aggregated
+#     across every source that's called ``process()``).
+#   * ``latency_ms``       — pipeline-stage latency (validate +
+#     normalise + enrich + route), NOT end-to-end event-arrival
+#     latency. The latter lives on the health monitor's per-source
+#     ``last_latency``; the former is what the pipeline itself adds.
+#   * ``failed_records``   — invalid + stale + duplicate records since
+#     startup (the work the pipeline did that didn't land in the
+#     normalized store).
+# The three metrics land in the existing ``data_source`` bucket so they
+# surface alongside ``updates`` / ``errors`` / ``staleness`` /
+# ``tracked_tokens`` from ``book_poller`` and ``latency`` /
+# ``reconnects`` from the W22-7 God-Mode §54 metrics. Mirrors the
+# sibling ``_collect_*`` defensive try/except + debug-level log pattern
+# so a missing ``ingestion`` package never blocks the cycle.
+
+
+async def _collect_ingestion_metrics() -> None:
+    """Emit ``data_source`` metrics from the unified ingestion pipeline.
+
+    Pulls ``events_per_second`` / ``avg_latency_ms`` / ``failed_count``
+    from ``ingestion.pipeline.ingestion_pipeline`` (the singleton wired
+    into the FastAPI lifespan by W32-2). Each metric carries the
+    pipeline's ``is_running`` flag + ``active_sources`` count as
+    metadata so the dashboard can render "pipeline alive + N sources
+    connected" without a separate lookup.
+    """
+    try:
+        from ingestion.pipeline import ingestion_pipeline
+    except Exception as e:
+        log.debug(
+            "[observability_collector] ingestion.pipeline import failed: %s", e
+        )
+        return
+    try:
+        is_running = bool(ingestion_pipeline.is_running)
+        active_sources = int(ingestion_pipeline.active_sources)
+        await record_metric(
+            CAT_DATA_SOURCE, "events_per_second",
+            round(float(ingestion_pipeline.events_per_second), 6),
+            pipeline_running=is_running,
+            active_sources=active_sources,
+        )
+        await record_metric(
+            CAT_DATA_SOURCE, "latency_ms",
+            round(float(ingestion_pipeline.avg_latency_ms), 3),
+            pipeline_running=is_running,
+            active_sources=active_sources,
+            latency_kind="pipeline_stage",
+        )
+        await record_metric(
+            CAT_DATA_SOURCE, "failed_records",
+            float(ingestion_pipeline.failed_count),
+            pipeline_running=is_running,
+            active_sources=active_sources,
+        )
+    except Exception as e:
+        log.debug(
+            "[observability_collector] ingestion metrics collection failed: %s", e
+        )
+
+
 # ── Collection cycle / loop ──────────────────────────────────────────────────
 
 
@@ -574,6 +640,11 @@ async def _collect_cycle() -> None:
     await _collect_execution_latency()
     await _collect_db_connections()
     await _collect_queue_health()
+    # W32-2 — unified ingestion pipeline metrics (events_per_second /
+    # latency_ms / failed_records). Sourced from
+    # ``ingestion.pipeline.ingestion_pipeline`` — the singleton wired
+    # into the FastAPI lifespan by W32-2.
+    await _collect_ingestion_metrics()
     # Collector heartbeat — 1.0 per cycle. The dashboard can sum this
     # over a window to compute "collector cycles in last N minutes".
     await record_metric(

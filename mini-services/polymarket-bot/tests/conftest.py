@@ -148,6 +148,17 @@ _ENV_REDIRECTS: dict[str, str] = {
     # ``initialize()`` runs. Without this redirect, the DAO would
     # default to ``/app/data`` (read-only in the sandbox).
     "BOT_DATA_DIR": str(_TMP_ROOT / "dao_data"),
+    # W32-4 — data lineage + provenance tracker SQLite db. Module-level
+    # singleton ``ingestion.lineage.lineage_tracker`` is constructed at
+    # import time and would otherwise try to mkdir ``/app/data``
+    # (read-only in the sandbox) — same defensive pattern as the other
+    # *_DB env redirects above. The LineageTracker itself falls back to
+    # ``/tmp/lineage.db`` on a non-writable default path, but redirecting
+    # explicitly keeps every SQLite store co-located under the conftest
+    # sandbox so a test that asserts on the lineage tracker's stats
+    # sees a deterministic path (mirrors the W31-1 ``RAW_VAULT_DB_PATH``
+    # convention).
+    "LINEAGE_DB_PATH": str(_TMP_ROOT / "lineage.db"),
     # Force the canonical trading mode to paper + live disabled so risk-gate
     # tests don't short-circuit at the shadow / live-trading gates inside
     # ``InstitutionalRiskEngine.check_order``.

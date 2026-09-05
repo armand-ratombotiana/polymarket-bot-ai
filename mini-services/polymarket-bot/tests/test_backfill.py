@@ -66,13 +66,64 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sqlite3
+import sys
 import time
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
-import pytest
+# ── Defensive env-var redirect BEFORE importing any project module ─────────
+# Belt-and-braces with the same redirect in ``tests/conftest.py`` (which
+# pytest loads before this file). Mirrors the pattern in
+# ``tests/test_ingestion_infra.py`` so the ``ingestion.*`` and
+# ``core.timescale_db`` module-level singletons don't raise
+# PermissionError on the read-only ``/app/data`` sandbox path.
+_TMP_ROOT = Path("/tmp/pmbot_backfill_tests")
+_TMP_ROOT.mkdir(parents=True, exist_ok=True)
+
+_ENV_REDIRECTS: dict[str, str] = {
+    "MARKET_DB_PATH": str(_TMP_ROOT / "market_intelligence.db"),
+    "DLQ_DB_PATH": str(_TMP_ROOT / "dead_letter.db"),
+    "CHECKPOINT_DB_PATH": str(_TMP_ROOT / "checkpoints.db"),
+    "RAW_VAULT_DB_PATH": str(_TMP_ROOT / "raw_vault.db"),
+    "ALERT_DB_PATH": str(_TMP_ROOT / "alerts.db"),
+    "TRADING_MODE": "paper",
+    "LIVE_TRADING_ENABLED": "false",
+    "API_TOKEN": "test-token-backfill",
+    "CORS_ORIGINS": "http://localhost",
+}
+for _key, _val in _ENV_REDIRECTS.items():
+    os.environ.setdefault(_key, _val)
+
+# ── Defend against the sibling ``tests/ingestion/`` package shadowing our
+# top-level ``ingestion`` package. ──────────────────────────────────────────
+# Same situation + fix as ``tests/test_ingestion_infra.py``: pytest's default
+# ``prepend`` import mode inserts ``tests/`` at ``sys.path[0]`` during test
+# collection, which lets the sibling ``tests/ingestion/`` package shadow our
+# top-level ``polymarket-bot/ingestion/`` package. Without the ``remove``
+# step below, the project root ends up behind ``tests/`` in sys.path, and
+# ``from ingestion.backfill import ...`` resolves to
+# ``tests/ingestion/__init__.py`` (which has no ``backfill`` submodule).
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_str_root = str(_PROJECT_ROOT)
+if _str_root in sys.path:
+    sys.path.remove(_str_root)
+sys.path.insert(0, _str_root)
+
+# Clear any cached ``ingestion`` / ``ingestion.*`` module pointing at the
+# ``tests/ingestion/`` directory so the next import resolves against the
+# freshly-prepended ``_PROJECT_ROOT``.
+for _mod_name in list(sys.modules):
+    if _mod_name != "ingestion" and not _mod_name.startswith("ingestion."):
+        continue
+    _mod = sys.modules.get(_mod_name)
+    _mod_file = getattr(_mod, "__file__", "") or ""
+    if "tests/ingestion" in _mod_file.replace("\\", "/"):
+        del sys.modules[_mod_name]
+
+import pytest  # noqa: E402  (env must be set first)
 
 # Apply ``@pytest.mark.asyncio`` to every ``async def test_...`` in this
 # module. Mirrors the convention in ``tests/test_label_backfill.py``.

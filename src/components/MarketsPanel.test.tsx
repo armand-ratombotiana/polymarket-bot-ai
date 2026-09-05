@@ -74,25 +74,32 @@ describe('MarketsPanel', () => {
 
   it('filters rows by the search input', () => {
     const books: OrderBook[] = [
-      makeBook({ token_id: 'tok_btc', slug: 'will-bitcoin-hit-100k' }),
-      makeBook({ token_id: 'tok_eth', slug: 'will-ethereum-flip' }),
+      // ``MarketsPanel`` renders ``[#${token_id.slice(0, 6)}…]`` for the
+      // copy-id chip, so we use token_ids that fit within the 6-char
+      // slice window — ``tok_btc`` (7 chars) would render as ``[#tok_bt…]``
+      // and break the assertion below. ``tok_b1`` / ``tok_e1`` keep the
+      // visible chip text identical to the full token_id.
+      makeBook({ token_id: 'tok_b1', slug: 'will-bitcoin-hit-100k' }),
+      makeBook({ token_id: 'tok_e1', slug: 'will-ethereum-flip' }),
     ]
     render(<MarketsPanel books={books} />)
     const input = screen.getByLabelText(/search prediction markets/i)
     fireEvent.change(input, { target: { value: 'bitcoin' } })
-    expect(screen.getByText(/\[#tok_btc…\]/)).toBeInTheDocument()
-    expect(screen.queryByText(/\[#tok_eth…\]/)).not.toBeInTheDocument()
+    expect(screen.getByText(/\[#tok_b1…\]/)).toBeInTheDocument()
+    expect(screen.queryByText(/\[#tok_e1…\]/)).not.toBeInTheDocument()
   })
 
   it('filters rows by the CRYPTO category pill', () => {
     const books: OrderBook[] = [
-      makeBook({ token_id: 'tok_btc', slug: 'will-bitcoin-hit-100k' }),
-      makeBook({ token_id: 'tok_trump', slug: 'will-trump-win-2028' }),
+      // Same 6-char-slice caveat as the search test — keep token_ids
+      // short enough that the visible chip text == full token_id.
+      makeBook({ token_id: 'tok_b1', slug: 'will-bitcoin-hit-100k' }),
+      makeBook({ token_id: 'tok_tr1', slug: 'will-trump-win-2028' }),
     ]
     render(<MarketsPanel books={books} />)
     fireEvent.click(screen.getByText('CRYPTO'))
-    expect(screen.getByText(/\[#tok_btc…\]/)).toBeInTheDocument()
-    expect(screen.queryByText(/\[#tok_trump…\]/)).not.toBeInTheDocument()
+    expect(screen.getByText(/\[#tok_b1…\]/)).toBeInTheDocument()
+    expect(screen.queryByText(/\[#tok_tr1…\]/)).not.toBeInTheDocument()
   })
 
   it('calls onSelectMarket when a row Depth button is clicked', () => {

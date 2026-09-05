@@ -431,6 +431,38 @@ class DeadLetterQueue:
             logger.error("[dead_letter] mark_retried failed: %s", e)
             return False
 
+    def delete(self, record_id: str) -> bool:
+        """Delete a single dead-letter record by id.
+
+        Used by the W32-3 ``DELETE /api/ingestion/dead-letter/{record_id}``
+        admin endpoint. Unlike :meth:`mark_retried` (which keeps the row
+        for audit), this is a hard delete — the record is removed from
+        the queue entirely. Operators use it to drain records that have
+        been parked as ``abandoned`` after a manual review determined the
+        record was produced by a misbehaving connector that won't be
+        re-processed (e.g. a malformed payload from a deprecated API
+        version).
+
+        Args:
+            record_id: The record's UUID4 hex.
+
+        Returns:
+            ``True`` if the record was found and deleted, ``False``
+            otherwise (record not found or storage error). Storage
+            errors are logged at ERROR level and swallowed so an
+            admin DELETE call can never break the caller.
+        """
+        try:
+            with sqlite3.connect(self._db_path) as conn:
+                cur = conn.execute(
+                    "DELETE FROM dead_letter WHERE record_id = ?",
+                    (record_id,),
+                )
+                return int(cur.rowcount or 0) > 0
+        except Exception as e:  # noqa: BLE001
+            logger.error("[dead_letter] delete failed: %s", e)
+            return False
+
     def clear(
         self,
         source: str | None = None,
