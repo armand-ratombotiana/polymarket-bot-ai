@@ -616,6 +616,16 @@ class TestMLLabelGeneration:
         ``label_backfill_engine.record_outcome(token_id, outcome)``
         with ``outcome=1`` when ``resolved_yes=True``.
 
+        W34-3 contract: ``record_outcome`` is invoked from TWO paths on
+        a resolved market — the synchronous strategy-registry wiring
+        (``_wire_strategy_registry`` durably records the label so the
+        daily backfill retrain picks it up regardless of the
+        ``wire_ml`` flag) AND the async ML wiring (``wire_ml=True``
+        also schedules the online ``ml_model.update`` + cache
+        invalidation). Both calls carry the same ``(token_id, outcome)``
+        args so we assert on ``call_args`` (most-recent call) rather
+        than ``assert_called_once``.
+
         The ingester uses ``asyncio.get_running_loop().create_task`` for
         the async path, so we await one ``await asyncio.sleep(0)`` to
         let the scheduled task complete before asserting.
@@ -638,7 +648,14 @@ class TestMLLabelGeneration:
         # Let the scheduled async task complete.
         await asyncio.sleep(0.01)
 
-        mock_engine.record_outcome.assert_called_once()
+        # W34-3 — ``record_outcome`` is called at least once (the
+        # synchronous strategy-registry wiring always records the label
+        # for a resolved market). The async ML wiring may add a second
+        # call with the same args; we assert on the most-recent call
+        # rather than the call count so the test is robust to the
+        # W34-3 dual-path contract.
+        mock_engine.record_outcome.assert_called()
+        assert mock_engine.record_outcome.call_count >= 1
         call_args = mock_engine.record_outcome.call_args
         # The first positional arg is the token_id; the second is the
         # outcome (1 for YES).
@@ -647,12 +664,25 @@ class TestMLLabelGeneration:
             f"record_outcome must be called with outcome=1 when "
             f"resolved_yes=True; got {call_args.args[1]}"
         )
+        # Every call must carry the same expected args (the sync +
+        # async paths both write the same label — a divergence would
+        # be a real bug).
+        for call in mock_engine.record_outcome.call_args_list:
+            assert call.args[0] == "ML_WIRE_TEST_YES"
+            assert call.args[1] == 1
 
     async def test_record_outcome_outcome_zero_when_no_wins(
         self, ingester, monkeypatch,
     ):
         """When the resolved market's ``outcomePrices=["0","1"]``,
-        ``record_outcome`` is called with ``outcome=0`` (NO won)."""
+        ``record_outcome`` is called with ``outcome=0`` (NO won).
+
+        W34-3 — see ``test_record_outcome_called_on_resolution`` for
+        the dual-path contract: the synchronous strategy-registry
+        wiring + the async ML wiring both write the same label. We
+        assert on ``call_args`` (most-recent call) and verify every
+        call carries ``outcome=0``.
+        """
         from core import label_backfill as _lb_module
         original_engine = _lb_module.label_backfill_engine
         mock_engine = MagicMock(wraps=original_engine)
@@ -669,22 +699,44 @@ class TestMLLabelGeneration:
         )
         await asyncio.sleep(0.01)
 
-        mock_engine.record_outcome.assert_called_once()
+        mock_engine.record_outcome.assert_called()
+        assert mock_engine.record_outcome.call_count >= 1
         call_args = mock_engine.record_outcome.call_args
         assert call_args.args[0] == "ML_WIRE_TEST_NO"
         assert call_args.args[1] == 0
+        for call in mock_engine.record_outcome.call_args_list:
+            assert call.args[0] == "ML_WIRE_TEST_NO"
+            assert call.args[1] == 0
 
     async def test_ml_wiring_skipped_when_wire_ml_false(
         self, ingester, monkeypatch,
     ):
-        """``wire_ml=False`` does NOT call ``label_backfill.record_outcome``
-        — the ML wiring is opt-in per call (so a test seed or a
-        historical replay doesn't trigger an unwanted retrain)."""
-        from core import label_backfill as _lb_module
-        original_engine = _lb_module.label_backfill_engine
-        mock_engine = MagicMock(wraps=original_engine)
+        """``wire_ml=False`` does NOT trigger the async ML wiring path
+        (``feature_pipeline.invalidate`` + ``ml_model.update``) — the
+        online update + cache invalidation are opt-in per call so a
+        test seed or a historical replay doesn't trigger an unwanted
+        retrain.
+
+        W34-3 contract note: ``label_backfill.record_outcome`` IS
+        still called by the synchronous strategy-registry wiring
+        (the label is durably recorded for the daily backfill retrain
+        regardless of the ``wire_ml`` flag — see
+        ``_wire_strategy_registry``'s docstring). What ``wire_ml``
+        controls is the additional async online ML update + feature
+        cache invalidation. We therefore spy on
+        ``feature_pipeline.invalidate`` (the W33-4 additive method)
+        rather than ``record_outcome`` to verify the opt-in contract.
+        """
+        # Mock the ``get_feature_pipeline`` lazy resolver so the
+        # ingester's async ML wiring picks up our spy if (and only if)
+        # ``wire_ml=True``.
+        from ingestion import feature_pipeline as _fp_module
+        mock_pipe = MagicMock()
+        mock_pipe.get_features = AsyncMock(return_value=None)
+        mock_pipe.invalidate = MagicMock(return_value=True)
+        mock_get = MagicMock(return_value=mock_pipe)
         monkeypatch.setattr(
-            _lb_module, "label_backfill_engine", mock_engine,
+            _fp_module, "get_feature_pipeline", mock_get,
         )
 
         ingester.record_event(
@@ -694,9 +746,12 @@ class TestMLLabelGeneration:
             wire_ml=False,
             fire_alert=False,
         )
+        # Give any (unexpected) scheduled task a chance to run so the
+        # assertion is meaningful rather than a race-condition pass.
         await asyncio.sleep(0.01)
 
-        mock_engine.record_outcome.assert_not_called()
+        mock_pipe.invalidate.assert_not_called()
+        mock_get.assert_not_called()
 
     async def test_ml_wiring_skipped_for_non_resolution_events(
         self, ingester, monkeypatch,
@@ -966,12 +1021,15 @@ class TestStatsAndAlerting:
 
     def test_alert_fired_on_market_resolved(self, ingester, monkeypatch):
         """``MARKET_RESOLVED`` is in ``ALERT_EVENT_TYPES`` so the
-        ingester dispatches ``alert_engine.fire_alert`` on resolution.
+        ingester dispatches ``alert_engine.record_alert`` on resolution.
 
-        We spy on ``alert_engine.fire_alert`` (rather than the
-        ``record_alert`` convenience wrapper) because the ingester
-        constructs an ``Alert`` itself so it can carry the
-        ``market_event:<event_id>`` id.
+        W34-3 — the ingester uses the primitive-field ``record_alert``
+        convenience wrapper (rather than constructing an ``Alert``
+        dataclass + calling ``fire_alert`` directly) so the alert
+        carries the canonical ``market`` category + ``info`` severity
+        (MARKET_RESOLVED is an expected lifecycle transition — no
+        operator action required). We spy on ``record_alert`` to
+        verify the primitive-field arguments.
         """
         from core import alerting as _al_module
         original_engine = _al_module.alert_engine
@@ -985,11 +1043,17 @@ class TestStatsAndAlerting:
             wire_ml=False,  # don't trigger the ML wiring here
             payload={"resolved_yes": True, "outcomePrices": ["1", "0"]},
         )
-        mock_engine.fire_alert.assert_called_once()
-        alert_arg = mock_engine.fire_alert.call_args.args[0]
-        assert alert_arg.category == "data"
-        assert alert_arg.severity == "critical"  # MARKET_RESOLVED → critical
-        assert alert_arg.name == "market_market_resolved"
+        mock_engine.record_alert.assert_called_once()
+        call_kwargs = mock_engine.record_alert.call_args.kwargs
+        assert call_kwargs["category"] == "market"
+        assert call_kwargs["severity"] == "info"  # MARKET_RESOLVED → info
+        assert call_kwargs["name"] == "market_resolved"
+        # Metadata carries the event_id + token_id so the dashboard can
+        # cross-link the alert card with the market_events row.
+        metadata = call_kwargs.get("metadata", {}) or {}
+        assert metadata.get("token_id") == "ALERT_TEST"
+        assert metadata.get("event_type") == "MARKET_RESOLVED"
+        assert "event_id" in metadata
 
     def test_no_alert_for_market_created(self, ingester, monkeypatch):
         """``MARKET_CREATED`` is NOT in ``ALERT_EVENT_TYPES`` (too
