@@ -182,17 +182,24 @@ def _reset_ingestion_singletons():
     hiccup is swallowed so the test session can still proceed (the
     next test's seed will retry the write).
     """
-    # W31-1 raw vault — clear the in-memory dedup deque + counters.
-    # NOTE: this does NOT truncate the on-disk SQLite table (the vault
-    # has no public truncate method by design — every record survives
-    # for audit). The dedup deque clear is sufficient because the next
-    # seed call uses a UNIQUE source_id (timestamp-suffixed) so the
-    # in-memory dedup check won't reject it.
+    # W31-1 raw vault — clear the in-memory dedup deque + counters AND
+    # truncate the on-disk SQLite table. The W34-4 ``to_timestamp`` /
+    # ``from_timestamp`` filter tests assert on exact ``scanned`` counts;
+    # without a truncate, records seeded by a prior pytest run (whose
+    # on-disk SQLite file persists in ``/tmp``) leak into the count and
+    # break the filter assertions non-deterministically. The
+    # ``truncate()`` method is the W34-4 test-only helper for this
+    # exact purpose — production code never calls it (the vault's
+    # contract is "every record survives for audit").
     try:
         from ingestion.raw_vault import raw_vault
-        raw_vault.reset_stats()
+        raw_vault.truncate()
     except Exception:  # pragma: no cover — defensive
-        pass
+        try:
+            from ingestion.raw_vault import raw_vault
+            raw_vault.reset_stats()
+        except Exception:
+            pass
     # W31-4 dead-letter queue — clear every record from the queue (the
     # replay path may push invalid records to the DLQ; clearing here so
     # the next test's DLQ state is predictable).

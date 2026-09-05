@@ -50,6 +50,56 @@ vi.mock('recharts', async () => {
 
 import IngestionHealthPanel from './IngestionHealthPanel'
 
+// ── W35-3 — MockWebSocket stub ─────────────────────────────────────────────
+//
+// Same pattern as OrdersPanel.test.tsx / useRealtimeData.test.ts. The
+// IngestionHealthPanel now consumes useRealtimeData for the health
+// endpoint, which spins up a useWebSocket subscription on mount.
+// Without a MockWebSocket stub, `new WebSocket(getAuthedWsUrl())`
+// throws in jsdom (no native WebSocket constructor) and the catch
+// block in useWebSocket schedules a reconnect every 3 s — which would
+// pollute the test logs and could fire stray reconnects during fake-
+// timer advancements. Installing the stub lets each test opt-in to
+// driving the WS via `MockWebSocket.instances[0].triggerOpen()` /
+// `triggerMessage()`.
+class MockWebSocket {
+  static instances: MockWebSocket[] = []
+  static CONNECTING = 0
+  static OPEN = 1
+  static CLOSING = 2
+  static CLOSED = 3
+
+  url: string
+  readyState: number
+  onopen: (() => void) | null = null
+  onmessage: ((event: { data: string }) => void) | null = null
+  onclose: (() => void) | null = null
+  onerror: ((event: unknown) => void) | null = null
+
+  constructor(url: string) {
+    this.url = url
+    this.readyState = MockWebSocket.CONNECTING
+    MockWebSocket.instances.push(this)
+  }
+
+  triggerOpen() {
+    this.readyState = MockWebSocket.OPEN
+    this.onopen?.()
+  }
+
+  triggerMessage(data: unknown) {
+    const payload = typeof data === 'string' ? data : JSON.stringify(data)
+    this.onmessage?.({ data: payload })
+  }
+
+  close() {
+    this.readyState = MockWebSocket.CLOSED
+    this.onclose?.()
+  }
+
+  send() {}
+}
+
 // ── Sample payloads ─────────────────────────────────────────────────────────
 
 const baseHealthPayload = {
@@ -282,12 +332,24 @@ function mockFetchRouteGetPost(
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 describe('IngestionHealthPanel', () => {
+  let originalWebSocket: typeof WebSocket
+
   beforeEach(() => {
     // Re-install a fresh fetch mock before each test.
     global.fetch = vi.fn() as unknown as typeof fetch
+    // W35-3 — install MockWebSocket so useRealtimeData's embedded
+    // useWebSocket doesn't throw on mount. Tests that need to drive
+    // the WS (Live badge, real-time updates) call
+    // `MockWebSocket.instances[0].triggerOpen()` / `triggerMessage()`.
+    originalWebSocket = global.WebSocket
+    MockWebSocket.instances = []
+    ;(global as unknown as { WebSocket: typeof WebSocket }).WebSocket =
+      MockWebSocket as unknown as typeof WebSocket
   })
 
   afterEach(() => {
+    ;(global as unknown as { WebSocket: typeof WebSocket }).WebSocket =
+      originalWebSocket
     vi.useRealTimers()
   })
 
@@ -936,7 +998,7 @@ describe('IngestionHealthPanel', () => {
     expect(vi.mocked(fetch).mock.calls.length).toBe(callsBefore)
   })
 
-  it('renders the "15s poll" badge in the header', async () => {
+  it('renders the "Polling" badge in the header when the WS is not connected', async () => {
     vi.mocked(fetch).mockImplementation(
       mockFetchAllIngestion({
         health: baseHealthPayload,
@@ -950,6 +1012,349 @@ describe('IngestionHealthPanel', () => {
     await waitFor(() => {
       expect(screen.getByTestId('poll-badge')).toBeInTheDocument()
     })
-    expect(screen.getByTestId('poll-badge').textContent).toContain('15s poll')
+    // W35-3 — WS hasn't been opened → useRealtimeData falls back to
+    // polling → the "⟳ Polling" badge renders.
+    expect(screen.getByTestId('poll-badge').textContent).toContain('Polling')
+    expect(screen.queryByTestId('realtime-badge')).not.toBeInTheDocument()
+  })
+
+  // ── W35-3 — Real-time migration tests ──────────────────────────────────
+
+  // ── Live / Polling badge ────────────────────────────────────────────────
+
+  it('flips the badge to "Live" when the WS connects', async () => {
+    vi.mocked(fetch).mockImplementation(
+      mockFetchAllIngestion({
+        health: baseHealthPayload,
+        quality: baseQualityPayload,
+        deadLetter: baseDeadLetterPayload,
+        coverage: baseCoveragePayload,
+        gaps: baseGapsPayload,
+      }),
+    )
+    render(<IngestionHealthPanel />)
+    await waitFor(() => {
+      expect(screen.getByTestId('poll-badge')).toBeInTheDocument()
+    })
+    // Initially "Polling" because the WS hasn't been opened yet.
+    expect(screen.getByTestId('poll-badge').textContent).toContain('Polling')
+
+    // Open the WS — useRealtimeData's isRealtime flips true.
+    await act(async () => {
+      MockWebSocket.instances[0].triggerOpen()
+    })
+    await waitFor(() => {
+      expect(screen.getByTestId('realtime-badge')).toBeInTheDocument()
+    })
+    expect(screen.getByTestId('realtime-badge').textContent).toContain('Live')
+    expect(screen.queryByTestId('poll-badge')).not.toBeInTheDocument()
+  })
+
+  it('flips back to "Polling" when the WS disconnects', async () => {
+    vi.mocked(fetch).mockImplementation(
+      mockFetchAllIngestion({
+        health: baseHealthPayload,
+        quality: baseQualityPayload,
+        deadLetter: baseDeadLetterPayload,
+        coverage: baseCoveragePayload,
+        gaps: baseGapsPayload,
+      }),
+    )
+    render(<IngestionHealthPanel />)
+    await waitFor(() => {
+      expect(screen.getByTestId('poll-badge')).toBeInTheDocument()
+    })
+    await act(async () => {
+      MockWebSocket.instances[0].triggerOpen()
+    })
+    await waitFor(() => {
+      expect(screen.getByTestId('realtime-badge')).toBeInTheDocument()
+    })
+    // Close the WS — useRealtimeData's isRealtime flips false.
+    await act(async () => {
+      MockWebSocket.instances[0].close()
+    })
+    await waitFor(() => {
+      expect(screen.getByTestId('poll-badge')).toBeInTheDocument()
+    })
+    expect(screen.getByTestId('poll-badge').textContent).toContain('Polling')
+    expect(screen.queryByTestId('realtime-badge')).not.toBeInTheDocument()
+  })
+
+  // ── Real-time updates via WS push ─────────────────────────────────────
+
+  it('updates the rendered total-events KPI when a new health payload arrives over the WS', async () => {
+    vi.mocked(fetch).mockImplementation(
+      mockFetchAllIngestion({
+        health: baseHealthPayload,
+        quality: baseQualityPayload,
+        deadLetter: baseDeadLetterPayload,
+        coverage: baseCoveragePayload,
+        gaps: baseGapsPayload,
+      }),
+    )
+    render(<IngestionHealthPanel />)
+    // Flush the initial REST prefetch.
+    await waitFor(() => {
+      expect(screen.getByTestId('kpi-total-events')).toBeInTheDocument()
+    })
+    // Initial value = 84,521 (from baseHealthPayload).
+    expect(screen.getByTestId('kpi-total-events').textContent).toContain('84,521')
+
+    // Open the WS so useRealtimeData starts honouring `system` channel pushes.
+    await act(async () => {
+      MockWebSocket.instances[0].triggerOpen()
+    })
+    // Push a new health payload over the `system` channel with a
+    // different total_events value.
+    const updatedHealth = {
+      ...baseHealthPayload,
+      metrics: {
+        ...baseHealthPayload.metrics,
+        total_events: 99999,
+      },
+    }
+    await act(async () => {
+      MockWebSocket.instances[0].triggerMessage({
+        channel: 'system',
+        data: updatedHealth,
+      })
+    })
+    // The KPI should update to the new value without waiting for a poll.
+    await waitFor(() => {
+      expect(screen.getByTestId('kpi-total-events').textContent).toContain('99,999')
+    })
+  })
+
+  it('ignores WS messages on channels other than "system"', async () => {
+    vi.mocked(fetch).mockImplementation(
+      mockFetchAllIngestion({
+        health: baseHealthPayload,
+        quality: baseQualityPayload,
+        deadLetter: baseDeadLetterPayload,
+        coverage: baseCoveragePayload,
+        gaps: baseGapsPayload,
+      }),
+    )
+    render(<IngestionHealthPanel />)
+    await waitFor(() => {
+      expect(screen.getByTestId('kpi-total-events')).toBeInTheDocument()
+    })
+    const before = screen.getByTestId('kpi-total-events').textContent
+    await act(async () => {
+      MockWebSocket.instances[0].triggerOpen()
+    })
+    // Push on the wrong channel — health data should be unchanged.
+    await act(async () => {
+      MockWebSocket.instances[0].triggerMessage({
+        channel: 'positions',
+        data: { sources: [], metrics: { total_events: 1 }, generated_at: 0 },
+      })
+    })
+    expect(screen.getByTestId('kpi-total-events').textContent).toBe(before)
+  })
+
+  // ── Live throughput sparkline ──────────────────────────────────────────
+
+  it('renders the live throughput sparkline with a sample after the first health payload', async () => {
+    vi.mocked(fetch).mockImplementation(
+      mockFetchAllIngestion({
+        health: baseHealthPayload,
+        quality: baseQualityPayload,
+        deadLetter: baseDeadLetterPayload,
+        coverage: baseCoveragePayload,
+        gaps: baseGapsPayload,
+      }),
+    )
+    render(<IngestionHealthPanel />)
+    await waitFor(() => {
+      expect(screen.getByTestId('live-throughput-card')).toBeInTheDocument()
+    })
+    // After the initial REST fetch, the live throughput sparkline
+    // should have at least one sample (the Σ EPS from baseHealthPayload
+    // = 12.34 + 0 + 0 = 12.34).
+    await waitFor(() => {
+      const stats = screen.getByTestId('live-throughput-stats')
+      expect(stats.textContent).toContain('last:')
+      expect(stats.textContent).toContain('12.34')
+    })
+  })
+
+  it('appends a new sample to the live throughput sparkline when a WS push arrives', async () => {
+    vi.mocked(fetch).mockImplementation(
+      mockFetchAllIngestion({
+        health: baseHealthPayload,
+        quality: baseQualityPayload,
+        deadLetter: baseDeadLetterPayload,
+        coverage: baseCoveragePayload,
+        gaps: baseGapsPayload,
+      }),
+    )
+    render(<IngestionHealthPanel />)
+    await waitFor(() => {
+      expect(screen.getByTestId('live-throughput-stats')).toBeInTheDocument()
+    })
+    // The initial REST fetch appended the first sample (12.34).
+    expect(screen.getByTestId('live-throughput-stats').textContent).toContain('12.34')
+
+    await act(async () => {
+      MockWebSocket.instances[0].triggerOpen()
+    })
+    // Push a new health payload with a higher total EPS — the sparkline
+    // should reflect the new "last" value (50.00 = 50 + 0 + 0).
+    await act(async () => {
+      MockWebSocket.instances[0].triggerMessage({
+        channel: 'system',
+        data: {
+          ...baseHealthPayload,
+          sources: [
+            { ...baseHealthPayload.sources[0], events_per_second: 50 },
+            ...baseHealthPayload.sources.slice(1),
+          ],
+        },
+      })
+    })
+    await waitFor(() => {
+      expect(screen.getByTestId('live-throughput-stats').textContent).toContain('50.00')
+    })
+  })
+
+  // ── Live error feed ────────────────────────────────────────────────────
+
+  it('renders the live error feed with recent dead-letter items', async () => {
+    vi.mocked(fetch).mockImplementation(
+      mockFetchAllIngestion({
+        health: baseHealthPayload,
+        quality: baseQualityPayload,
+        deadLetter: baseDeadLetterPayload,
+        coverage: baseCoveragePayload,
+        gaps: baseGapsPayload,
+      }),
+    )
+    render(<IngestionHealthPanel />)
+    // Wait for the live error feed rows to populate — the effect that
+    // fills the tape runs AFTER the dead-letter state settles, so we
+    // can't assert on the empty card alone.
+    await waitFor(() => {
+      expect(screen.getAllByTestId('live-error-feed-row').length).toBe(3)
+    })
+    // The badge counter should say "3 events".
+    expect(screen.getByTestId('live-error-feed-count').textContent).toContain('3')
+    // The error message text from the dead-letter payload should
+    // appear in the feed rows.
+    expect(
+      screen.getAllByText(/sqlite3\.OperationalError: database is locked/).length,
+    ).toBeGreaterThanOrEqual(1)
+  })
+
+  it('prepends new dead-letter items to the live error feed as they arrive', async () => {
+    vi.useFakeTimers()
+    // First poll: 2 dead-letter items.
+    const initialDeadLetter = {
+      ...baseDeadLetterPayload,
+      depth: 2,
+      recent: baseDeadLetterPayload.recent.slice(0, 2),
+      error_breakdown: baseDeadLetterPayload.error_breakdown.slice(0, 1),
+    }
+    vi.mocked(fetch).mockImplementation(
+      mockFetchAllIngestion({
+        health: baseHealthPayload,
+        quality: baseQualityPayload,
+        deadLetter: initialDeadLetter,
+        coverage: baseCoveragePayload,
+        gaps: baseGapsPayload,
+      }),
+    )
+    render(<IngestionHealthPanel />)
+    // Flush the initial REST prefetch + setState microtasks.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0)
+    })
+    expect(screen.getAllByTestId('live-error-feed-row').length).toBe(2)
+    // Second poll: a NEW dead-letter item is added (id="new-error-1")
+    // that wasn't in the first snapshot. The feed should grow to 3 rows.
+    const updatedDeadLetter = {
+      ...initialDeadLetter,
+      depth: 3,
+      recent: [
+        {
+          id: 'new-error-1',
+          source: 'timescale_db',
+          timestamp: Math.floor(Date.now() / 1000),
+          payload_summary: 'fundamental_news failed inserts',
+          error: 'asyncpg.exceptions.ForeignKeyViolationError: missing ref',
+          retries: 1,
+        },
+        ...initialDeadLetter.recent,
+      ],
+      error_breakdown: [
+        ...initialDeadLetter.error_breakdown,
+        { reason: 'asyncpg.exceptions.ForeignKeyViolationError: missing ref', count: 1 },
+      ],
+    }
+    vi.mocked(fetch).mockImplementation(
+      mockFetchAllIngestion({
+        health: baseHealthPayload,
+        quality: baseQualityPayload,
+        deadLetter: updatedDeadLetter,
+        coverage: baseCoveragePayload,
+        gaps: baseGapsPayload,
+      }),
+    )
+    // Advance 15 s — the poll fires and the dead-letter state updates.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(15_000)
+    })
+    // The feed should now have 3 rows (the new one + the previous 2).
+    expect(screen.getAllByTestId('live-error-feed-row').length).toBe(3)
+    // The newest row (with the new error message) should be at the top.
+    const rows = screen.getAllByTestId('live-error-feed-row')
+    expect(rows[0].textContent).toContain('ForeignKeyViolationError')
+    // The counter should reflect the new total.
+    expect(screen.getByTestId('live-error-feed-count').textContent).toContain('3')
+  })
+
+  it('renders the empty state when the dead-letter queue is empty', async () => {
+    vi.mocked(fetch).mockImplementation(
+      mockFetchAllIngestion({
+        health: baseHealthPayload,
+        quality: baseQualityPayload,
+        deadLetter: emptyDeadLetterPayload,
+        coverage: baseCoveragePayload,
+        gaps: baseGapsPayload,
+      }),
+    )
+    render(<IngestionHealthPanel />)
+    await waitFor(() => {
+      expect(screen.getByTestId('live-error-feed-empty')).toBeInTheDocument()
+    })
+    expect(
+      screen.getByText(/No ingestion errors observed yet/),
+    ).toBeInTheDocument()
+  })
+
+  it('does NOT duplicate feed entries when the same dead-letter snapshot arrives twice', async () => {
+    vi.useFakeTimers()
+    vi.mocked(fetch).mockImplementation(
+      mockFetchAllIngestion({
+        health: baseHealthPayload,
+        quality: baseQualityPayload,
+        deadLetter: baseDeadLetterPayload,
+        coverage: baseCoveragePayload,
+        gaps: baseGapsPayload,
+      }),
+    )
+    render(<IngestionHealthPanel />)
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0)
+    })
+    expect(screen.getAllByTestId('live-error-feed-row').length).toBe(3)
+    // Advance 15 s — the same dead-letter snapshot arrives again.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(15_000)
+    })
+    // The feed should still have exactly 3 rows — the dedupe ref
+    // prevents the same ids from re-populating the tape.
+    expect(screen.getAllByTestId('live-error-feed-row').length).toBe(3)
   })
 })

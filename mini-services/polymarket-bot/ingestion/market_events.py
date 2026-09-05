@@ -571,6 +571,13 @@ class MarketEventIngester:
         if fire_alert and evt.event_type in ALERT_EVENT_TYPES:
             self._fire_alert(evt)
 
+        # W34-3 — wire strategy-registry adjustments on MARKET_SUSPENDED /
+        # MARKET_RESOLVED. Each call is best-effort so a registry failure
+        # never breaks the event-recording path (the event is already
+        # persisted above). Mirrors the raw_vault mirror's fail-soft
+        # contract.
+        self._wire_strategy_registry(evt)
+
         # Wire ML label generation on MARKET_RESOLVED.
         if wire_ml and evt.event_type == "MARKET_RESOLVED":
             try:
@@ -981,35 +988,84 @@ class MarketEventIngester:
     # ── Alerting ───────────────────────────────────────────────────────
 
     def _fire_alert(self, event: MarketEvent) -> None:
-        """Fire a ``core.alerting`` alert for the high-signal event."""
+        """Fire a ``core.alerting`` alert for the high-signal event.
+
+        W34-3 — uses the primitive-field ``record_alert`` API rather
+        than constructing an ``Alert`` dataclass + calling
+        ``fire_alert``. The primitive-field API is the canonical
+        "one-off alert outside the periodic evaluate() cycle" entry
+        point (W24-8), so the market-event alert path mirrors the
+        strategy-health / dedup / fail-soft contract used everywhere
+        else in the bot.
+
+        Severity mapping (W34-3):
+          * ``MARKET_RESOLVED``   — ``SEVERITY_INFO``    (expected
+            lifecycle transition — no operator action required).
+          * ``MARKET_SUSPENDED``  — ``SEVERITY_WARNING`` (unexpected
+            trading halt MAY require operator attention).
+          * ``MARKET_CLOSED``     — ``SEVERITY_WARNING`` (closure
+            awaiting resolution MAY require operator attention).
+          * ``MARKET_REOPENED``   — ``SEVERITY_INFO``    (expected
+            lifecycle transition — no operator action required).
+
+        Message format:
+          * ``MARKET_RESOLVED`` → ``f"Market <token> resolved: YES|NO|UNKNOWN"``
+            so the operator sees the resolved outcome for P&L attribution.
+          * ``MARKET_SUSPENDED`` → ``f"Market <token> suspended"``.
+          * ``MARKET_CLOSED`` → ``f"Market <token> closed"``.
+          * ``MARKET_REOPENED`` → ``f"Market <token> reopened"``.
+        """
         try:
-            from core.alerting import Alert, alert_engine
-            severity = (
-                "critical" if event.event_type == "MARKET_RESOLVED"
-                else "warning"
-            )
-            alert = Alert(
-                alert_id=f"market_event:{event.event_id}",
-                timestamp=event.timestamp,
-                category="data",
-                name=f"market_{event.event_type.lower()}",
+            from core.alerting import alert_engine
+            event_type_lower = event.event_type.lower()
+            name = event_type_lower
+            category = "market"
+            if event.event_type == "MARKET_RESOLVED":
+                severity = "info"
+                resolved_yes = self._resolve_outcome(event.payload)
+                if resolved_yes is True:
+                    outcome_label = "YES"
+                elif resolved_yes is False:
+                    outcome_label = "NO"
+                else:
+                    outcome_label = "UNKNOWN"
+                message = (
+                    f"Market {event.token_id} resolved: {outcome_label}"
+                )
+            elif event.event_type == "MARKET_SUSPENDED":
+                severity = "warning"
+                message = f"Market {event.token_id} suspended"
+            elif event.event_type == "MARKET_CLOSED":
+                severity = "warning"
+                message = f"Market {event.token_id} closed"
+            elif event.event_type == "MARKET_REOPENED":
+                severity = "info"
+                message = f"Market {event.token_id} reopened"
+            else:  # pragma: no cover — defensive: ALERT_EVENT_TYPES is the gating set
+                severity = "info"
+                message = (
+                    f"{event.event_type} — "
+                    f"{event.question or event.slug or event.token_id[:12]}"
+                )
+            metadata: dict[str, Any] = {
+                "event_id": event.event_id,
+                "event_type": event.event_type,
+                "token_id": event.token_id,
+                "condition_id": event.condition_id,
+                "slug": event.slug,
+                "question": event.question,
+            }
+            if event.event_type == "MARKET_RESOLVED":
+                metadata["resolved_yes"] = self._resolve_outcome(
+                    event.payload,
+                )
+            alert_engine.record_alert(
+                name=name,
+                category=category,
                 severity=severity,
-                message=(
-                    f"{event.event_type} — {event.question or event.slug or event.token_id[:12]}"
-                ),
-                value=None,
-                threshold=None,
-                metadata={
-                    "event_id": event.event_id,
-                    "event_type": event.event_type,
-                    "token_id": event.token_id,
-                    "condition_id": event.condition_id,
-                    "slug": event.slug,
-                    "question": event.question,
-                },
-                acknowledged=False,
+                message=message,
+                metadata=metadata,
             )
-            alert_engine.fire_alert(alert)
             with self._lock:
                 self._alert_count += 1
         except Exception as e:  # noqa: BLE001 — defensive
@@ -1017,6 +1073,92 @@ class MarketEventIngester:
                 "[market_events] alert fire failed for event %s: %s",
                 event.event_id, e,
             )
+
+    # ── W34-3 — strategy-registry wiring ──────────────────────────────
+
+    def _wire_strategy_registry(self, event: MarketEvent) -> None:
+        """Wire the W34-3 strategy-registry adjustments.
+
+        On ``MARKET_SUSPENDED`` the ingester calls
+        ``strategy_registry.pause_for_market(token_id)`` so the pre-
+        submission gate (a future task) can short-circuit orders for
+        the market. ``close_positions_for_market`` is NOT called on
+        suspension (suspension is reversible — a ``MARKET_REOPENED``
+        event can resume trading without triggering a position close).
+
+        On ``MARKET_RESOLVED`` the ingester calls
+        ``strategy_registry.close_positions_for_market(token_id)`` so
+        any active orders for the resolved market are cancelled, AND
+        ``label_backfill_engine.record_outcome(token_id, outcome)``
+        so the resolved label lands in the ML training set immediately
+        (rather than waiting for the daily backfill). The outcome is
+        derived from ``_resolve_outcome``; when unresolvable (``None``)
+        the label write is skipped (deferred to the daily backfill
+        loop) but ``close_positions_for_market`` STILL runs — an
+        unresolved close is still a close; positions must be exited.
+
+        On ``MARKET_REOPENED`` the ingester calls
+        ``strategy_registry.reset_market_state(token_id)`` so the
+        previously paused market is un-paused (the canonical "resume
+        trading" path).
+
+        Each call is best-effort — a registry / label_backfill failure
+        is swallowed (logged at debug) so the event-recording path
+        never breaks (mirrors the raw_vault mirror's fail-soft contract).
+        """
+        if event.event_type == "MARKET_SUSPENDED":
+            try:
+                from strategies.registry import strategy_registry
+                strategy_registry.pause_for_market(event.token_id)
+            except Exception as e:  # noqa: BLE001 — defensive
+                logger.debug(
+                    "[market_events] strategy_registry.pause_for_market "
+                    "failed for %s: %s",
+                    event.token_id, e,
+                )
+        elif event.event_type == "MARKET_RESOLVED":
+            try:
+                from strategies.registry import strategy_registry
+                strategy_registry.close_positions_for_market(event.token_id)
+            except Exception as e:  # noqa: BLE001 — defensive
+                logger.debug(
+                    "[market_events] "
+                    "strategy_registry.close_positions_for_market "
+                    "failed for %s: %s",
+                    event.token_id, e,
+                )
+            # Record the resolved label. Skipped when outcome is
+            # unresolvable (deferred to the daily backfill loop).
+            resolved_yes = None
+            try:
+                resolved_yes = self._resolve_outcome(event.payload)
+            except Exception as e:  # noqa: BLE001 — defensive
+                logger.debug(
+                    "[market_events] _resolve_outcome failed for %s: %s",
+                    event.token_id, e,
+                )
+            if resolved_yes is None:
+                return
+            outcome = 1 if resolved_yes else 0
+            try:
+                from core.label_backfill import label_backfill_engine
+                label_backfill_engine.record_outcome(event.token_id, outcome)
+            except Exception as e:  # noqa: BLE001 — defensive
+                logger.debug(
+                    "[market_events] label_backfill.record_outcome failed "
+                    "for %s: %s",
+                    event.token_id, e,
+                )
+        elif event.event_type == "MARKET_REOPENED":
+            try:
+                from strategies.registry import strategy_registry
+                strategy_registry.reset_market_state(event.token_id)
+            except Exception as e:  # noqa: BLE001 — defensive
+                logger.debug(
+                    "[market_events] "
+                    "strategy_registry.reset_market_state failed for %s: %s",
+                    event.token_id, e,
+                )
 
     # ── State persistence ──────────────────────────────────────────────
 

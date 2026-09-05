@@ -170,6 +170,17 @@ _ENV_REDIRECTS: dict[str, str] = {
     # stats sees a deterministic path (mirrors the W32-4
     # ``LINEAGE_DB_PATH`` convention).
     "MARKET_EVENTS_DB_PATH": str(_TMP_ROOT / "market_events.db"),
+    # W35-4 — late-data handler SQLite db. Module-level singleton
+    # ``ingestion.late_data.late_data_handler`` is constructed at import
+    # time and would otherwise try to mkdir ``/app/data`` (read-only in
+    # the sandbox) — same defensive pattern as the other *_DB env
+    # redirects above. The handler itself falls back to
+    # ``/tmp/late_data.db`` on a non-writable default path, but
+    # redirecting explicitly keeps every SQLite store co-located under
+    # the conftest sandbox so a test that asserts on the handler's
+    # stats sees a deterministic path (mirrors the W32-4
+    # ``LINEAGE_DB_PATH`` / W33-4 ``MARKET_EVENTS_DB_PATH`` convention).
+    "LATE_DATA_DB_PATH": str(_TMP_ROOT / "late_data.db"),
     # Force the canonical trading mode to paper + live disabled so risk-gate
     # tests don't short-circuit at the shadow / live-trading gates inside
     # ``InstitutionalRiskEngine.check_order``.

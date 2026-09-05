@@ -29849,3 +29849,227 @@ Strategy mirrors `DatabaseStatusPanel.test.tsx` +
    the cap is invisible in practice. A future task could add
    pagination if a real-world deployment tracks > 50 stale markets
    at once.
+
+---
+
+## W35-3 — Real-time WebSocket updates for IngestionHealthPanel
+- **Date:** 2026-09-12
+- **Scope:** EDITOR — `src/components/IngestionHealthPanel.tsx` migrated
+  from a 15 s REST poll of `/api/ingestion/health` to the hybrid
+  `useRealtimeData` hook (REST prefetch + WebSocket push on the
+  `system` channel + 15 s polling fallback). Added a Live Throughput
+  sparkline that appends an EPS sample every time a new health payload
+  arrives, a scrolling Live Error Feed tape that prepends new
+  dead-letter items as they arrive, and a "● Live" / "⟳ Polling"
+  badge reflecting the underlying WS transport state. Edit-only —
+  no backend or new files.
+
+### Background / investigation
+- `src/hooks/useRealtimeData.ts` (W11-4) is the project's hybrid
+  data hook: REST prefetch on mount → WebSocket subscription on the
+  bot's `/ws` endpoint → transparent fallback to REST polling when
+  the WS isn't connected. The hook returns `{ data, isLoading,
+  error, isRealtime }` — `isRealtime` flips true only when the
+  embedded `useWebSocket` instance has fired its `onopen` handler,
+  so consumers can render a "Live" / "Polling" badge that honestly
+  reflects the transport state.
+- `src/hooks/useWebSocket.ts` is the underlying connection manager
+  (auto-reconnect with backoff, visibility-aware pause/resume,
+  ref-based callback storage so callers can pass new closures on
+  every render without tearing down the socket). The bot's WS
+  broadcast layer wraps health snapshots in
+  `{ channel: 'system', data: <health> }`; the panel subscribes by
+  passing `wsChannel: 'system'` to `useRealtimeData`.
+- `src/components/OrdersPanel.tsx` (W15-5) already migrated to the
+  same pattern (Live/Polling badge + `useRealtimeData` with the
+  `orders` channel). OrdersPanel.test.tsx established the
+  MockWebSocket test stub pattern (`MockWebSocket.instances[0]`
+  + `triggerOpen()` / `triggerMessage()`) which the W35-3 tests
+  mirror.
+- The existing `IngestionHealthPanel.tsx` (W31-5) polled all five
+  ingestion endpoints in parallel on a 15 s cadence. The W35-3
+  spec asks specifically to migrate the `/api/ingestion/health`
+  endpoint to `useRealtimeData` (with the other four endpoints
+  staying on REST polling), so the panel still issues 4 REST
+  fetches per 15 s cycle via `fetchAll` (one for quality, dead-
+  letter, coverage, gaps) and one extra fetch via useRealtimeData
+  for health when the WS is down.
+
+### Changes
+
+#### `src/components/IngestionHealthPanel.tsx`
+
+1. **Imports.** Added `useRealtimeData` from `@/hooks/useRealtimeData`
+   and `useRef` to the React import list. The existing `Radio`,
+   `AlertTriangle`, `CheckCircle2`, and `Badge` imports already
+   covered the new sections.
+
+2. **Types + constants.** Added a `LiveErrorEvent` interface
+   (id / timestamp / source / message / retries) mirroring the
+   dead-letter recent item shape. Added three constants:
+   `LIVE_EPS_MAX_SAMPLES = 30` (rolling-window cap for the live
+   throughput sparkline), `LIVE_ERROR_FEED_MAX_ROWS = 50` (cap for
+   the live error feed tape, matching TradeTape.maxRows), and
+   `INGESTION_WS_CHANNEL = 'system'` (named constant so the test
+   suite doesn't hardcode the channel string).
+
+3. **State migration.** Removed the local `health` useState; the
+   panel now derives it from `useRealtimeData`'s `data` field.
+   Added `liveEPSHistory: number[]`, `errorFeed: LiveErrorEvent[]`,
+   and `seenErrorIdsRef: Set<string>` (dedupe ref for the error
+   feed). Kept `quality`, `deadLetter`, `coverage`, `gaps`,
+   `loading`, `error`, `retrying`, `dlqRetryResult`, `lastUpdated`.
+
+4. **`fetchAll` refactor.** Removed the `/api/ingestion/health`
+   fetch (now owned by `useRealtimeData`); the function fetches
+   only the four remaining endpoints in parallel. Each non-OK
+   response is swallowed to `null` and surfaces the "endpoint
+   unavailable" fallback in the affected section — same pattern as
+   W31-5, just minus the health endpoint.
+
+5. **Two new effects.**
+   - **Live throughput sampler.** Fires on every new `healthData`
+     payload (REST prefetch, REST poll, OR WS push) and appends
+     `Σ(sources.events_per_second)` to `liveEPSHistory`. Caps at
+     `LIVE_EPS_MAX_SAMPLES`. The effect deps on the object identity
+     of `healthData` — `useRealtimeData` issues a fresh object on
+     every WS / poll update, so the effect re-runs exactly once per
+     new snapshot.
+   - **Live error feed collector.** Walks `deadLetter.recent`,
+     prepends any item whose `id` isn't in `seenErrorIdsRef` to
+     `errorFeed`. Newest entries sort to the top of the tape
+     (mirrors TradeTape's newest-first ordering). The dedupe ref
+     persists across renders so the same DLQ snapshot arriving
+     again via the 15 s poll does NOT re-populate the tape.
+
+6. **Loading + error render.** Loading state now also waits for
+   `healthLoading` (from `useRealtimeData`) — the original
+   `(loading && !health)` check would otherwise flash the empty
+   panel briefly between fetchAll resolving and the hook's initial
+   fetch landing. Error render combines the fetchAll error and the
+   hook's `healthError` into `combinedError = error ?? healthError`
+   so a WS / health-fetch failure is surfaced alongside the other
+   endpoint failures in the same banner.
+
+7. **Header badge.** Replaced the static `15s poll` badge with a
+   `● Live` (Badge variant="success") / `⟳ Polling` (Badge
+   variant="warning") badge driven by `isRealtime`. Same visual
+   convention as OrdersPanel.tsx — green dot when the WS is
+   connected, amber circle when polling.
+
+8. **Two new SectionCards.**
+   - **Live Throughput.** Renders a `Sparkline` over
+     `liveEPSHistory` with a `Radio` icon (green when live, amber
+     when polling). Badge shows `<n>/<max> samples · ws|poll · Σ EPS`.
+     Body shows min / max / last sample values in mono. Empty
+     state shows "Waiting for first health snapshot…" with a spinner.
+   - **Live Error Feed.** Renders a `role="log"` scrolling list
+     (`max-h-64 overflow-y-auto scrollbar-thin`) of error events.
+     Each row: relative timestamp, source badge, truncated error
+     message, optional retry count. Empty state shows "No
+     ingestion errors observed yet." with a green checkmark.
+
+9. **Transient error banner.** Replaced `error` with `combinedError`
+   in the existing banner condition so a WS / health-fetch failure
+   surfaces even when the other endpoints are healthy.
+
+#### `src/components/IngestionHealthPanel.test.tsx`
+
+1. **MockWebSocket stub.** Added the standard `MockWebSocket` class
+   (same shape as OrdersPanel.test.tsx / useRealtimeData.test.ts)
+   and a `beforeEach`/`afterEach` pair that installs / restores it
+   on `global.WebSocket`. Without this stub, `useRealtimeData`'s
+   embedded `useWebSocket` would throw a ReferenceError on mount
+   (jsdom has no native WebSocket constructor) and pollute the
+   test logs with reconnect backoff warnings.
+
+2. **Replaced the "15s poll" badge test.** The original test
+   asserted the static `15s poll` badge rendered. The new test
+   asserts the dynamic `⟳ Polling` badge renders when the WS is
+   not connected AND that the `● Live` badge is absent.
+
+3. **Added 10 new tests.**
+
+| # | Test | Coverage |
+|---|---|---|
+| 1 | renders the "Polling" badge when the WS is not connected | Live/Polling badge — initial state |
+| 2 | flips the badge to "Live" when the WS connects | Live/Polling badge — WS open |
+| 3 | flips back to "Polling" when the WS disconnects | Live/Polling badge — WS close → fallback |
+| 4 | updates the rendered total-events KPI when a new health payload arrives over the WS | Real-time updates via WS push |
+| 5 | ignores WS messages on channels other than "system" | Channel filtering |
+| 6 | renders the live throughput sparkline with a sample after the first health payload | Live throughput sparkline — initial sample |
+| 7 | appends a new sample to the live throughput sparkline when a WS push arrives | Live throughput sparkline — WS push appends |
+| 8 | renders the live error feed with recent dead-letter items | Live error feed — initial population |
+| 9 | prepends new dead-letter items to the live error feed as they arrive | Live error feed — prepends new entries on poll |
+| 10 | renders the empty state when the dead-letter queue is empty | Live error feed — empty state |
+| 11 | does NOT duplicate feed entries when the same dead-letter snapshot arrives twice | Live error feed — id-based dedupe |
+
+   Two of the new tests ("prepends new dead-letter items…" and
+   "does NOT duplicate feed entries…") use `vi.useFakeTimers()` +
+   `vi.advanceTimersByTimeAsync(15_000)` to drive the 15 s poll
+   cycle. They use direct `expect(...)` assertions after the
+   advance instead of `waitFor(...)` because `waitFor` polls on
+   real timers by default and would time out under fake timers
+   (the polling interval never fires).
+
+### Verification
+
+- `cd /home/z/my-project && bun run lint` — clean (`eslint .` exits 0,
+  no warnings, no errors).
+- `bun run test` — **64 test files / 1246 tests, all passing.**
+  The IngestionHealthPanel.test.tsx suite grew from 28 → 39 tests
+  (+11 net: 1 modified badge test + 10 new real-time / live-
+  throughput / live-error-feed tests). All 64 test files in the
+  project still pass.
+
+### Files touched
+
+| Path | Change |
+|---|---|
+| `src/components/IngestionHealthPanel.tsx` | Migrated `/api/ingestion/health` from manual REST polling to `useRealtimeData` (WS channel `system`); refactored `fetchAll` to fetch only the 4 remaining endpoints; added `liveEPSHistory` state + sampler effect; added `errorFeed` state + dedupe-ref collector effect; replaced static `15s poll` badge with Live/Polling badge; added Live Throughput sparkline SectionCard; added Live Error Feed SectionCard; combined `error` + `healthError` into `combinedError` for the loading + banner conditions. |
+| `src/components/IngestionHealthPanel.test.tsx` | Added MockWebSocket stub + `beforeEach`/`afterEach` install/restore; replaced the "15s poll" badge test with a "Polling" badge test; added 10 new tests covering Live/Polling badge transitions, real-time WS updates, channel filtering, live throughput sparkline sampling, live error feed population / prepend / empty / dedupe. |
+
+### Notes / trade-offs
+
+1. **Only the health endpoint migrated to WS.** The W35-3 spec
+   specifically calls out `useRealtimeData('/api/ingestion/health',
+   { wsChannel: 'system', pollInterval: 15000 })`. The other four
+   ingestion endpoints (quality, dead-letter, coverage, gaps) stay
+   on the existing visibility-aware 15 s REST poll via `fetchAll`.
+   Migrating them too would require either 4 separate WS channels
+   (the backend doesn't currently expose them) or a multiplexed
+   channel — out of scope for W35-3.
+2. **Live throughput sparkline is panel-owned, not backend-owned.**
+   The backend's `metrics.throughput_trend` is a server-side
+   sample buffer that ships with the health payload; the new
+   "Live Throughput" sparkline is a *client-side* buffer that
+   appends one sample every time a new health payload arrives
+   (REST or WS). The two cards are intentionally distinct: the
+   backend trend shows the bot's view of EPS over its sampling
+   window; the live trend shows the operator's view of how often
+   the panel itself is receiving updates — a flat line means a
+   healthy WS at a steady rate; gaps mean missed polls or a
+   stalled WS.
+3. **Error feed dedupes by dead-letter item id.** The
+   `seenErrorIdsRef` ref persists across renders so the same DLQ
+   snapshot arriving via REST poll (which returns the N most-
+   recent items every cycle) doesn't re-populate the tape every
+   15 s. A retry that zeroes the backend DLQ counters and a
+   subsequent failure would generate a new id and prepend fresh —
+   the dedupe is by id, not by message text, so transient blips
+   still surface.
+4. **MockWebSocket installed globally for all tests.** The
+   `beforeEach` installs the stub unconditionally because
+   `useRealtimeData` runs `useWebSocket` on every mount — even
+   tests that don't drive the WS need the stub to avoid the
+   `ReferenceError: WebSocket is not defined` thrown by `new
+   WebSocket(getAuthedWsUrl())` in jsdom. Tests that DO drive
+   the WS (Live badge, real-time updates) call
+   `MockWebSocket.instances[0].triggerOpen()` /
+   `triggerMessage()`; tests that don't simply leave the WS in
+   the `CONNECTING` state, which is what the production panel
+   sees before the server accepts the upgrade.
+5. **No sidebar / page.tsx / route wiring changes.** W35-3 extends
+   the existing IngestionHealthPanel (already wired by W31-5);
+   no new route or nav item is needed. The panel renders inside
+   the existing `system-ingestion` view.

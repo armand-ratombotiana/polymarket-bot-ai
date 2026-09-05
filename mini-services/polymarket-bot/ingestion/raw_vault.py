@@ -681,6 +681,39 @@ class RawVault:
             self._duplicate_ignored_count = 0
             self._seen_keys.clear()
 
+    def truncate(self) -> None:
+        """Drop every record from the on-disk SQLite table + clear the
+        in-memory dedup deque.
+
+        W34-4 — test-only helper used by the W34-4 raw-vault replay API
+        test-suite autouse fixture so the ``to_timestamp`` /
+        ``from_timestamp`` filter tests don't see records seeded by a
+        prior test run (the on-disk SQLite file persists across pytest
+        sessions, so without an explicit truncate the filter tests would
+        count records seeded minutes / hours / days ago and fail
+        non-deterministically). Mirrors the ``dead_letter_queue.clear``
+        / ``checkpoint_manager.clear`` pattern in
+        ``tests/conftest.py``'s autouse fixture.
+
+        Production code should NOT call this — the vault's contract is
+        "every record survives for audit". The method is exposed on the
+        public class API so the test-suite can call it without resorting
+        to a private ``_connect`` + raw ``DELETE FROM raw_records`` SQL
+        dance (which would break the moment the schema changes).
+        """
+        with self._lock:
+            self._record_count = 0
+            self._duplicate_count = 0
+            self._invalid_count = 0
+            self._duplicate_ignored_count = 0
+            self._seen_keys.clear()
+        try:
+            with self._connect() as conn:
+                conn.execute("DELETE FROM raw_records")
+                conn.commit()
+        except sqlite3.Error as e:
+            logger.error("[raw_vault] truncate failed: %s", e)
+
     def close(self) -> None:
         """No-op (the vault opens a per-call connection, so there's no
         long-lived connection to close). Kept for API symmetry with

@@ -87,11 +87,21 @@
 // All five endpoints are polled on a 15-second cadence (matches the
 // DatabaseStatusPanel polling rhythm). Polling pauses when the document
 // is hidden and resumes immediately on tab regain.
+//
+// W35-3 — Real-time migration. The /api/ingestion/health endpoint now
+// streams over the `system` WS channel via useRealtimeData; the other
+// four endpoints (quality, dead-letter, coverage, gaps) keep their
+// 15-second REST polling. The panel surfaces a "● Live" / "⟳ Polling"
+// badge reflecting the underlying WS transport state, a live
+// events-per-second sparkline that appends a sample every time a new
+// health payload arrives (WS or poll), and a scrolling "live error
+// feed" that prepends each new dead-letter item as it appears.
 
 'use client'
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { apiFetch } from '@/lib/api'
+import { useRealtimeData } from '@/hooks/useRealtimeData'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -222,10 +232,44 @@ export interface GapsPayload {
 }
 
 // ───────────────────────────────────────────────────────────────────────────
+// W35-3 — Live error feed entry.
+//
+// Mirrors the dead-letter recent item shape but is owned by the panel:
+// each new dead-letter item that arrives (via REST poll OR WS push on
+// the `system` channel) is prepended to `errorFeed` if its `id` hasn't
+// been seen before. The feed is capped at `LIVE_ERROR_FEED_MAX_ROWS`
+// entries (older entries fall off the bottom of the scrolling tape).
+// ───────────────────────────────────────────────────────────────────────────
+
+export interface LiveErrorEvent {
+  id: string
+  timestamp: number
+  source: string
+  message: string
+  retries: number
+}
+
+// ───────────────────────────────────────────────────────────────────────────
 // Constants — endpoints + polling cadence
 // ───────────────────────────────────────────────────────────────────────────
 
 const POLL_INTERVAL_MS = 15_000
+
+// W35-3 — Live throughput sparkline sample cap. We retain the last N
+// events-per-second samples so the sparkline trends smoothly without
+// unbounded memory growth. Each new health payload (REST or WS) appends
+// one sample; the sparkline renders the rolling window.
+const LIVE_EPS_MAX_SAMPLES = 30
+
+// W35-3 — Live error feed row cap. Mirrors the trade-tape cap pattern
+// (TradeTape.maxRows) — newest errors stay at the top, older ones
+// scroll off the bottom of the tape.
+const LIVE_ERROR_FEED_MAX_ROWS = 50
+
+// W35-3 — WS channel that carries ingestion-health push updates. The
+// backend's broadcast layer (mini-services/polymarket-bot/ws/server.py)
+// wraps health snapshots in `{ channel: 'system', data: <health> }`.
+const INGESTION_WS_CHANNEL = 'system'
 
 const HEALTH_ENDPOINT = '/api/ingestion/health'
 const QUALITY_ENDPOINT = '/api/ingestion/quality'
@@ -521,7 +565,24 @@ function SectionCard({
 // ───────────────────────────────────────────────────────────────────────────
 
 export default function IngestionHealthPanel() {
-  const [health, setHealth] = useState<IngestionHealthPayload | null>(null)
+  // W35-3 — Real-time migration. /api/ingestion/health now flows through
+  // useRealtimeData so the panel updates the moment the backend pushes
+  // a new health snapshot on the `system` WS channel. The hook also
+  // owns the REST prefetch + 15s polling fallback for that endpoint, so
+  // the panel no longer fetches `/api/ingestion/health` directly — the
+  // remaining four endpoints (quality, dead-letter, coverage, gaps)
+  // stay on the visibility-aware 15s REST poll below.
+  const {
+    data: healthData,
+    isLoading: healthLoading,
+    error: healthError,
+    isRealtime,
+  } = useRealtimeData<IngestionHealthPayload>(HEALTH_ENDPOINT, {
+    wsChannel: INGESTION_WS_CHANNEL,
+    pollInterval: POLL_INTERVAL_MS,
+  })
+  const health = healthData ?? null
+
   const [quality, setQuality] = useState<IngestionQualityPayload | null>(null)
   const [deadLetter, setDeadLetter] = useState<DeadLetterPayload | null>(null)
   const [coverage, setCoverage] = useState<CoveragePayload | null>(null)
@@ -532,24 +593,37 @@ export default function IngestionHealthPanel() {
   const [dlqRetryResult, setDlqRetryResult] = useState<DeadLetterRetryResult | null>(null)
   const [lastUpdated, setLastUpdated] = useState<number | null>(null)
 
-  // Fetch all five endpoints concurrently. Errors from any individual
-  // endpoint are surfaced as a single banner (mirrors the
-  // DatabaseStatusPanel pattern: the panel keeps rendering whatever it
-  // has, but the operator sees *why* the latest poll failed).
+  // W35-3 — Live throughput sparkline buffer. Every time a new health
+  // payload arrives (REST prefetch, REST poll, or WS push), the effect
+  // below appends the latest total events-per-second across all sources.
+  // The rolling window is capped at LIVE_EPS_MAX_SAMPLES so the
+  // sparkline trends smoothly without unbounded memory growth.
+  const [liveEPSHistory, setLiveEPSHistory] = useState<number[]>([])
+
+  // W35-3 — Live error feed buffer. Each new dead-letter item (by id)
+  // is prepended to the tape; older entries scroll off the bottom past
+  // LIVE_ERROR_FEED_MAX_ROWS. The `seenErrorIdsRef` ref dedupes across
+  // poll / WS pushes — the REST snapshot of the DLQ returns the same
+  // N most-recent items every poll, so without dedupe the tape would
+  // re-fill with the same rows every 15 s.
+  const [errorFeed, setErrorFeed] = useState<LiveErrorEvent[]>([])
+  const seenErrorIdsRef = useRef<Set<string>>(new Set())
+
+  // Fetch the four remaining ingestion endpoints (everything except
+  // /api/ingestion/health, which now flows through useRealtimeData).
+  // Errors from any individual endpoint are surfaced as a single banner
+  // (mirrors the DatabaseStatusPanel pattern: the panel keeps rendering
+  // whatever it has, but the operator sees *why* the latest poll
+  // failed).
   const fetchAll = useCallback(async () => {
     try {
-      const [healthRes, qualityRes, dlqRes, coverageRes, gapsRes] = await Promise.all([
-        apiFetch(HEALTH_ENDPOINT),
+      const [qualityRes, dlqRes, coverageRes, gapsRes] = await Promise.all([
         apiFetch(QUALITY_ENDPOINT),
         apiFetch(DEAD_LETTER_ENDPOINT),
         apiFetch(COVERAGE_ENDPOINT),
         apiFetch(GAPS_ENDPOINT),
       ])
-      if (!healthRes.ok) {
-        throw new Error(`GET ${HEALTH_ENDPOINT} → ${healthRes.status} ${healthRes.statusText}`)
-      }
-      const [h, q, d, c, g] = await Promise.all([
-        healthRes.json() as Promise<IngestionHealthPayload>,
+      const [q, d, c, g] = await Promise.all([
         qualityRes.ok
           ? (qualityRes.json() as Promise<IngestionQualityPayload>)
           : Promise.resolve(null),
@@ -563,7 +637,6 @@ export default function IngestionHealthPanel() {
           ? (gapsRes.json() as Promise<GapsPayload>)
           : Promise.resolve(null),
       ])
-      setHealth(h)
       setQuality(q)
       setDeadLetter(d)
       setCoverage(c)
@@ -577,7 +650,10 @@ export default function IngestionHealthPanel() {
     }
   }, [])
 
-  // Initial fetch + 15s polling, paused when document hidden.
+  // Initial fetch + 15s polling for the four non-health endpoints,
+  // paused when document hidden. /api/ingestion/health polling is owned
+  // by useRealtimeData (which already short-circuits polling when the
+  // WS is connected and pauses ticks when the tab is hidden).
   // Mirrors the visibility-aware pattern used by ObservabilityPanel +
   // DatabaseStatusPanel: the tick re-checks `document.hidden` so a
   // visibility flip between events still short-circuits.
@@ -616,6 +692,58 @@ export default function IngestionHealthPanel() {
       stopPolling()
     }
   }, [fetchAll])
+
+  // W35-3 — Live throughput sparkline sampler. Fires on every new
+  // `healthData` payload (REST prefetch, REST poll, OR WS push) and
+  // appends a sample = Σ(source.events_per_second). The effect deps on
+  // the object identity of `healthData` — useRealtimeData issues a
+  // fresh object on every WS / poll update, so the effect re-runs
+  // exactly once per new snapshot.
+  useEffect(() => {
+    if (!healthData) return
+    const totalEps = (healthData.sources ?? []).reduce(
+      (sum, s) => sum + (Number.isFinite(s.events_per_second) ? s.events_per_second : 0),
+      0,
+    )
+    setLiveEPSHistory((prev) => {
+      const next = [...prev, totalEps]
+      return next.length > LIVE_EPS_MAX_SAMPLES
+        ? next.slice(next.length - LIVE_EPS_MAX_SAMPLES)
+        : next
+    })
+  }, [healthData])
+
+  // W35-3 — Live error feed collector. Inspects the latest dead-letter
+  // recent items and prepends any we haven't seen before (by id). The
+  // dedupe ref persists across renders, so the same DLQ snapshot
+  // arriving again via the 15s poll does NOT re-populate the tape.
+  // Newest entries sort to the top of the tape so the operator sees
+  // the most recent failure first.
+  useEffect(() => {
+    if (!deadLetter?.recent || deadLetter.recent.length === 0) return
+    const newErrors: LiveErrorEvent[] = []
+    // Walk oldest → newest so the final prepend order keeps newest at
+    // the top of the tape after we prepend in sequence.
+    for (const item of deadLetter.recent) {
+      if (item && !seenErrorIdsRef.current.has(item.id)) {
+        seenErrorIdsRef.current.add(item.id)
+        newErrors.push({
+          id: item.id,
+          timestamp: item.timestamp,
+          source: item.source,
+          message: item.error,
+          retries: item.retries,
+        })
+      }
+    }
+    if (newErrors.length === 0) return
+    setErrorFeed((prev) => {
+      const merged = [...newErrors.reverse(), ...prev]
+      return merged.length > LIVE_ERROR_FEED_MAX_ROWS
+        ? merged.slice(0, LIVE_ERROR_FEED_MAX_ROWS)
+        : merged
+    })
+  }, [deadLetter])
 
   // Dead-letter retry: POSTs to the retry endpoint, surfaces the result
   // inline, then re-fetches the dead-letter payload so the operator sees
@@ -669,10 +797,14 @@ export default function IngestionHealthPanel() {
     () => errorBreakdown.reduce((m, e) => Math.max(m, e.count), 0),
     [errorBreakdown],
   )
+  // W35-3 — Combine the fetchAll error and the useRealtimeData error
+  // into a single banner source so a WS / health-fetch failure is
+  // surfaced alongside the other-endpoint failures.
+  const combinedError = error ?? healthError
 
   // ── Render: loading / error / data ──────────────────────────────────────
 
-  if (loading && !health) {
+  if ((loading || healthLoading) && !health) {
     return (
       <div
         className="flex flex-col h-full bg-[#13161e] border border-[#1f2335] rounded-lg overflow-hidden"
@@ -691,10 +823,10 @@ export default function IngestionHealthPanel() {
     )
   }
 
-  if (error && !health) {
+  if (combinedError && !health) {
     return (
       <div className="flex flex-col h-full bg-[#13161e] border border-[#1f2335] rounded-lg overflow-hidden p-4">
-        <ErrorState message={error} onRetry={handleManualRefresh} />
+        <ErrorState message={combinedError} onRetry={handleManualRefresh} />
       </div>
     )
   }
@@ -718,7 +850,28 @@ export default function IngestionHealthPanel() {
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <span className="badge badge-dim text-[9.5px]" data-testid="poll-badge">15s poll</span>
+          {/* W35-3 — Live / Polling badge. Reflects the useRealtimeData
+              transport state: "● Live" when the WS is connected and
+              pushing `system` channel updates, "⟳ Polling" when the
+              WS is handshaking / mid-reconnect / permanently failed
+              (the hook falls back to 15s REST polling in that case). */}
+          {isRealtime ? (
+            <Badge
+              variant="success"
+              className="text-[9.5px] py-0.5"
+              data-testid="realtime-badge"
+            >
+              ● Live
+            </Badge>
+          ) : (
+            <Badge
+              variant="warning"
+              className="text-[9.5px] py-0.5"
+              data-testid="poll-badge"
+            >
+              ⟳ Polling
+            </Badge>
+          )}
           {lastUpdated && (
             <span className="text-[10px] text-[#7e8aaa] mono">
               updated {formatRelativeTime(Math.floor(lastUpdated / 1000))}
@@ -739,14 +892,14 @@ export default function IngestionHealthPanel() {
       </div>
 
       {/* ── Transient fetch error banner (only shown once we have prior data) ── */}
-      {error && health && (
+      {combinedError && health && (
         <div
           className="banner-danger text-xs py-2 px-3 flex items-center justify-between"
           role="alert"
         >
           <span className="flex items-center gap-1.5">
             <AlertTriangle size={12} aria-hidden="true" />
-            <span>{error}</span>
+            <span>{combinedError}</span>
           </span>
           <Button
             variant="outline"
@@ -842,6 +995,132 @@ export default function IngestionHealthPanel() {
           </div>
         </SectionCard>
       )}
+
+      {/* ── W35-3 — Live throughput sparkline ────────────────────────────── */}
+      {/* Distinct from the backend-provided `throughput_trend` above: this
+          sparkline is owned by the panel and appends one sample every
+          time a new health payload arrives (REST prefetch, REST poll,
+          OR WS push). It gives the operator a sense of how quickly the
+          panel itself is receiving updates — a flat line means the WS
+          is healthy and the rate is steady; a gap means a poll was
+          skipped (tab hidden) or the WS stalled. */}
+      <SectionCard
+        icon={Radio}
+        iconClass={isRealtime ? 'text-green-400' : 'text-amber-400'}
+        title="Live Throughput"
+        badge={
+          <span
+            className="text-[10px] text-[#7e8aaa] font-normal mono"
+            data-testid="live-throughput-badge"
+          >
+            {liveEPSHistory.length}/{LIVE_EPS_MAX_SAMPLES} samples ·{' '}
+            {isRealtime ? 'ws' : 'poll'} · Σ EPS
+          </span>
+        }
+        data-testid="live-throughput-card"
+      >
+        {liveEPSHistory.length === 0 ? (
+          <div className="text-xs text-[#7e8aaa] py-3 flex items-center gap-2">
+            <span className="spinner" aria-hidden="true" />
+            Waiting for first health snapshot…
+          </div>
+        ) : (
+          <div className="flex flex-col gap-2">
+            <RechartsSparkline
+              data={liveEPSHistory}
+              color={isRealtime ? '#22c55e' : '#f59e0b'}
+              width="100%"
+              height={48}
+              showLastDot
+            />
+            <div
+              className="flex justify-between text-[10px] text-[#7e8aaa] mono"
+              data-testid="live-throughput-stats"
+            >
+              <span>
+                min: {Math.min(...liveEPSHistory).toFixed(2)}
+              </span>
+              <span>
+                max: {Math.max(...liveEPSHistory).toFixed(2)}
+              </span>
+              <span>
+                last:{' '}
+                {liveEPSHistory[liveEPSHistory.length - 1].toFixed(2)}
+              </span>
+            </div>
+          </div>
+        )}
+      </SectionCard>
+
+      {/* ── W35-3 — Live error feed ──────────────────────────────────────── */}
+      {/* Scrolling tape of ingestion errors (newest at top, like a trade
+          tape). Each new dead-letter item by id is prepended; older
+          entries scroll off the bottom past
+          LIVE_ERROR_FEED_MAX_ROWS. */}
+      <SectionCard
+        icon={AlertTriangle}
+        iconClass="text-red-400"
+        title="Live Error Feed"
+        badge={
+          <span
+            className="text-[10px] text-[#7e8aaa] font-normal mono"
+            data-testid="live-error-feed-count"
+          >
+            {errorFeed.length} event{errorFeed.length === 1 ? '' : 's'}
+          </span>
+        }
+        data-testid="live-error-feed-card"
+      >
+        {errorFeed.length === 0 ? (
+          <div
+            className="text-xs text-green-400 py-3 flex items-center gap-2"
+            data-testid="live-error-feed-empty"
+          >
+            <CheckCircle2 size={14} aria-hidden="true" />
+            No ingestion errors observed yet.
+          </div>
+        ) : (
+          <div
+            className="max-h-64 overflow-y-auto scrollbar-thin"
+            data-testid="live-error-feed-body"
+            role="log"
+            aria-live="off"
+            aria-relevant="additions"
+          >
+            <ul className="divide-y divide-[#1f2335]/50">
+              {errorFeed.map((e, i) => (
+                <li
+                  key={`${e.id}-${i}`}
+                  className="px-2 py-1.5 flex items-start gap-2 text-xs hover:bg-[#13161e]/60 transition-colors"
+                  data-testid="live-error-feed-row"
+                  data-source={e.source}
+                >
+                  <span className="mono text-[10px] text-[#7e8aaa] shrink-0 w-16">
+                    {formatRelativeTime(e.timestamp)}
+                  </span>
+                  <Badge
+                    variant="secondary"
+                    className="text-[9px] px-1.5 py-0 shrink-0"
+                  >
+                    {e.source}
+                  </Badge>
+                  <span
+                    className="text-red-300 truncate flex-1"
+                    title={e.message}
+                  >
+                    {e.message}
+                  </span>
+                  {e.retries > 0 && (
+                    <span className="mono text-[9px] text-amber-400 shrink-0">
+                      ×{e.retries}
+                    </span>
+                  )}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+      </SectionCard>
 
       {/* ── Source health grid ──────────────────────────────────────────── */}
       <SectionCard

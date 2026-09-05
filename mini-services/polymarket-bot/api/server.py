@@ -8382,6 +8382,164 @@ async def get_ingestion_raw_record(
     }
 
 
+# ── Replay ─────────────────────────────────────────────────────────────────
+
+
+@app.post("/api/ingestion/replay", tags=["ingestion"])
+@limiter.limit(WRITE_LIMIT)
+async def replay_raw_vault(
+    request: Request,  # noqa: ARG001 — slowapi requires the `request` arg
+    source: str = Query(
+        ...,
+        description="Required source filter (e.g. ``clob`` / ``gamma`` / "
+                    "``websocket``). Replays every record in the vault "
+                    "matching this source. An empty source name is "
+                    "permitted but will return ``scanned=0``.",
+    ),
+    from_timestamp: float | None = Query(
+        None,
+        description="Optional lower-bound (inclusive) on "
+                    "``event_timestamp``. Records older than this are "
+                    "excluded from the replay.",
+    ),
+    to_timestamp: float | None = Query(
+        None,
+        description="Optional upper-bound (inclusive) on "
+                    "``event_timestamp``. Records newer than this are "
+                    "excluded from the replay.",
+    ),
+    limit: int = Query(
+        1000, ge=1, le=10_000,
+        description="Maximum records to replay in one call (default "
+                    "1000, hard ceiling 10_000 for throughput hygiene).",
+    ),
+):
+    """Re-feed raw vault records through the ingestion pipeline.
+
+    W34-4 — reads records from the W31-1 ``ingestion.raw_vault.raw_vault``
+    singleton filtered by ``source`` (and optionally by timestamp range),
+    then re-runs each record through ``ingestion.pipeline.pipeline.process``
+    so an operator can replay a backfill / recover from a downstream
+    outage / re-process records after a pipeline fix without waiting for
+    the next poll cycle.
+
+    The replay is sync (the pipeline's ``process`` is sync) and runs
+    inline so the operator's POST returns with the full summary. A
+    future task could offload the replay to a background task with a
+    job-id correlation token; for now the inline approach is honest
+    (the operator sees the exact count of records replayed) and
+    bounded (the ``limit`` param caps the work).
+
+    Each record's outcome is tallied into one of five buckets:
+      * ``reprocessed`` — the pipeline accepted the record
+        (``quality_state == "valid"``).
+      * ``duplicates`` — the pipeline's dedup layer rejected it
+        (``quality_state == "duplicate"``).
+      * ``invalid`` — the pipeline's validator rejected it
+        (``quality_state == "invalid"``).
+      * ``stale`` — the pipeline's staleness override rejected it
+        (``quality_state == "stale"``).
+      * ``errors`` — the pipeline raised an exception OR returned an
+        unknown ``quality_state`` (defensive; should never happen).
+
+    Args:
+        source: Required source filter (e.g. ``clob`` / ``gamma``).
+        from_timestamp: Optional lower-bound on ``event_timestamp``.
+        to_timestamp: Optional upper-bound on ``event_timestamp``.
+        limit: Maximum records to replay (default 1000, hard ceiling
+            10_000).
+
+    Returns:
+        ``{"source": str, "from_timestamp": float | None,
+        "to_timestamp": float | None, "limit": int, "scanned": int,
+        "reprocessed": int, "duplicates": int, "invalid": int,
+        "stale": int, "errors": int, "error_samples": list[str],
+        "vault_stats": dict, "replayed_at": float}`` — the operator
+        sees the exact count of records replayed + bucketed outcomes
+        so they can verify the replay had the expected effect.
+    """
+    from ingestion.raw_vault import raw_vault
+
+    # Read records from the vault.
+    records = list(raw_vault.replay_range(
+        start_ts=from_timestamp,
+        end_ts=to_timestamp,
+        source=source,
+        limit=limit,
+    ))
+
+    reprocessed = 0
+    duplicates = 0
+    invalid = 0
+    stale = 0
+    errors = 0
+    error_samples: list[str] = []
+
+    # Lazily import the pipeline so the route stays importable if the
+    # pipeline module isn't loaded yet (mirrors the lazy-import discipline
+    # used by every other ingestion route).
+    try:
+        from ingestion.pipeline import pipeline as _pipeline
+    except Exception as e:  # noqa: BLE001 — defensive
+        log.error(
+            "[api.ingestion.replay] pipeline import failed: %s — "
+            "replay aborted, %d records unprocessed", e, len(records),
+        )
+        errors += len(records)
+        error_samples.append(f"pipeline import failed: {type(e).__name__}: {e}")
+        _pipeline = None
+
+    if _pipeline is not None:
+        for rec in records:
+            try:
+                result = _pipeline.process(
+                    source=str(rec.get("source") or source),
+                    source_id=str(rec.get("source_id") or ""),
+                    event_type=str(rec.get("event_type") or "snapshot"),
+                    raw_payload=rec.get("raw_payload"),
+                    event_time=rec.get("event_timestamp"),
+                )
+                state = getattr(result, "quality_state", "") or ""
+                if state == "valid":
+                    reprocessed += 1
+                elif state == "duplicate":
+                    duplicates += 1
+                elif state == "invalid":
+                    invalid += 1
+                elif state == "stale":
+                    stale += 1
+                else:  # pragma: no cover — defensive
+                    errors += 1
+                    if len(error_samples) < 10:
+                        error_samples.append(
+                            f"unknown quality_state={state!r} for "
+                            f"observation_id={rec.get('observation_id')!r}"
+                        )
+            except Exception as e:  # noqa: BLE001 — defensive: replay must never raise
+                errors += 1
+                if len(error_samples) < 10:
+                    error_samples.append(
+                        f"pipeline.process raised: {type(e).__name__}: {e}"
+                    )
+
+    scanned = len(records)
+    return {
+        "source": source,
+        "from_timestamp": from_timestamp,
+        "to_timestamp": to_timestamp,
+        "limit": limit,
+        "scanned": scanned,
+        "reprocessed": reprocessed,
+        "duplicates": duplicates,
+        "invalid": invalid,
+        "stale": stale,
+        "errors": errors,
+        "error_samples": error_samples,
+        "vault_stats": raw_vault.get_stats(),
+        "replayed_at": time.time(),
+    }
+
+
 # ── Backfill ─────────────────────────────────────────────────────────────────
 
 
@@ -9220,3 +9378,403 @@ async def get_market_events(
         "generated_at": time.time(),
     }
 
+
+# ── W35-4 — Late data + corrections endpoints ─────────────────────────────────
+# Additive: appends two read-only endpoints under ``/api/ingestion/*`` so
+# an operator (or a future React panel) can audit the late-arrival log +
+# the correction log that the W35-4 ``ingestion.late_data.late_data_handler``
+# singleton records on every late-arriving record + every applied
+# correction.
+#
+#   GET  /api/ingestion/late-arrivals   recent late-arriving data
+#   GET  /api/ingestion/corrections     recent data corrections
+#
+# Auth enforced by ``enforce_api_auth`` (neither path is in
+# ``PUBLIC_PATHS``). Rate-limited by ``READ_LIMIT`` so a dashboard polling
+# every 15 s can't starve the trading path. Both endpoints read directly
+# from the ``late_data_handler`` SQLite store — no in-memory cache, so the
+# response always reflects the latest ``record_late_arrival`` /
+# ``record_correction`` call.
+#
+# Honesty contract (mirrors the W17-4 / W31-5 "honest health" convention):
+#   * Every record comes from the W35-4 ``ingestion.late_data`` SQLite
+#     store. An empty list is the honest zero-state when no late arrivals
+#     / corrections have been logged yet — no fabrication.
+#   * When the late_data_handler singleton could not be constructed at
+#     module-import time (extremely rare — the constructor falls back to
+#     ``/tmp/late_data.db`` on a non-writable default path), the endpoint
+#     returns HTTP 503 with an explanatory body rather than an empty 200
+#     (so an operator can distinguish "no late arrivals today" from
+#     "the late-data subsystem is broken").
+#
+# Import strategy: the ``ingestion.late_data`` import is lazy (inside
+# ``_resolve_late_data_handler``) so ``api.server`` imports cleanly even
+# when the sibling ``tests/ingestion/`` package shadows our top-level
+# ``ingestion`` package during the test collection (mirrors the lazy-
+# import pattern used by ``_resolve_lineage_tracker`` /
+# ``_resolve_market_event_ingester``).
+
+
+def _resolve_late_data_handler():
+    """Return the module-level ``late_data_handler`` singleton, or
+    ``None`` when its construction failed at module-import time.
+
+    Mirrors the ``_resolve_lineage_tracker`` /
+    ``_resolve_market_event_ingester`` defensive-access pattern. The
+    W35-4 ``ingestion.late_data`` module's singleton is constructed
+    defensively (a SQLite ``_init_db`` failure is logged + swallowed,
+    falling back to ``/tmp/late_data.db``), so this helper practically
+    never returns ``None`` in production — but a downstream consumer
+    still needs to guard against ``None`` because both endpoints no-op
+    with a 503 when the singleton is unavailable.
+
+    Lazy import: the ``ingestion.late_data`` module is imported INSIDE
+    this helper (NOT at the top of ``api/server.py``) so the production
+    ``api.server`` module imports cleanly even when a sibling
+    ``tests/ingestion/`` package shadows our top-level ``ingestion``
+    package during pytest collection (mirrors the
+    ``_resolve_lineage_tracker`` defensive-import pattern).
+    """
+    try:
+        from ingestion.late_data import late_data_handler as _singleton
+    except ImportError:  # pragma: no cover — defensive
+        return None
+    if _singleton is None:
+        return None
+    return _singleton
+
+
+@app.get("/api/ingestion/corrections", tags=["ingestion"])
+@limiter.limit(READ_LIMIT)
+async def get_ingestion_corrections(
+    request: Request,  # noqa: ARG001 — slowapi requires the `request` arg
+    limit: int = Query(
+        50,
+        ge=1,
+        le=1000,
+        description=(
+            "Maximum number of recent corrections to return (default "
+            "50, hard ceiling 1000 for response-size hygiene)."
+        ),
+    ),
+    observation_id: str | None = Query(
+        None,
+        description=(
+            "Optional filter — when set, only corrections applied to "
+            "the given raw-vault ``observation_id`` are returned. "
+            "``None`` (default) returns corrections across every "
+            "observation."
+        ),
+    ),
+    reason: str | None = Query(
+        None,
+        description=(
+            "Optional reason filter. Must be one of the canonical "
+            "``CORRECTION_REASONS`` (``exchange_cancel`` / "
+            "``exchange_correction`` / ``reconciliation`` / "
+            "``schema_migration`` / ``manual_override`` / "
+            "``late_fill`` / ``resolution_late`` / ``out_of_order`` / "
+            "``other``). ``None`` (default) returns every reason."
+        ),
+    ),
+):
+    """Get recent data corrections.
+
+    Returns the most recent corrections recorded by the W35-4
+    ``ingestion.late_data.late_data_handler`` singleton (the SQLite-
+    backed correction log), ordered by ``corrected_at`` descending
+    (most-recent-first). Each correction carries the full
+    ``old_value`` / ``new_value`` JSON (parsed back from the SQLite
+    TEXT cell so the caller sees the original Python object) plus the
+    ``reason`` / ``actor`` / ``metadata`` so an operator can audit
+    "what was corrected, when, by whom, and why" without grepping
+    server logs.
+
+    Args:
+        limit: Maximum corrections to return (default 50, hard ceiling
+            1000).
+        observation_id: Optional raw-vault observation filter.
+        reason: Optional reason filter.
+
+    Returns:
+        ``{"corrections": [...], "count": N, "handler_stats": {...},
+        "generated_at": float}`` — the ``handler_stats`` block mirrors
+        ``LateDataHandler.get_stats`` so the operator can see the
+        running late_count / correction_count / late-rate alongside
+        the recent corrections.
+
+    Returns HTTP 503 with an ``{"error": "late data handler
+    unavailable"}`` body when the singleton could not be constructed
+    at module-import time (extremely rare — the constructor falls
+    back to ``/tmp/late_data.db`` on a non-writable default path).
+    """
+    handler = _resolve_late_data_handler()
+    if handler is None:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "error": "late data handler unavailable",
+                "generated_at": time.time(),
+            },
+        )
+    corrections = handler.get_corrections(
+        limit=limit,
+        observation_id=observation_id,
+        reason=reason,
+    )
+    # Serialise the dataclasses into JSON-friendly dicts (the
+    # ``old_value`` / ``new_value`` are already JSON-parsed by
+    # ``_row_to_correction`` so they round-trip cleanly through
+    # ``json.dumps``).
+    serialised = [
+        {
+            "correction_id": c.correction_id,
+            "observation_id": c.observation_id,
+            "source": c.source,
+            "source_id": c.source_id,
+            "field_path": c.field_path,
+            "old_value": c.old_value,
+            "new_value": c.new_value,
+            "reason": c.reason,
+            "actor": c.actor,
+            "metadata": c.metadata,
+            "corrected_at": c.corrected_at,
+        }
+        for c in corrections
+    ]
+    return {
+        "corrections": serialised,
+        "count": len(serialised),
+        "observation_id_filter": observation_id,
+        "reason_filter": reason,
+        "handler_stats": handler.get_stats(),
+        "generated_at": time.time(),
+    }
+
+
+@app.get("/api/ingestion/late-arrivals", tags=["ingestion"])
+@limiter.limit(READ_LIMIT)
+async def get_ingestion_late_arrivals(
+    request: Request,  # noqa: ARG001 — slowapi requires the `request` arg
+    limit: int = Query(
+        50,
+        ge=1,
+        le=1000,
+        description=(
+            "Maximum number of recent late arrivals to return "
+            "(default 50, hard ceiling 1000 for response-size "
+            "hygiene)."
+        ),
+    ),
+    source: str | None = Query(
+        None,
+        description=(
+            "Optional filter — when set, only late arrivals from the "
+            "given source (``clob`` / ``gamma`` / ``websocket`` / …) "
+            "are returned. ``None`` (default) returns late arrivals "
+            "across every source."
+        ),
+    ),
+    token_id: str | None = Query(
+        None,
+        description=(
+            "Optional filter — when set, only late arrivals for the "
+            "given Polymarket market token are returned. ``None`` "
+            "(default) returns late arrivals across every market."
+        ),
+    ),
+):
+    """Get recent late-arriving data.
+
+    Returns the most recent late-arriving records logged by the W35-4
+    ``ingestion.late_data.late_data_handler`` singleton (the SQLite-
+    backed late-arrival log), ordered by ``recorded_at`` descending
+    (most-recent-first). Each item carries the source / source_id /
+    event_type / event_time / ingestion_time / lateness_seconds plus
+    the optional ``observation_id`` (joining back to the raw vault
+    row) so an operator can audit "what arrived late, how late, and
+    where does it map to in the audit trail?" without grepping server
+    logs.
+
+    Args:
+        limit: Maximum late arrivals to return (default 50, hard
+            ceiling 1000).
+        source: Optional source filter.
+        token_id: Optional token filter.
+
+    Returns:
+        ``{"late_arrivals": [...], "count": N, "handler_stats": {...},
+        "generated_at": float}`` — the ``handler_stats`` block mirrors
+        ``LateDataHandler.get_stats`` so the operator can see the
+        running late_count / correction_count / late-rate alongside
+        the recent late arrivals.
+
+    Returns HTTP 503 with an ``{"error": "late data handler
+    unavailable"}`` body when the singleton could not be constructed
+    at module-import time (extremely rare — the constructor falls
+    back to ``/tmp/late_data.db`` on a non-writable default path).
+    """
+    handler = _resolve_late_data_handler()
+    if handler is None:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "error": "late data handler unavailable",
+                "generated_at": time.time(),
+            },
+        )
+    lates = handler.get_late_arrivals(
+        limit=limit,
+        source=source,
+        token_id=token_id,
+    )
+    serialised = [
+        {
+            "late_id": la.late_id,
+            "observation_id": la.observation_id,
+            "source": la.source,
+            "source_id": la.source_id,
+            "event_type": la.event_type,
+            "event_time": la.event_time,
+            "ingestion_time": la.ingestion_time,
+            "lateness_seconds": la.lateness_seconds,
+            "token_id": la.token_id,
+            "metadata": la.metadata,
+            "recorded_at": la.recorded_at,
+        }
+        for la in lates
+    ]
+    return {
+        "late_arrivals": serialised,
+        "count": len(serialised),
+        "source_filter": source,
+        "token_id_filter": token_id,
+        "handler_stats": handler.get_stats(),
+        "generated_at": time.time(),
+    }
+
+
+# ── W34-5 — Source reliability endpoint ─────────────────────────────────────
+# Additive: appends a single read-only endpoint under ``/api/ingestion/*``
+# so an operator (or a future React panel) can audit the per-source
+# reliability scores the W34-5 ``ingestion.reliability.reliability_tracker``
+# singleton computes from the running 24h / 7d / 30d windows of
+# ``record_attempt`` / ``record_gap`` / ``record_rate_limit`` calls.
+#
+#   GET  /api/ingestion/reliability   per-source reliability snapshots
+#
+# Auth enforced by ``enforce_api_auth`` (this path is NOT in ``PUBLIC_PATHS``).
+# Rate-limited by ``READ_LIMIT`` so a dashboard polling every 15 s can't
+# starve the trading path. The endpoint reads directly from the
+# ``reliability_tracker`` in-memory singleton — no on-disk state, so the
+# response always reflects the latest ``record_attempt`` call (and
+# resets to the zero-state on every process restart).
+#
+# Honesty contract (mirrors the W17-4 / W31-5 "honest health" convention):
+#   * Every score comes from the W34-5 ``compute_score`` weighted sum
+#     over four 0..1 inputs (success-rate / latency-consistency /
+#     gap-frequency / error-recovery). An empty tracker returns
+#     ``count=0`` and ``avg_score=0.0`` — no fabrication.
+#   * When the ``reliability_tracker`` singleton could not be imported
+#     (e.g. a sibling ``tests/ingestion/`` package shadowed our
+#     top-level ``ingestion`` package during a misconfigured test
+#     collection), the endpoint returns HTTP 503 with an explanatory
+#     body rather than an empty 200 (so an operator can distinguish
+#     "no sources observed yet" from "the reliability subsystem is
+#     broken").
+
+
+def _resolve_reliability_tracker():
+    """Return the module-level ``reliability_tracker`` singleton, or
+    ``None`` when its module could not be imported.
+
+    Mirrors the ``_resolve_lineage_tracker`` /
+    ``_resolve_market_event_ingester`` defensive-access pattern. The
+    W34-5 ``ingestion.reliability`` module's singleton is constructed
+    defensively so this helper practically never returns ``None`` in
+    production — but a downstream consumer still needs to guard against
+    ``None`` because the endpoint no-ops with a 503 when the singleton
+    is unavailable.
+
+    Lazy import: the ``ingestion.reliability`` module is imported INSIDE
+    this helper (NOT at the top of ``api/server.py``) so the production
+    ``api.server`` module imports cleanly even when a sibling
+    ``tests/ingestion/`` package shadows our top-level ``ingestion``
+    package during pytest collection (mirrors the lazy-import pattern
+    used by ``_resolve_lineage_tracker``).
+    """
+    try:
+        from ingestion.reliability import reliability_tracker as _singleton
+    except ImportError:  # pragma: no cover — defensive
+        return None
+    if _singleton is None:
+        return None
+    return _singleton
+
+
+@app.get("/api/ingestion/reliability", tags=["ingestion"])
+@limiter.limit(READ_LIMIT)
+async def get_ingestion_reliability(
+    request: Request,  # noqa: ARG001 — slowapi requires the `request` arg
+    source: str | None = Query(
+        None,
+        description=(
+            "Optional filter — when set, only the reliability snapshot "
+            "for the given source (``clob_rest`` / ``gamma_rest`` / …) "
+            "is returned. ``None`` (default) returns the snapshot for "
+            "every source the tracker has observed."
+        ),
+    ),
+):
+    """Get per-source reliability snapshots.
+
+    Returns the W34-5 ``ingestion.reliability.reliability_tracker``'s
+    per-source snapshots (uptime %, error rate, avg latency, gap
+    frequency, rate-limit hits, recent events, score inputs) so an
+    operator (or a future React panel) can audit the health of every
+    data source the bot ingests from.
+
+    Args:
+        source: Optional source filter. When set, only the snapshot for
+            that source is returned (under the ``sources`` key, keyed
+            by source name — a single-entry dict for consistency with
+            the unfiltered response). When ``None`` (default), the
+            snapshot for every source is returned.
+
+    Returns:
+        ``{"count": N, "sources": {source_name: {...}, ...},
+        "avg_score": float, "generated_at": float}`` — the
+        ``avg_score`` is the mean of every source's ``score`` field
+        (0.0 when the tracker is empty, so the operator dashboard
+        shows "no data" rather than a fabricated plausible-looking
+        number).
+
+    Returns HTTP 503 with an ``{"error": "reliability tracker
+    unavailable"}`` body when the singleton could not be imported
+    (extremely rare — the module is a plain Python file with no
+    side-effectful imports).
+    """
+    tracker = _resolve_reliability_tracker()
+    if tracker is None:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "error": "reliability tracker unavailable",
+                "generated_at": time.time(),
+            },
+        )
+    sources = tracker.get_reliability(source=source)
+    # ``get_reliability(source="X")`` returns ``{}`` when the source is
+    # unknown — surface that as a 200 with count=0 so the operator can
+    # distinguish "no data for this source yet" from "tracker broken".
+    if not isinstance(sources, dict):
+        sources = {}
+    scores = [s.get("score", 0.0) for s in sources.values()]
+    avg_score = (sum(scores) / len(scores)) if scores else 0.0
+    return {
+        "count": len(sources),
+        "sources": sources,
+        "avg_score": avg_score,
+        "source_filter": source,
+        "generated_at": time.time(),
+    }

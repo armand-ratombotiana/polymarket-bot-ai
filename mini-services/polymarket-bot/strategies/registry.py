@@ -209,6 +209,15 @@ class StrategyRegistry:
         # when the strategy hasn't been instantiated yet — e.g. an
         # out-of-sample failure detected before live deployment).
         self._disabled: set[str] = set()
+        # W34-3 — per-market pause / close state. ``_paused_markets``
+        # holds token_ids for which the pre-submission gate should
+        # short-circuit (suspended OR closed markets); ``_closed_markets``
+        # holds token_ids that are permanently closed (resolved markets
+        # — close_positions_for_market has been called). A closed market
+        # is also "paused" (no new orders should land), so
+        # ``close_positions_for_market`` adds the token to BOTH sets.
+        self._paused_markets: set[str] = set()
+        self._closed_markets: set[str] = set()
 
     def get_catalog(self, implemented_only: bool = False) -> list[dict]:
         """Return the catalog as a list of plain dicts.
@@ -403,6 +412,99 @@ class StrategyRegistry:
         """W24-8 — check whether a strategy is currently auto-disabled."""
         canonical_id = _LEGACY_ALIASES.get(strategy_id, strategy_id)
         return canonical_id in self._disabled
+
+    # ── W34-3 — per-market pause / close state ──────────────────────────────
+    # The MarketEventIngester calls these methods on MARKET_SUSPENDED and
+    # MARKET_RESOLVED events so the pre-submission gate (a future task)
+    # can short-circuit orders for markets that are paused (suspended) or
+    # permanently closed (resolved). The state lives on the registry so a
+    # single ``is_market_paused(token_id)`` lookup is the canonical gate
+    # every call site (paper_sim, live broker, shadow trader) can check.
+
+    def pause_for_market(self, token_id: str) -> None:
+        """Mark ``token_id`` as paused (no new orders should land).
+
+        Called by ``ingestion.market_events.MarketEventIngester.record_event``
+        on a ``MARKET_SUSPENDED`` event. Idempotent — calling twice with
+        the same token_id is a no-op (set semantics). An empty ``token_id``
+        is a defensive no-op (the ingester should never call this with an
+        empty id, but the guard keeps the contract honest).
+
+        Note: a paused market is NOT closed — a subsequent
+        ``MARKET_REOPENED`` event can resume trading by calling
+        ``reset_market_state(token_id)``. ``reset_market_state`` is the
+        canonical un-pause path; this method only adds to the set.
+        """
+        if not token_id:
+            return
+        self._paused_markets.add(token_id)
+
+    def close_positions_for_market(self, token_id: str) -> None:
+        """Mark ``token_id`` as permanently closed (resolved market).
+
+        Called by ``ingestion.market_events.MarketEventIngester.record_event``
+        on a ``MARKET_RESOLVED`` event. A closed market is also "paused"
+        (no new orders should land) so the token is added to BOTH the
+        ``_closed_markets`` and ``_paused_markets`` sets. Idempotent —
+        calling twice with the same token_id is a no-op. An empty
+        ``token_id`` is a defensive no-op.
+
+        Additionally iterates every running strategy instance and clears
+        any active orders for the market across the ``_active_orders``
+        dict on each instance. Each concrete strategy (e.g.
+        ``MarketMakerStrategy`` / ``ArbScannerStrategy``) tracks its
+        per-market orders in ``self._active_orders`` so the close call
+        can fan out across every running strategy without each strategy
+        having to register a per-market callback.
+        """
+        if not token_id:
+            return
+        self._closed_markets.add(token_id)
+        self._paused_markets.add(token_id)
+        # Fan out across every running strategy instance — clear any
+        # active orders for this market. ``_active_orders`` is a
+        # ``dict[token_id, order_id]`` on each instance, so popping the
+        # token_id is the canonical "cancel any open order for this
+        # market" signal. Best-effort — a strategy without the
+        # ``_active_orders`` attr (or whose attr isn't a dict) is
+        # silently skipped (the contract is "best-effort close, never
+        # raise").
+        for inst in self._instances.values():
+            orders = getattr(inst, "_active_orders", None)
+            if not isinstance(orders, dict):
+                continue
+            try:
+                orders.pop(token_id, None)
+            except Exception as e:  # noqa: BLE001 — defensive: close must never raise
+                log.debug(
+                    "[strategy_registry] close_positions_for_market(%s) "
+                    "instance %s cleanup error: %s",
+                    token_id, getattr(inst, "name", "?"), e,
+                )
+
+    def reset_market_state(self, token_id: str | None = None) -> None:
+        """Clear the per-market pause / close state.
+
+        When ``token_id`` is supplied, clears ONLY that token's state
+        (used by ``MARKET_REOPENED`` to resume trading on a previously
+        suspended market). When ``token_id`` is ``None``, clears ALL
+        market state (used by the test-suite autouse fixture so a prior
+        test's pause / close calls don't leak into the next test).
+        """
+        if token_id is None:
+            self._paused_markets.clear()
+            self._closed_markets.clear()
+            return
+        self._paused_markets.discard(token_id)
+        self._closed_markets.discard(token_id)
+
+    def is_market_paused(self, token_id: str) -> bool:
+        """Return True iff ``token_id`` is paused (suspended or closed)."""
+        return token_id in self._paused_markets
+
+    def is_market_closed(self, token_id: str) -> bool:
+        """Return True iff ``token_id`` is permanently closed (resolved)."""
+        return token_id in self._closed_markets
 
     def get_active_instances(self) -> dict[str, BaseStrategy]:
         return self._instances
