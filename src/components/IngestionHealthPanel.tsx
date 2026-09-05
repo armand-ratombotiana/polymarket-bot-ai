@@ -124,9 +124,16 @@ import {
   Inbox,
   Layers,
   PlugZap,
+  Power,
   Radio,
   RefreshCw,
+  RotateCw,
   Server,
+  Settings,
+  ShieldCheck,
+  Play,
+  Square,
+  Trash2,
   Unplug,
   XCircle,
   Zap,
@@ -1006,6 +1013,98 @@ export default function IngestionHealthPanel() {
     fetchAll()
   }, [fetchAll])
 
+  // W39-1 — Operational action dispatcher. Triggered by the
+  // ConfirmationDialog's onConfirm callback. Maps each dialog `kind` to
+  // its corresponding WRITE endpoint (start / stop / retry / launch
+  // backfill / clear DLQ / replay), posts the request, surfaces the
+  // result inline via `lastActionResult`, then refreshes the panel so
+  // the operator sees the post-action state without waiting for the
+  // next 15s poll tick. The dialog stays open (loading=true) while the
+  // request is in flight; it closes in the finally block once the
+  // result has been recorded.
+  const handleConfirmAction = useCallback(
+    async (kind: ConfirmDialogState['kind']) => {
+      setActionPending(true)
+      setLastActionResult(null)
+      let res: Response | null = null
+      try {
+        switch (kind) {
+          case 'start':
+            res = await apiFetch(PIPELINE_START_ENDPOINT, { method: 'POST' })
+            break
+          case 'stop':
+            res = await apiFetch(PIPELINE_STOP_ENDPOINT, { method: 'POST' })
+            break
+          case 'retry-failed':
+            res = await apiFetch(DEAD_LETTER_RETRY_ENDPOINT, { method: 'POST' })
+            break
+          case 'launch-backfill':
+            res = await apiFetch(`${BACKFILL_MARKETS_ENDPOINT}?resume=true`, {
+              method: 'POST',
+            })
+            break
+          case 'clear-dlq':
+            res = await apiFetch(DEAD_LETTER_ENDPOINT, { method: 'DELETE' })
+            break
+          case 'replay-events':
+            res = await apiFetch(`${REPLAY_ENDPOINT}?source=${DEFAULT_REPLAY_SOURCE}`, {
+              method: 'POST',
+            })
+            break
+        }
+        if (!res) {
+          setLastActionResult({
+            ok: false,
+            message: `Unknown action: ${kind}`,
+            attempted_at: Date.now() / 1000,
+          })
+          return
+        }
+        const ok = res.ok
+        let body: { message?: string } = {}
+        if (ok) {
+          try {
+            body = (await res.json()) as { message?: string }
+          } catch {
+            // Non-JSON response (e.g. 204 No Content) — fall back to a
+            // generic success message.
+            body = {}
+          }
+        }
+        setLastActionResult({
+          ok,
+          message: ok
+            ? body.message ?? `${kind} succeeded`
+            : `${kind} failed: HTTP ${res.status} ${res.statusText}`,
+          attempted_at: Date.now() / 1000,
+        })
+        // Re-fetch the dead-letter queue if the action touched it so
+        // the operator sees the post-action queue depth immediately.
+        if (kind === 'retry-failed' || kind === 'clear-dlq') {
+          try {
+            const dlqRes = await apiFetch(DEAD_LETTER_ENDPOINT)
+            if (dlqRes.ok) setDeadLetter(await dlqRes.json())
+          } catch {
+            // Best-effort refresh — the next 15s poll will reconcile.
+          }
+        }
+        // Always re-fetch the full operational state so the pipeline /
+        // backfill / reliability surfaces reflect the post-action truth.
+        fetchAll()
+      } catch (e) {
+        setLastActionResult({
+          ok: false,
+          message: e instanceof Error ? e.message : String(e),
+          attempted_at: Date.now() / 1000,
+        })
+      } finally {
+        setActionPending(false)
+        setConfirmDialog(null)
+      }
+    },
+    [fetchAll],
+  )
+
   // ── Derived display values ──────────────────────────────────────────────
 
   const metrics = health?.metrics ?? null
@@ -1403,7 +1502,7 @@ export default function IngestionHealthPanel() {
             Quality endpoint unavailable — falling back to no-data state.
           </div>
         ) : (
-          <div className="grid grid-cols-2 md:grid-cols-5 gap-2.5 text-xs">
+          <div className="grid-kpi text-xs">
             <div>
               <div className="text-[10px] uppercase tracking-wider text-[#7e8aaa] mb-0.5">
                 Overall Score
@@ -1793,6 +1892,386 @@ export default function IngestionHealthPanel() {
             )}
           </div>
         )}
+      </SectionCard>
+
+      {/* ── W39-7 — Pipeline Status ────────────────────────────────── */}
+      {/* Live snapshot of the ingestion pipeline's running state + the
+          Start / Stop controls. Split out from the old monolithic
+          "Operational Controls" card (W39-1) so the pipeline state has
+          its own scannable header instead of being buried inside a
+          multi-purpose card. The Start / Stop buttons open the
+          confirmation dialog (POST /api/ingestion/pipeline/{start,stop});
+          the result surfaces in the action-result banner at the bottom
+          of the Operational Controls card below. */}
+      <SectionCard
+        icon={Power}
+        iconClass={
+          pipelineStatus?.running ? 'text-green-400' : 'text-amber-400'
+        }
+        title="Pipeline Status"
+        badge={
+          pipelineStatus ? (
+            <Badge
+              variant={pipelineStatus.running ? 'success' : 'warning'}
+              className="px-2 py-1 text-[9.5px] gap-1.5"
+              data-testid="pipeline-running-badge"
+            >
+              {pipelineStatus.running ? (
+                <CheckCircle2 size={11} aria-hidden="true" />
+              ) : (
+                <XCircle size={11} aria-hidden="true" />
+              )}
+              {pipelineStatus.running ? 'Running' : 'Stopped'}
+            </Badge>
+          ) : undefined
+        }
+        data-testid="pipeline-status-card"
+      >
+        {!pipelineStatus ? (
+          <div className="text-xs text-[#7e8aaa] py-3 flex items-center gap-2">
+            <AlertTriangle size={14} aria-hidden="true" />
+            Pipeline status endpoint unavailable.
+          </div>
+        ) : (
+          <div className="space-y-3">
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-2.5 text-xs">
+              <div>
+                <div className="text-[10px] uppercase tracking-wider text-[#7e8aaa] mb-0.5">
+                  WS Loop
+                </div>
+                <div
+                  className={`font-bold mono ${
+                    pipelineStatus.ws_running ? 'text-green-400' : 'text-red-400'
+                  }`}
+                  data-testid="pipeline-ws-state"
+                >
+                  {pipelineStatus.ws_running ? 'Up' : 'Down'}
+                </div>
+              </div>
+              <div>
+                <div className="text-[10px] uppercase tracking-wider text-[#7e8aaa] mb-0.5">
+                  REST Loop
+                </div>
+                <div
+                  className={`font-bold mono ${
+                    pipelineStatus.rest_running ? 'text-green-400' : 'text-red-400'
+                  }`}
+                  data-testid="pipeline-rest-state"
+                >
+                  {pipelineStatus.rest_running ? 'Up' : 'Down'}
+                </div>
+              </div>
+              <div>
+                <div className="text-[10px] uppercase tracking-wider text-[#7e8aaa] mb-0.5">
+                  WS Reconnects
+                </div>
+                <div className="font-bold mono text-cyan-400">
+                  {formatCount(pipelineStatus.ws_reconnect_count)}
+                </div>
+              </div>
+              <div>
+                <div className="text-[10px] uppercase tracking-wider text-[#7e8aaa] mb-0.5">
+                  Tracked Tokens
+                </div>
+                <div className="font-bold mono text-cyan-400">
+                  {formatCount(pipelineStatus.rest_tracked_tokens)}
+                </div>
+              </div>
+            </div>
+            <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-[#1f2335]">
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={pipelineStatus.running === true || actionPending}
+                onClick={() => setConfirmDialog({ kind: 'start' })}
+                className="h-7 px-3 text-xs border-[#1f2335] text-green-400 hover:bg-green-500/10 hover:text-green-300 hover:border-green-500/30 disabled:opacity-40"
+                data-testid="btn-start-pipeline"
+              >
+                <Play size={12} aria-hidden="true" />
+                Start
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={!pipelineStatus.running || actionPending}
+                onClick={() => setConfirmDialog({ kind: 'stop' })}
+                className="h-7 px-3 text-xs border-[#1f2335] text-amber-400 hover:bg-amber-500/10 hover:text-amber-300 hover:border-amber-500/30 disabled:opacity-40"
+                data-testid="btn-stop-pipeline"
+              >
+                <Square size={12} aria-hidden="true" />
+                Stop
+              </Button>
+              <span className="text-[10px] text-[#7e8aaa] mono ml-auto">
+                started {formatRelativeTime(pipelineStatus.last_started_at)} ·{' '}
+                stopped {formatRelativeTime(pipelineStatus.last_stopped_at)}
+              </span>
+            </div>
+          </div>
+        )}
+      </SectionCard>
+
+      {/* ── W39-7 — Source Reliability ─────────────────────────────────── */}
+      {/* Per-source reliability snapshots (W34-5 ReliabilityStatus tracker).
+          Each row shows the source name + status badge (uses
+          reliabilityStatusVariant) and the composite score (uses
+          reliabilityScoreColor). The avg score appears as the card's
+          header badge. Empty state shows a placeholder when the backend
+          has not recorded any reliability windows yet. */}
+      <SectionCard
+        icon={ShieldCheck}
+        iconClass="text-cyan-400"
+        title="Source Reliability"
+        badge={
+          reliability && reliability.count > 0 ? (
+            <span
+              className={`font-bold mono text-xs ${reliabilityScoreColor(
+                reliability.avg_score,
+              )}`}
+              data-testid="reliability-avg-score"
+            >
+              avg {reliability.avg_score.toFixed(1)}
+            </span>
+          ) : (
+            <span className="text-[10px] text-[#7e8aaa] font-normal mono">
+              {reliability?.count ?? 0} source{(reliability?.count ?? 0) === 1 ? '' : 's'}
+            </span>
+          )
+        }
+        data-testid="reliability-card"
+      >
+        {!reliability || reliability.count === 0 ? (
+          <div className="text-xs text-[#7e8aaa] py-3 flex items-center gap-2">
+            <AlertTriangle size={14} aria-hidden="true" />
+            No reliability snapshots reported. The backend's reliability
+            tracker has not recorded any source windows yet.
+          </div>
+        ) : (
+          <div
+            className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2.5"
+            data-testid="reliability-grid"
+          >
+            {Object.values(reliability.sources)
+              .slice(0, 6)
+              .map((s) => (
+                <div
+                  key={s.source}
+                  className="bg-[#13161e] p-2.5 rounded border border-[#1f2335] text-xs"
+                  data-testid={`reliability-row-${s.source}`}
+                >
+                  <div className="flex items-center justify-between gap-2 mb-1.5">
+                    <span
+                      className="mono text-[#dde1ed] truncate"
+                      title={s.source}
+                    >
+                      {s.source}
+                    </span>
+                    <Badge
+                      variant={reliabilityStatusVariant(s.status)}
+                      className="px-1.5 py-0 text-[9px]"
+                    >
+                      {s.status}
+                    </Badge>
+                  </div>
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-[10px] uppercase tracking-wider text-[#7e8aaa]">
+                      Score
+                    </span>
+                    <span
+                      className={`font-bold mono ${reliabilityScoreColor(s.score)}`}
+                    >
+                      {s.score.toFixed(1)}
+                    </span>
+                  </div>
+                </div>
+              ))}
+          </div>
+        )}
+      </SectionCard>
+
+      {/* ── W39-7 — Backfill Progress ─────────────────────────────────── */}
+      {/* Recent backfill runs (W32-3 engine) + Launch Backfill button (POST
+          /api/ingestion/backfill/markets?resume=true). Mirrors the DLQ
+          card's recent-records pattern: type / started / processed / added
+          / errors, capped at 3 rows. Empty state shows a placeholder when
+          no runs have been recorded yet. */}
+      <SectionCard
+        icon={Database}
+        iconClass="text-cyan-400"
+        title="Backfill Progress"
+        badge={
+          backfillStatus ? (
+            <span className="text-[10px] text-[#7e8aaa] font-normal mono">
+              {backfillStatus.runs.length} run{backfillStatus.runs.length === 1 ? '' : 's'}
+            </span>
+          ) : undefined
+        }
+        data-testid="backfill-card"
+      >
+        {!backfillStatus ? (
+          <div className="text-xs text-[#7e8aaa] py-3 flex items-center gap-2">
+            <AlertTriangle size={14} aria-hidden="true" />
+            Backfill status endpoint unavailable.
+          </div>
+        ) : backfillStatus.runs.length === 0 ? (
+          <div className="text-xs text-[#7e8aaa] py-3 flex items-center gap-2">
+            <Database size={14} aria-hidden="true" />
+            No backfill runs recorded yet.
+          </div>
+        ) : (
+          <div className="space-y-3">
+            <div className="space-y-1">
+              <div className="text-[10px] uppercase tracking-wider text-[#7e8aaa] mb-1.5">
+                Recent Runs ({Math.min(backfillStatus.runs.length, 3)} of{' '}
+                {backfillStatus.runs.length})
+              </div>
+              {backfillStatus.runs.slice(0, 3).map((run) => (
+                <div
+                  key={run.id}
+                  className="flex items-center justify-between gap-2 text-[10px] bg-[#13161e] px-2 py-1.5 rounded border border-[#1f2335]"
+                  data-testid={`backfill-row-${run.id}`}
+                >
+                  <div className="flex items-center gap-2 min-w-0">
+                    <Badge
+                      variant="secondary"
+                      className="text-[9px] px-1.5 py-0 shrink-0"
+                    >
+                      {run.type}
+                    </Badge>
+                    <span className="mono text-[#7e8aaa] shrink-0">
+                      {formatRelativeTime(run.started_at)}
+                    </span>
+                  </div>
+                  <span
+                    className={`mono shrink-0 ${
+                      run.total_errors === 0 ? 'text-green-400' : 'text-red-400'
+                    }`}
+                  >
+                    {formatCount(run.total_added)} added ·{' '}
+                    {formatCount(run.total_errors)} err
+                  </span>
+                </div>
+              ))}
+            </div>
+            <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-[#1f2335]">
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={actionPending}
+                onClick={() => setConfirmDialog({ kind: 'launch-backfill' })}
+                className="h-7 px-3 text-xs border-[#1f2335] text-cyan-400 hover:bg-cyan-500/10 hover:text-cyan-300 hover:border-cyan-500/30 disabled:opacity-40"
+                data-testid="btn-launch-backfill"
+              >
+                <Zap size={12} aria-hidden="true" />
+                Launch Backfill
+              </Button>
+            </div>
+          </div>
+        )}
+      </SectionCard>
+
+      {/* ── W39-7 — Operational Controls ──────────────────────────────── */}
+      {/* Destructive / heavy-write actions that don't have a natural home
+          in the read-only cards above. Each button opens the
+          ConfirmationDialog (per the W38-8 dialog contract) and routes
+          through `handleConfirmAction` → the WRITE endpoints. The inline
+          last-action-result banner surfaces the post-action outcome so
+          the operator sees success / failure without waiting for the
+          next 15s poll tick. */}
+      <SectionCard
+        icon={Settings}
+        iconClass="text-cyan-400"
+        title="Operational Controls"
+        data-testid="operational-controls-card"
+      >
+        <div className="space-y-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={
+                actionPending || retrying || (deadLetter?.depth ?? 0) === 0
+              }
+              onClick={() => setConfirmDialog({ kind: 'retry-failed' })}
+              className="h-7 px-3 text-xs border-[#1f2335] text-amber-400 hover:bg-amber-500/10 hover:text-amber-300 hover:border-amber-500/30 disabled:opacity-40"
+              data-testid="btn-retry-failed"
+            >
+              <RefreshCw size={12} aria-hidden="true" />
+              Retry Failed
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={actionPending || (deadLetter?.depth ?? 0) === 0}
+              onClick={() => setConfirmDialog({ kind: 'clear-dlq' })}
+              className="h-7 px-3 text-xs border-[#1f2335] text-red-400 hover:bg-red-500/10 hover:text-red-300 hover:border-red-500/30 disabled:opacity-40"
+              data-testid="btn-clear-dlq"
+            >
+              <Trash2 size={12} aria-hidden="true" />
+              Clear DLQ
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={actionPending}
+              onClick={() => setConfirmDialog({ kind: 'replay-events' })}
+              className="h-7 px-3 text-xs border-[#1f2335] text-cyan-400 hover:bg-cyan-500/10 hover:text-cyan-300 hover:border-cyan-500/30 disabled:opacity-40"
+              data-testid="btn-replay-events"
+            >
+              <RotateCw size={12} aria-hidden="true" />
+              Replay Events
+            </Button>
+            {actionPending && (
+              <span
+                className="text-[10px] text-[#7e8aaa] mono flex items-center gap-1.5 ml-auto"
+                data-testid="action-pending-indicator"
+              >
+                <RefreshCw
+                  size={10}
+                  className="animate-spin"
+                  aria-hidden="true"
+                />
+                executing…
+              </span>
+            )}
+          </div>
+
+          {/* Last action result — surfaced inline so the operator sees
+              the post-action outcome without waiting for the next poll. */}
+          {lastActionResult && (
+            <div
+              className={`px-3 py-2 rounded text-xs mono border flex items-center justify-between gap-2 ${
+                lastActionResult.ok
+                  ? 'bg-green-500/10 border-green-500/30 text-green-300'
+                  : 'bg-red-500/10 border-red-500/30 text-red-300'
+              }`}
+              data-testid="last-action-result"
+              role="status"
+              aria-live="polite"
+            >
+              <span className="flex items-center gap-2 min-w-0">
+                {lastActionResult.ok ? (
+                  <CheckCircle2 size={12} aria-hidden="true" className="shrink-0" />
+                ) : (
+                  <AlertTriangle size={12} aria-hidden="true" className="shrink-0" />
+                )}
+                <span className="font-bold shrink-0">
+                  {lastActionResult.ok ? 'OK' : 'FAIL'}
+                </span>
+                <span className="truncate" title={lastActionResult.message}>
+                  {lastActionResult.message}
+                </span>
+              </span>
+              <button
+                type="button"
+                onClick={() => setLastActionResult(null)}
+                className="text-[#7e8aaa] hover:text-white transition-colors shrink-0 ml-2"
+                aria-label="Dismiss action result"
+              >
+                ✕
+              </button>
+            </div>
+          )}
+        </div>
       </SectionCard>
 
       {/* ── Footer ─────────────────────────────────────────────────────── */}

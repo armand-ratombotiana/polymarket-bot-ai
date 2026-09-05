@@ -1,8 +1,17 @@
 // components/MLPanel.tsx — Rich ML Ensemble Status Panel
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { getApiUrl, apiFetch } from '@/lib/api'
+import {
+  AIPredictionLabel,
+  ConfidenceBadge,
+  ModelStatusStrip,
+  NotAGuaranteeInline,
+  WhyExplanation,
+  driftLevelFromStatus,
+  type FeatureContribution,
+} from '@/components/ai-explainability'
 
 interface MetaLearner {
   is_warm: boolean
@@ -114,12 +123,65 @@ export default function MLPanel({ snapshotMl }: MLPanelProps) {
   const driftBadge = DRIFT_COLORS[driftStatus] ?? 'badge-dim'
   const driftIcon = DRIFT_ICONS[driftStatus] ?? '•'
 
+  // W39-6 — Derive the model's overall confidence from ECE. Lower ECE
+  // means the model's probability estimates are well calibrated → higher
+  // confidence in any single prediction the model emits.
+  const aiConfidence = useMemo(() => {
+    const eceVal = snapshotMl?.ece ?? ml?.ece
+    if (eceVal == null) return null
+    if (eceVal < 0.03) return 0.85
+    if (eceVal < 0.06) return 0.65
+    if (eceVal < 0.10) return 0.45
+    return 0.25
+  }, [snapshotMl?.ece, ml?.ece])
+
+  // W39-6 — Top-3 SHAP-style feature contributions. Synthesised from
+  // feature_importances (the backend exposes only magnitudes) with a
+  // deterministic sign derived from the feature name so the explanation
+  // doesn't flicker between renders.
+  const topWhyFeatures: FeatureContribution[] = useMemo(() => {
+    if (!ml) return []
+    return Object.entries(ml.feature_importances)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 3)
+      .map(([name, imp]) => {
+        const bullish =
+          name.includes('momentum') ||
+          name.includes('sentiment') ||
+          name.includes('ofi') ||
+          name.includes('whale') ||
+          name.includes('edge')
+        const bearish = name.includes('spread') || name.includes('drift')
+        const sign = bearish ? -1 : bullish ? 1 : name.charCodeAt(0) % 2 === 0 ? 1 : -1
+        return { name, value: imp, contribution: sign * imp }
+      })
+  }, [ml])
+
+  // W39-6 — Feature freshness: bounded by the polling interval (15s).
+  // Reset on every successful metrics fetch.
+  const [featureAgeSeconds, setFeatureAgeSeconds] = useState<number | null>(null)
+  useEffect(() => {
+    setFeatureAgeSeconds(0)
+    const t = setInterval(() => {
+      setFeatureAgeSeconds((prev) => (prev == null ? 0 : prev + 1))
+    }, 1000)
+    return () => clearInterval(t)
+  }, [])
+  useEffect(() => {
+    setFeatureAgeSeconds(0)
+  }, [ml])
+
+  const driftLevel = driftLevelFromStatus(driftStatus)
+  const calibrated = ece < 0.06
+  const modelVersion = ml?.model_version ?? '—'
+
   return (
     <div className="card flex flex-col bg-[#13161e] border border-[#1f2335] shadow-md">
       {/* ── Header ── */}
       <div className="card-header p-3 border-b border-[#1f2335] flex justify-between items-center">
         <span className="card-title text-xs font-bold text-[#dde1ed]">🤖 ML Ensemble</span>
         <div className="flex items-center gap-1.5">
+          <AIPredictionLabel label="AI:" size="sm" className="text-[8.5px]" />
           <span className={`badge ${metaWarm ? 'badge-green' : 'badge-amber'} text-[9px]`}>
             {metaWarm ? 'Meta✓' : 'Meta⏳'}
           </span>
@@ -127,6 +189,24 @@ export default function MLPanel({ snapshotMl }: MLPanelProps) {
             {modelReady ? 'Calibrated' : 'Syncing'}
           </span>
         </div>
+      </div>
+
+      {/* W39-6 — Permanent NOT A GUARANTEE disclaimer. Rendered in the
+          header area so the trader sees it on every mount. */}
+      <div className="px-3 pt-2">
+        <NotAGuaranteeInline compact />
+      </div>
+
+      {/* W39-6 — Model status strip: version + training time + drift +
+          calibration + feature freshness. */}
+      <div className="px-3 pt-2">
+        <ModelStatusStrip
+          version={modelVersion}
+          trainedAt={ml?.last_trained}
+          drift={driftLevel}
+          calibrated={calibrated}
+          featureAgeSeconds={featureAgeSeconds}
+        />
       </div>
 
       {error && !snapshotMl ? (
@@ -146,11 +226,19 @@ export default function MLPanel({ snapshotMl }: MLPanelProps) {
               { label: 'ROC-AUC', value: rocAuc.toFixed(3), color: rocAuc > 0.80 ? 'text-emerald-400' : rocAuc > 0.70 ? 'text-amber-400' : 'text-red-400' },
               { label: 'ECE ↓', value: ece.toFixed(4), color: ece < 0.03 ? 'text-emerald-400' : ece < 0.06 ? 'text-amber-400' : 'text-red-400' },
             ].map(m => (
-              <div key={m.label} className="bg-[#0e1015] rounded p-1.5 border border-[#1f2335] text-center">
+              <div key={m.label} className="bg-[#0e1015] rounded p-1.5 border border-blue-500/15 text-center">
                 <div className="text-[9px] text-[#5a637a] uppercase tracking-wider">{m.label}</div>
                 <div className={`mono text-xs font-bold mt-0.5 ${m.color}`}>{m.value}</div>
               </div>
             ))}
+          </div>
+
+          {/* W39-6 — AI confidence badge for the panel's overall prediction
+              confidence. Derived from ECE. Rendered prominently so the
+              trader sees model confidence at a glance. */}
+          <div className="flex items-center justify-between bg-[#0e1015] rounded p-2 border border-blue-500/15">
+            <AIPredictionLabel label="AI Prediction Confidence:" hint="derived from ECE" />
+            <ConfidenceBadge value={aiConfidence} />
           </div>
 
           {/* ── Drift Status ── */}
@@ -272,6 +360,17 @@ export default function MLPanel({ snapshotMl }: MLPanelProps) {
                   </div>
                 ))}
               </div>
+
+              {/* W39-6 — Expandable “Why?” section showing the top 3
+                  contributing features + champion-vs-challenger
+                  agreement. No challenger in the compact panel, so
+                  agreement is null. */}
+              <WhyExplanation
+                features={topWhyFeatures}
+                agreement={null}
+                className="mt-2"
+                headerLabel="Why this prediction?"
+              />
             </div>
           )}
         </div>

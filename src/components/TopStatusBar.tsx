@@ -419,6 +419,23 @@ export default function TopStatusBar({
         )}
       </div>
 
+      {/* W39-8 — Screen-reader live region for dynamic P&L updates.
+          Sighted traders see the Today P&L pill flash green/red on every
+          snapshot tick; AT users get the same audible refresh cycle via
+          this polite live region. The region is visually hidden via
+          `.sr-live` (1×1 clip-rect) so it doesn't shift the layout.
+          `aria-live="polite"` + `role="status"` ensures screen readers
+          announce the new value once after the user pauses interacting
+          (vs `assertive`, which would interrupt). */}
+      <div
+        className="sr-live"
+        role="status"
+        aria-live="polite"
+        aria-atomic="true"
+      >
+        Today P&L {fmtPnl(daily_pnl)}. Paper balance {paper_balance != null ? fmtUsd(paper_balance) : 'unknown'}. Connection {connLabel}.
+      </div>
+
       {/* W15-2 — Full-screen Settings modal. Mounted at the bottom of the
           header so it overlays the entire workstation when open. The modal
           is lazy-rendered (only when settingsOpen=true) so the bundle

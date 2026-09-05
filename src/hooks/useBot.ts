@@ -26,6 +26,10 @@ export interface Order {
   strategy: string
   paper: boolean
   created_at: number
+  // W39-5 — optional order lifecycle status. When absent, the UI derives
+  // a display status from `size_matched` / `size` (matched === size →
+  // FILLED; matched > 0 → OPEN/partial; matched === 0 → OPEN).
+  status?: 'PENDING' | 'OPEN' | 'FILLED' | 'CANCELLED' | 'REJECTED'
 }
 
 export interface Position {
@@ -40,6 +44,15 @@ export interface Position {
   // Populated by snapshot when the backend exposes current_price + unrealized_pnl.
   current_price?: number
   unrealized_pnl?: number
+  // W39-5 — optional metadata fields used by the redesigned positions table:
+  //   • strategy   — the strategy that opened the position (rendered as a badge)
+  //   • opened_at  — epoch-seconds timestamp when the position was opened
+  //                  (rendered as a "Time held" column with "3h 24m" format)
+  //   • risk_status — explicit risk-engine classification (when absent, the
+  //                  UI derives a display status from unrealized_pnl magnitude).
+  strategy?: string
+  opened_at?: number
+  risk_status?: 'healthy' | 'warning' | 'danger'
 }
 
 export interface Trade {
@@ -53,6 +66,16 @@ export interface Trade {
   strategy: string
   paper: boolean
   timestamp: number
+  // W39-5 — optional execution-quality + audit fields surfaced by the
+  // redesigned trades table:
+  //   • fee          — USDC fee paid on this fill (rendered as "Fee" column)
+  //   • slippage_bps — slippage vs. the quoted mid, in basis points
+  //                    (rendered as "Slippage" column with bps suffix)
+  //   • decision_id  — links the fill to the Decision Ledger stage-chain
+  //                    (rendered as an audit-trail link icon)
+  fee?: number
+  slippage_bps?: number
+  decision_id?: string
 }
 
 export interface MLState {

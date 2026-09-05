@@ -5,6 +5,7 @@
 // render and assert on the inline fallback UI.
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { render, screen, cleanup, act } from '@testing-library/react'
+import type { ReactElement } from 'react'
 import userEvent from '@testing-library/user-event'
 import PanelErrorBoundary from './PanelErrorBoundary'
 
@@ -12,7 +13,7 @@ afterEach(() => {
   cleanup()
 })
 
-function Boom() {
+function Boom(): ReactElement {
   throw new Error('Boom: panel render failed')
 }
 

@@ -271,7 +271,7 @@ export default function ExecutionQualityPanel() {
           <div className="skeleton-line" style={{ width: '220px', height: '14px' }} />
           <div className="skeleton-line" style={{ width: '90px', height: '24px' }} />
         </div>
-        <div className="grid grid-cols-2 md:grid-cols-5 gap-2">
+        <div className="grid-kpi">
           {Array.from({ length: 5 }).map((_, i) => (
             <div key={i} className="skeleton-card p-2 space-y-1.5">
               <div className="skeleton-line" style={{ width: '70%', height: '9px' }} />
@@ -406,7 +406,7 @@ export default function ExecutionQualityPanel() {
       )}
 
       {/* ── KPI strip ───────────────────────────────────────────────────────── */}
-      <div className="grid grid-cols-2 md:grid-cols-5 gap-2 mb-3">
+      <div className="grid-kpi mb-3">
         <div className="kpi-card">
           <span className="kpi-label flex items-center gap-1">
             <TrendingDown className="size-2.5" aria-hidden="true" /> Avg Slippage
@@ -585,7 +585,7 @@ export default function ExecutionQualityPanel() {
           <span className="text-[9px] text-[#5a637a] mono">by adverse slippage</span>
         </div>
         {derived.worst.length > 0 ? (
-          <div className="overflow-x-auto scrollbar-thin">
+          <div className="table-responsive scrollbar-thin">
             <table className="data-table text-xs w-full" role="table" aria-label="Top 5 worst slippage fills">
               <thead>
                 <tr className="text-[#7e8aaa] text-[10px]">

@@ -47,9 +47,15 @@
 'use client'
 
 import { useCallback, useEffect, useState } from 'react'
+import { ShieldAlert } from 'lucide-react'
 import { apiFetch } from '@/lib/api'
 import { Badge } from '@/components/ui/badge'
 import { Card } from '@/components/ui/card'
+import { StatisticalSignificanceBadge } from '@/components/ui/StatisticalSignificanceBadge'
+import {
+  AIPredictionLabel,
+  NotAGuaranteeInline,
+} from '@/components/ai-explainability'
 import {
   Tabs,
   TabsList,
@@ -621,6 +627,10 @@ export function PerformanceReportPanel({
           <Badge variant="secondary" className="text-[10px] py-0.5">
             Per-Category
           </Badge>
+          {/* W39-6 — AI label so the trader remembers the panel surfaces
+              AI-derived performance metrics (Sharpe / Sortino are
+              model-attributed). */}
+          <AIPredictionLabel label="AI Metrics:" hint="model-attributed" size="sm" className="text-[8.5px]" />
         </div>
         <div className="flex items-center gap-2 text-[10.5px] text-[#7e8aaa]">
           {loading && (
@@ -644,15 +654,22 @@ export function PerformanceReportPanel({
         </div>
       </div>
 
-      {/* Disclaimer banner — ALWAYS rendered, even when fetch fails. */}
+      {/* W39-6 — Disclaimer banner. Made MORE prominent: bigger font,
+          amber-300 body on amber-50 background, larger icon, full-width
+          bordered card. Always rendered (even when fetch fails). */}
       <div
-        className="banner-warning p-3 text-[11px] rounded-md"
+        className="banner-warning p-3.5 text-[12px] rounded-md border-2 border-amber-500/40 bg-amber-500/10 flex items-start gap-2.5 shadow-sm"
         role="alert"
         aria-label="Performance Metrics Disclaimer"
         data-testid="performance-disclaimer"
       >
-        <div className="font-semibold mb-0.5">⚠ Performance Metrics Disclaimer</div>
-        <div>{disclaimer}</div>
+        <ShieldAlert className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" aria-hidden="true" />
+        <div>
+          <div className="font-bold text-amber-300 mb-1 text-[13px]">
+            ⚠ Performance Metrics Disclaimer
+          </div>
+          <div className="text-amber-100/90 leading-relaxed">{disclaimer}</div>
+        </div>
       </div>
 
       {/* Category tabs */}
@@ -683,10 +700,46 @@ export function PerformanceReportPanel({
             performance concern; the data is already in memory). */}
         <TabsContent value={activeCategory} forceMount>
           <div className="mt-3 flex flex-col gap-3">
+            {/* W39-6 — Per-category source disclaimer: makes the
+                separation between backtest, walk-forward, paper, and
+                live data crystal clear. Backtest results are simulated
+                on historical data; paper and live reflect actual system
+                behavior. Rendered ABOVE the metric grid so the trader
+                sees the source before scanning the numbers. */}
+            <div
+              className="text-[10.5px] rounded-md border px-2.5 py-1.5 flex items-center gap-2"
+              data-testid={`category-${activeCategory}-source-banner`}
+            >
+              <span className="text-[#5a637a] uppercase tracking-wider font-bold text-[9px]">
+                Source:
+              </span>
+              <span className="mono text-[#dde1ed]">
+                {activeCategory === 'backtest' && '🔬 Backtest (historical simulation — does NOT reflect live execution)'}
+                {activeCategory === 'walk_forward' && '🔁 Walk-Forward (rolling out-of-sample retraining)'}
+                {activeCategory === 'paper_trading' && '📝 Paper Trading (simulated execution against live market data)'}
+                {activeCategory === 'live' && '🔴 Live Trading (real capital at risk)'}
+              </span>
+              <span className="ml-auto">
+                {/* W39-6 — visible statistical significance verdict. */}
+                {activeMetrics.available && (
+                  <StatisticalSignificanceBadge
+                    pValue={activeMetrics.p_value ?? undefined}
+                    n={activeMetrics.n_trades}
+                    isSignificant={activeMetrics.is_statistically_significant}
+                  />
+                )}
+              </span>
+            </div>
+
             <CategoryMetricsGrid
               metrics={activeMetrics}
               testIdPrefix={`category-${activeCategory}`}
             />
+
+            {/* W39-6 — Permanent NOT A GUARANTEE reminder below the
+                metric grid for extra emphasis. Mirrors the disclaimer
+                at the top of the panel. */}
+            <NotAGuaranteeInline compact />
 
             {/* Equity curve — only when the category supplies one. */}
             {hasEquity && (

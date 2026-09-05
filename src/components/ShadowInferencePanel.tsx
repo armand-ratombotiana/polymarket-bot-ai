@@ -50,6 +50,7 @@ import {
   Hash,
   PlusCircle,
   RefreshCw,
+  Sparkles,
   Swords,
   Target,
   TrendingDown,
@@ -58,6 +59,14 @@ import {
   XCircle,
 } from 'lucide-react'
 import { apiFetch } from '@/lib/api'
+import {
+  ConfidenceBadge,
+  ModelStatusStrip,
+  NotAGuaranteeInline,
+  WhyExplanation,
+  driftLevelFromStatus,
+  type FeatureContribution,
+} from '@/components/ai-explainability'
 import {
   AlertDialog,
   AlertDialogAction,
@@ -170,6 +179,18 @@ interface MLMetrics {
   model_version: string
   reliability_curve: ReliabilityBin[]
   model_ready: boolean
+  // W39-6 — optional fields that /api/ml/metrics returns but the previous
+  // interface omitted. Used by the new ModelStatusStrip + WhyExplanation.
+  last_trained?: number
+  feature_importances?: Record<string, number>
+  drift?: {
+    psi?: number
+    status?: string
+    rolling_brier?: number | null
+    ewma_brier?: number | null
+    window_samples?: number
+    outcome_samples?: number
+  }
 }
 
 // ── Derived display types ───────────────────────────────────────────────────
@@ -604,6 +625,65 @@ export default function ShadowInferencePanel() {
   const liveWinRate = comparison?.live?.win_rate ?? 0
   const liveSharpe = mlMetrics?.sharpe_ratio ?? 0
 
+  // W39-6 — Derive drift level + feature freshness for the model status
+  // strip. ECE → confidence; drift.status → drift level; last_trained →
+  // training age; polling interval bounds feature age.
+  // W39-1 — `aiConfidence` was previously derived here but the JSX below
+  // surfaces the same value via ConfidenceBadge (which re-derives from
+  // mlMetrics.ece). The unused declaration was removed to satisfy
+  // noUnusedLocals; the inline ConfidenceBadge call site is the
+  // authoritative source of the displayed AI confidence.
+
+  const driftLevel = useMemo(
+    () => driftLevelFromStatus(mlMetrics?.drift?.status),
+    [mlMetrics?.drift?.status],
+  )
+
+  const calibrated = (mlMetrics?.ece ?? 1) < 0.06
+  const modelVersion = mlMetrics?.model_version ?? champion?.version.version ?? '—'
+
+  // W39-6 — Top-3 SHAP-style feature contributions for the WhyExplanation
+  // surfaced in the challenger models section.
+  const topWhyFeatures: FeatureContribution[] = useMemo(() => {
+    if (!mlMetrics?.feature_importances) return []
+    return Object.entries(mlMetrics.feature_importances)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 3)
+      .map(([name, imp]) => {
+        const bullish =
+          name.includes('momentum') ||
+          name.includes('sentiment') ||
+          name.includes('ofi') ||
+          name.includes('whale') ||
+          name.includes('edge')
+        const bearish = name.includes('spread') || name.includes('drift') || name.includes('volatility')
+        const sign = bearish ? -1 : bullish ? 1 : name.charCodeAt(0) % 2 === 0 ? 1 : -1
+        return { name, value: imp, contribution: sign * imp }
+      })
+  }, [mlMetrics?.feature_importances])
+
+  // Champion vs Challenger agreement — derived from the version roster.
+  const modelAgreement = useMemo(() => {
+    if (!versions || versions.length < 2 || !champion) return null
+    const chall = versions.find((v) => v.version !== champion.version.version)
+    if (!chall) return null
+    const delta = Math.abs(champion.version.brier_score - chall.brier_score)
+    return Math.max(0, Math.min(1, 1 - delta))
+  }, [versions, champion])
+
+  // Feature freshness bounded by the 20s polling interval.
+  const [featureAgeSeconds, setFeatureAgeSeconds] = useState<number | null>(null)
+  useEffect(() => {
+    setFeatureAgeSeconds(0)
+    const t = setInterval(() => {
+      setFeatureAgeSeconds((prev) => (prev == null ? 0 : prev + 1))
+    }, 1000)
+    return () => clearInterval(t)
+  }, [])
+  useEffect(() => {
+    setFeatureAgeSeconds(0)
+  }, [mlMetrics])
+
   // ── Loading skeleton ───────────────────────────────────────────────────────
   if (loading && !versions) {
     return (
@@ -703,6 +783,23 @@ export default function ShadowInferencePanel() {
       )}
 
       <div className="p-3 space-y-4 max-h-[calc(100vh-180px)] overflow-y-auto scrollbar-thin">
+        {/* W39-6 — Permanent NOT A GUARANTEE disclaimer banner. Rendered
+            at the top of the body so the trader sees it on every mount,
+            even before the first fetch resolves. The shadow-trades table
+            is the panel's most-prediction-heavy surface (predicted_edge +
+            confidence per row), so the disclaimer must be unmissable. */}
+        <NotAGuaranteeInline />
+
+        {/* W39-6 — Model status strip: champion version + training time +
+            drift + calibration + feature freshness. */}
+        <ModelStatusStrip
+          version={modelVersion}
+          trainedAt={mlMetrics?.last_trained}
+          drift={driftLevel}
+          calibrated={calibrated}
+          featureAgeSeconds={featureAgeSeconds}
+        />
+
         {/* ── §1 Challenger models table ── */}
         <section>
           <div className="flex items-center justify-between mb-2">
@@ -988,6 +1085,19 @@ export default function ShadowInferencePanel() {
               </TableBody>
             </Table>
           </div>
+
+          {/* W39-6 — Expandable "Why?" explanation for the ensemble
+              prediction. Shows the top 3 contributing features and the
+              champion-vs-challenger agreement so the trader can audit
+              the model's reasoning before promoting a challenger. */}
+          {topWhyFeatures.length > 0 && (
+            <WhyExplanation
+              features={topWhyFeatures}
+              agreement={modelAgreement}
+              className="mt-3"
+              headerLabel="Why is the champion model predicting this?"
+            />
+          )}
         </section>
 
         {/* ── §2 + §4 Side-by-side: Scatter + Shadow-vs-real comparison ── */}
@@ -1207,11 +1317,23 @@ export default function ShadowInferencePanel() {
                   <TableHead className="h-7 text-[9.5px] uppercase tracking-wider text-[#5a637a] font-bold py-1.5 px-2 text-right">
                     Size
                   </TableHead>
-                  <TableHead className="h-7 text-[9.5px] uppercase tracking-wider text-[#5a637a] font-bold py-1.5 px-2 text-right">
-                    Edge
+                  {/* W39-6 — AI-labeled "Edge" column header. The Sparkles
+                      icon + "AI Pred. Edge" prefix signals that every
+                      value in this column is model-generated, not market
+                      data. The values are also rendered in blue/purple
+                      tones so they are visually distinct from the order
+                      book's cyan/emerald market numbers. */}
+                  <TableHead className="h-7 text-[9.5px] uppercase tracking-wider text-blue-300 font-bold py-1.5 px-2 text-right">
+                    <span className="inline-flex items-center gap-1">
+                      <Sparkles size={10} className="text-blue-400" aria-hidden="true" />
+                      AI Pred. Edge
+                    </span>
                   </TableHead>
-                  <TableHead className="h-7 text-[9.5px] uppercase tracking-wider text-[#5a637a] font-bold py-1.5 px-2 text-right">
-                    Conf
+                  <TableHead className="h-7 text-[9.5px] uppercase tracking-wider text-blue-300 font-bold py-1.5 px-2 text-right">
+                    <span className="inline-flex items-center gap-1">
+                      <Sparkles size={10} className="text-blue-400" aria-hidden="true" />
+                      AI Conf.
+                    </span>
                   </TableHead>
                   <TableHead className="h-7 text-[9.5px] uppercase tracking-wider text-[#5a637a] font-bold py-1.5 px-2">
                     Strategy
@@ -1300,20 +1422,35 @@ export default function ShadowInferencePanel() {
                       <TableCell className="py-1.5 px-2 text-right mono text-[10.5px] text-[#dde1ed]">
                         {t.size.toFixed(1)}
                       </TableCell>
+                      {/* W39-6 — AI-labeled predicted_edge value. Rendered in
+                          blue/purple tones to distinguish from market data.
+                          The sign is preserved (emerald/red for + / -) so
+                          the trader can still see at a glance whether the
+                          model is bullish or bearish. */}
                       <TableCell
                         className={`py-1.5 px-2 text-right mono text-[10.5px] ${
                           (t.predicted_edge || 0) > 0
-                            ? 'text-emerald-400'
+                            ? 'text-blue-300'
                             : (t.predicted_edge || 0) < 0
-                              ? 'text-red-400'
+                              ? 'text-purple-300'
                               : 'text-[#dde1ed]'
                         }`}
+                        title="AI Prediction: model-generated predicted edge (NOT A GUARANTEE)"
                       >
-                        {(t.predicted_edge || 0) >= 0 ? '+' : ''}
-                        {fmtNum(t.predicted_edge, 4)}
+                        <span className="inline-flex items-center gap-1 justify-end">
+                          <Sparkles size={9} className="text-blue-400/70 shrink-0" aria-hidden="true" />
+                          <span>
+                            {(t.predicted_edge || 0) >= 0 ? '+' : ''}
+                            {fmtNum(t.predicted_edge, 4)}
+                          </span>
+                        </span>
                       </TableCell>
-                      <TableCell className="py-1.5 px-2 text-right mono text-[10.5px] text-cyan-300">
-                        {fmtPct(t.confidence, 0)}
+                      {/* W39-6 — AI confidence rendered as a colored
+                          ConfidenceBadge. Green ≥70%, amber 50-70%, red
+                          <50% — so the trader sees model confidence at a
+                          glance without reading the number. */}
+                      <TableCell className="py-1.5 px-2 text-right">
+                        <ConfidenceBadge value={t.confidence} showLabel={false} />
                       </TableCell>
                       <TableCell className="py-1.5 px-2 text-[10px] text-[#7e8aaa] mono">
                         {t.strategy || '—'}

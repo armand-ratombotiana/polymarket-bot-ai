@@ -1,13 +1,13 @@
-// components/CommandCenterHealthBar.tsx — W38-3 Compact System Health Bar
+// components/CommandCenterHealthBar.tsx — W38-3 / W39-3 Compact System Health Bar
 //
-// Sits at the very top of the Command Center panel (above the existing
-// risk/market/pos/orders/events/sidebar grid). It is a single-row compact
-// summary of the five transport + risk + control signals the trader needs
-// to scan before drilling into any individual metric:
+// Sits at the very top of the Command Center panel as the "system status
+// bar" (Step 5 of the W39-3 redesign). It is a single-row compact summary
+// of the six signals the trader scans before drilling into any individual
+// metric:
 //
-//   ┌─────────────┬──────────────┬───────────────┬────────────┬──────────────┐
-//   │ Backend API  │  WebSocket   │  Data Fresh   │  Risk Lvl   │  Kill Switch │
-//   └─────────────┴──────────────┴───────────────┴────────────┴──────────────┘
+//   ┌──────────┬───────────┬──────────┬──────────┬──────────┬─────────┬────────┐
+//   │ Backend  │ WebSocket │ Data Fr  │ Risk Lvl │ Kill Sw  │ AI Sts  │ Updated│
+//   └──────────┴───────────┴──────────┴──────────┴──────────┴─────────┴────────┘
 //
 // Each indicator is a self-contained pill:
 //   * A colored dot (green = healthy, amber = warning, red = critical).
@@ -21,6 +21,8 @@
 //   * Risk Level    → derived from kill_switch / observation_only / daily_pnl /
 //                     paper_balance drawdown vs configured limits.
 //   * Kill Switch   → `snapshot.kill_switch` (off = green dot, on = red pulse).
+//   * AI Status     → `snapshot.ml?.model_ready` (ready = green, warming = amber).
+//   * Last Update   → `snapshot.timestamp` formatted as HH:MM:SS UTC.
 //
 // The bar is intentionally a single flex row so it survives at every
 // responsive breakpoint (the existing top status bar already clusters
@@ -30,7 +32,7 @@
 
 import { useEffect, useState } from 'react'
 import { BotSnapshot, ConnectionStatus } from '@/hooks/useBot'
-import { fmtAge, freshnessClass } from '@/lib/design-tokens'
+import { fmtAge, fmtTime, freshnessClass } from '@/lib/design-tokens'
 
 // Freshness thresholds (seconds). Mirrors the TopStatusBar's defaults so
 // the dot color matches the age pill rendered in the top bar.
@@ -198,6 +200,31 @@ export default function CommandCenterHealthBar({
     : 'healthy'
   const killValue = snapshot.kill_switch ? 'ON' : 'Off'
 
+  // ── AI status (W39-3) — derived from snapshot.ml?.model_ready ──────────
+  // The ML model is "ready" when snapshot.ml.model_ready is true; otherwise
+  // the model is still warming up (amber). Missing ml state is treated as
+  // neutral (grey dot) so the trader can distinguish "AI off" from "AI
+  // warming".
+  const mlState = snapshot.ml
+  const aiTone: IndicatorProps['tone'] =
+    mlState == null
+      ? 'neutral'
+      : mlState.model_ready
+      ? 'healthy'
+      : 'warning'
+  const aiValue =
+    mlState == null
+      ? 'Idle'
+      : mlState.model_ready
+      ? 'Ready'
+      : 'Warming'
+
+  // ── Last update timestamp (W39-3) ───────────────────────────────────────
+  // Rendered at the right edge of the bar so the trader can see at a glance
+  // when the bot last published a snapshot.
+  const lastUpdateValue =
+    snapshot.timestamp > 0 ? fmtTime(snapshot.timestamp) : '—'
+
   return (
     <div
       className="flex items-center gap-2 flex-wrap bg-[#13161e] border border-[#1f2335] rounded-lg px-2.5 py-2 shadow-sm"
@@ -255,6 +282,31 @@ export default function CommandCenterHealthBar({
             : 'Kill switch inactive — trading enabled'
         }
       />
+
+      <Indicator
+        label="AI Status"
+        value={aiValue}
+        tone={aiTone}
+        title={
+          mlState == null
+            ? 'ML model not loaded'
+            : mlState.model_ready
+            ? `Model ready · brier ${(mlState.brier_score ?? 0).toFixed(3)}`
+            : 'Model warming up — predictions may be unreliable'
+        }
+      />
+
+      <div
+        className="flex items-center gap-1.5 ml-auto pl-2 border-l border-[#1f2335] min-w-0"
+        title={`Last snapshot received at ${lastUpdateValue}`}
+      >
+        <span className="text-[9.5px] uppercase tracking-wider text-[#7e8aaa] font-semibold leading-tight">
+          Updated
+        </span>
+        <span className="text-[11px] mono font-bold text-[#dde1ed] leading-tight truncate">
+          {lastUpdateValue}
+        </span>
+      </div>
     </div>
   )
 }

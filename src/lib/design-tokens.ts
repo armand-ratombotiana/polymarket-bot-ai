@@ -99,6 +99,27 @@ export function fmtAge(epochSec: number | null | undefined): string {
   return `${Math.floor(diff / 3600)}h ago`
 }
 
+// W39-5 — Duration formatters used by the redesigned positions + orders
+// tables. `fmtDurationHm` produces a compact "3h 24m" / "12m" / "45s" string
+// suitable for the "Time held" column; `fmtTimeAbs` produces an ISO
+// HH:MM:SS UTC timestamp for hover/title tooltips.
+/** Epoch seconds → "3h 24m" / "12m" / "45s" duration since timestamp. */
+export function fmtDurationHm(epochSec: number | null | undefined): string {
+  if (epochSec == null) return '—'
+  const diff = Math.max(0, Date.now() / 1000 - epochSec)
+  if (diff < 60) return `${Math.floor(diff)}s`
+  if (diff < 3600) return `${Math.floor(diff / 60)}m`
+  const h = Math.floor(diff / 3600)
+  const m = Math.floor((diff % 3600) / 60)
+  return `${h}h ${m}m`
+}
+
+/** Epoch seconds → "HH:MM:SS UTC" absolute timestamp for tooltips/titles. */
+export function fmtTimeAbs(epochSec: number | null | undefined): string {
+  if (epochSec == null) return '—'
+  return new Date(epochSec * 1000).toISOString().slice(0, 19).replace('T', ' ') + ' UTC'
+}
+
 /** Return CSS freshness class based on age in seconds. */
 export function freshnessClass(epochSec: number | null | undefined, staleThreshSec = 30, deadThreshSec = 120): string {
   if (epochSec == null) return 'freshness-dead'

@@ -33,18 +33,21 @@ import PanelErrorBoundary from '@/components/PanelErrorBoundary'
 import { AnimatePresence, FadeIn } from '@/components/ui/motion'
 
 // Command Center
-import RiskStatusPanel from '@/components/RiskStatusPanel'
 import EquityCurve from '@/components/EquityCurve'
 import AnalyticsPanel from '@/components/AnalyticsPanel'
 import MLPanel from '@/components/MLPanel'
-import EventLog from '@/components/EventLog'
-// W38-3 — Compact system health bar (backend / WS / freshness / risk /
-// kill switch) + grouped aggregated metrics strip (Portfolio | Trading |
-// Risk | AI | System). Mounted at the top of the Command Center so the
-// trader can scan the workstation's posture before drilling into the
-// risk / markets / positions detail panels below.
-import CommandCenterHealthBar from '@/components/CommandCenterHealthBar'
-import CommandCenterMetricsStrip from '@/components/CommandCenterMetricsStrip'
+// W39-3 — Redesigned Command Center dashboard. Replaces the prior
+// CommandCenterHealthBar + CommandCenterMetricsStrip + panel-grid assembly
+// with a single five-row trading dashboard:
+//   1. System status bar (Backend · WS · Fresh · Risk · Kill · AI · Updated)
+//   2. Top bar KPIs (Balance · Available · Exposure — 3 large)
+//   3. P&L row KPIs (Realized · Unrealized · Daily · Win% · Drawdown — 5 med)
+//   4. Risk bar (Risk status · Kill switch · Max exposure used)
+//   5. Main grid (Active positions | Order books | Recent trades | Sidebar)
+// Each KPI card uses the new <KpiCard> primitive with label/value/sub/
+// tone/loading-skeleton/stale-pill states (CSS utility classes declared in
+// globals.css under the W39-3 KPI design-token block).
+import CommandCenterDashboard from '@/components/CommandCenterDashboard'
 
 // Markets
 import MarketsPanel from '@/components/MarketsPanel'
@@ -661,73 +664,59 @@ export default function Dashboard() {
             {/* ── 1. Command Center ──────────────────────────────────── */}
             {activeSection === 'command' && (
               <PanelErrorBoundary label="Command Center">
-              <div className="command-center-layout">
-                {/* W38-3 — Compact 5-indicator system health bar + grouped
-                    metrics strip. Sits above the risk/market/pos/orders/events
-                    grid so the trader scans the workstation's posture (backend
-                    / WS / freshness / risk / kill switch + 16 KPIs grouped by
-                    Portfolio | Trading | Risk | AI | System) before drilling
-                    into the detail panels below. */}
-                <div style={{ gridArea: 'health', minHeight: 0 }}>
-                  <CommandCenterHealthBar
-                    snapshot={snapshot}
-                    status={status}
-                    wsConnected={wsConnected}
-                  />
-                </div>
-                <div style={{ gridArea: 'metrics', minHeight: 0 }}>
-                  <CommandCenterMetricsStrip snapshot={snapshot} />
-                </div>
-                <div style={{ gridArea: 'risk', minHeight: 0 }}>
-                  <RiskStatusPanel />
-                </div>
-                <div style={{ gridArea: 'market', minHeight: 0, overflow: 'hidden' }}>
-                  <MarketsPanel
-                    books={snapshot.order_books}
-                    onSelectMarket={handleSelectMarketForChart}
-                    priceFlashes={priceFlashes}
-                    showPriceFlashes={preferences.showPriceFlashes}
-                  />
-                </div>
-                <div style={{ gridArea: 'pos', minHeight: 0, overflow: 'hidden' }}>
-                  <PositionsPanel
-                    positions={snapshot.positions}
-                    dailyPnl={snapshot.daily_pnl}
-                    onSelectMarket={handleSelectPositionForChart}
-                    onClosePosition={closePosition}
-                    priceFlashes={priceFlashes}
-                    showUnrealizedPnl={preferences.showUnrealizedPnl}
-                    showPriceFlashes={preferences.showPriceFlashes}
-                    isRealtime={wsConnected}
-                  />
-                </div>
-                <div style={{ gridArea: 'orders', minHeight: 0, overflow: 'hidden' }}>
-                  <OrdersPanel
-                    orders={snapshot.open_orders}
-                    onCancel={cancelOrder}
-                    onCancelAll={handleOpenCancelAllDialog}
-                    isRealtime={wsConnected}
-                  />
-                </div>
-                <div style={{ gridArea: 'events', minHeight: 0, overflow: 'hidden' }}>
-                  <EventLog events={snapshot.events} />
-                </div>
-                <div
-                  style={{
-                    gridArea: 'sidebar',
-                    minHeight: 0,
-                    overflow: 'auto',
-                    display: 'flex',
-                    flexDirection: 'column',
-                    gap: '10px',
-                  }}
-                  className="scrollbar-thin"
-                >
-                  <EquityCurve />
-                  <AnalyticsPanel />
-                  <MLPanel snapshotMl={snapshot?.ml} />
-                </div>
-              </div>
+                {/* W39-3 — Redesigned Command Center dashboard.
+                    Replaces the prior panel-grid assembly with a single
+                    five-row trading dashboard:
+                      1. System status bar (top) — Backend · WS · Fresh ·
+                         Risk · Kill · AI · Updated timestamp.
+                      2. Top bar — 3 large hero KPIs (Balance, Available,
+                         Exposure) with trend sub-text + stale pills.
+                      3. P&L row — 5 medium KPIs (Realized, Unrealized,
+                         Daily, Win Rate, Drawdown) with color tones +
+                         loading skeletons.
+                      4. Risk bar — Risk status · Kill switch (clickable
+                         when onKillSwitch is wired) · Max exposure used
+                         (with progress bar).
+                      5. Main grid — Active positions (left) · Order books
+                         (center) · Recent trades (right) · Sidebar
+                         (EquityCurve + Analytics + ML).
+                    The dashboard receives the per-panel React nodes so the
+                    existing per-panel WS subscriptions and event handlers
+                    stay where they were. */}
+                <CommandCenterDashboard
+                  snapshot={snapshot}
+                  status={status}
+                  wsConnected={wsConnected}
+                  onKillSwitch={() => setConfirmKill(true)}
+                  positions={
+                    <PositionsPanel
+                      positions={snapshot.positions}
+                      dailyPnl={snapshot.daily_pnl}
+                      onSelectMarket={handleSelectPositionForChart}
+                      onClosePosition={closePosition}
+                      priceFlashes={priceFlashes}
+                      showUnrealizedPnl={preferences.showUnrealizedPnl}
+                      showPriceFlashes={preferences.showPriceFlashes}
+                      isRealtime={wsConnected}
+                    />
+                  }
+                  orderBooks={
+                    <MarketsPanel
+                      books={snapshot.order_books}
+                      onSelectMarket={handleSelectMarketForChart}
+                      priceFlashes={priceFlashes}
+                      showPriceFlashes={preferences.showPriceFlashes}
+                    />
+                  }
+                  recentTrades={<TradesPanel trades={snapshot.recent_trades} />}
+                  sidebar={
+                    <>
+                      <EquityCurve />
+                      <AnalyticsPanel />
+                      <MLPanel snapshotMl={snapshot?.ml} />
+                    </>
+                  }
+                />
               </PanelErrorBoundary>
             )}
 

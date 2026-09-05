@@ -1,23 +1,37 @@
 // components/MarketsPanel.tsx — Pro Markets & Live Order Books Desk with Microstructure Gauges
 //
-// W38-4 — market discovery improvements:
-//   • Market-name column widened to min-w-[280px] / max-w-[440px] with
-//     line-clamp-2 so long event titles wrap to two readable lines
-//     instead of destructively truncating mid-word.
-//   • Category badge (icon + label) added next to each row's event title
-//     so a trader can scan categories at a glance without reading the
-//     question.
-//   • Data-freshness column now shows BOTH the relative age (e.g. "3s")
-//     AND the absolute last-updated timestamp (HH:MM:SS UTC) so a
-//     trader can spot a frozen feed even when the relative timer is
-//     misleading (e.g., after a clock skew).
-//   • Stale threshold bumped to >60s amber (was >30s) per W38-4 spec;
-//     >120s marks the row as dead (red).
-//   • Header now shows a connection-status pill (LIVE / STALE / OFFLINE)
-//     derived from the freshest book — so a trader instantly knows
-//     whether the order-book stream is keeping up.
-//   • Spread filter pills (All / <2¢ / 2–5¢ / >5¢) added below the
-//     category bar so traders can isolate tradable markets by spread.
+// W39-4 — markets/screener readability + filter UX pass:
+//   • Market-name column: kept min-w-[280px] / max-w-[440px] (≥200px spec),
+//     but the inner event-title + question spans switched from
+//     `line-clamp-2` / `whitespace-normal` to single-line `truncate` so
+//     the cell uses `text-overflow: ellipsis` and the W39-4 "tooltip
+//     showing full name" requirement is satisfied via the `title`
+//     attribute on the `<td>` itself + on the inner spans.
+//   • Event title (the small cyan label above the question) moved from
+//     `font-bold` → `font-medium` per the W39-4 "font-weight 500 (not
+//     bold)" rule for market names.
+//   • Category badge kept BEFORE the name (icon + label + colour).
+//   • New active-filter summary bar between the chip row and the table:
+//     `3 filters active [category: CRYPTO] [spread: <2¢] [search: "btc"]`
+//     with a `Reset all` button (named "Reset all" rather than "Clear all"
+//     so it doesn't collide with the MarketScreener test that asserts
+//     `getByRole('button', { name: /clear/i })` returns exactly one
+//     element after typing a search).
+//   • Header now shows a `Showing X of Y markets` counter in addition
+//     to the existing `Active Order Books (Y)` count.
+//   • PriceTicker now receives `timestamp={b.updated_at}` so the
+//     W39-4 "3s ago" freshness readout renders inline next to the
+//     change line. The panel's dedicated freshness column stays (it
+//     shows the absolute UTC timestamp + status pill, complementary).
+//
+// W38-4 — prior market discovery improvements (preserved):
+//   • Market-name column widened to min-w-[280px] / max-w-[440px].
+//   • Category badge (icon + label) added next to each row's event title.
+//   • Data-freshness column shows BOTH relative age (e.g. "3s") AND the
+//     absolute last-updated timestamp (HH:MM:SS UTC).
+//   • Stale threshold >60s amber, >120s marks the row as dead (red).
+//   • Header connection-status pill (LIVE / STALE / OFFLINE / IDLE).
+//   • Spread filter pills (All / <2¢ / 2–5¢ / >5¢) below the category bar.
 'use client'
 
 import { useState, useMemo, useRef, memo } from 'react'
@@ -232,6 +246,21 @@ function MarketsPanel({ books, onSelectMarket, priceFlashes, showPriceFlashes = 
           <span className="card-title text-xs font-bold text-[#dde1ed] flex items-center gap-1.5">
             ⚡ Active Order Books ({books.length})
           </span>
+          {/* W39-4 — result-count summary "Showing X of Y markets".
+              Rendered as a subtle mono pill so a trader can instantly
+              tell whether the current filter is hiding most rows.
+              `books.length` is the upstream total (pre-filter);
+              `sorted.length` is the post-filter visible count. */}
+          <span
+            className="text-[9.5px] mono text-[#7e8aaa] inline-flex items-center gap-1 px-1.5 py-0.5 rounded border border-[#1f2335] bg-[#13161e]"
+            data-testid="markets-result-count"
+            title={`Showing ${sorted.length} of ${books.length} markets after the active filters`}
+          >
+            Showing <strong className="text-cyan-300 font-semibold">{sorted.length}</strong>
+            <span className="opacity-50">of</span>
+            <strong className="text-[#dde1ed] font-semibold">{books.length}</strong>
+            markets
+          </span>
           {/* W38-4 — connection-status pill derived from the freshest book.
               LIVE / STALE / OFFLINE / IDLE — see deriveConnStatus(). */}
           <span
@@ -333,6 +362,89 @@ function MarketsPanel({ books, onSelectMarket, priceFlashes, showPriceFlashes = 
         ))}
       </div>
 
+      {/* W39-4 — Active filter summary bar.
+          Renders only when one or more filters are active (search,
+          category, or spread). Lists each active filter as a removable
+          chip so a trader can see exactly which constraints are applied
+          AND clear them individually. The trailing `Reset all` button
+          clears everything in one click.
+
+          Named "Reset all" (not "Clear all") so the MarketScreener test
+          `getByRole('button', { name: /clear/i })` — which expects
+          exactly one matching button after typing a search — doesn't
+          accidentally match this one. The MarketsPanel tests don't
+          assert on this button's name, so the choice is free here, but
+          staying consistent with MarketScreener keeps the visual
+          language aligned across the two panels. */}
+      {(search !== '' || selectedCat !== 'ALL' || spreadFilter !== 'ALL') && (
+        <div
+          className="flex flex-wrap items-center gap-1.5 px-3 py-1.5 bg-[#0e1015]/60 border-b border-[#1f2335] text-[10.5px]"
+          data-testid="markets-active-filters"
+        >
+          <span className="text-[#7e8aaa] uppercase font-bold tracking-wider mr-0.5" aria-hidden="true">
+            {[
+              search !== '' ? 1 : 0,
+              selectedCat !== 'ALL' ? 1 : 0,
+              spreadFilter !== 'ALL' ? 1 : 0,
+            ].reduce((a, b) => a + b, 0)} filters active
+          </span>
+          {search !== '' && (
+            <button
+              onClick={() => setSearch('')}
+              className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded border border-blue-500/30 bg-blue-500/10 text-cyan-300 hover:bg-blue-500/20 transition-colors"
+              title="Remove search filter"
+              aria-label="Remove search filter"
+              data-testid="active-filter-search"
+            >
+              <span className="opacity-70">search:</span>
+              <strong className="font-semibold">"{search}"</strong>
+              <span className="opacity-60" aria-hidden="true">×</span>
+            </button>
+          )}
+          {selectedCat !== 'ALL' && (
+            <button
+              onClick={() => setSelectedCat('ALL')}
+              className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded border border-blue-500/30 bg-blue-500/10 text-cyan-300 hover:bg-blue-500/20 transition-colors"
+              title="Remove category filter"
+              aria-label={`Remove category filter: ${selectedCat}`}
+              data-testid="active-filter-category"
+            >
+              <span className="opacity-70">category:</span>
+              <strong className="font-semibold">{selectedCat}</strong>
+              <span className="opacity-60" aria-hidden="true">×</span>
+            </button>
+          )}
+          {spreadFilter !== 'ALL' && (
+            <button
+              onClick={() => setSpreadFilter('ALL')}
+              className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded border border-cyan-500/30 bg-cyan-500/10 text-cyan-300 hover:bg-cyan-500/20 transition-colors"
+              title="Remove spread filter"
+              aria-label={`Remove spread filter: ${spreadFilter}`}
+              data-testid="active-filter-spread"
+            >
+              <span className="opacity-70">spread:</span>
+              <strong className="font-semibold">
+                {SPREAD_FILTERS.find((f) => f.key === spreadFilter)?.label ?? spreadFilter}
+              </strong>
+              <span className="opacity-60" aria-hidden="true">×</span>
+            </button>
+          )}
+          <button
+            onClick={() => {
+              setSearch('')
+              setSelectedCat('ALL')
+              setSpreadFilter('ALL')
+            }}
+            className="ml-auto btn btn-ghost btn-xs text-[10px] font-bold"
+            title="Clear all active filters"
+            aria-label="Reset all filters"
+            data-testid="reset-all-filters"
+          >
+            Reset all
+          </button>
+        </div>
+      )}
+
       {/* 3. Table */}
       <div className="overflow-auto scrollbar-thin flex-1 table-container">
         {books.length === 0 ? (
@@ -375,24 +487,30 @@ function MarketsPanel({ books, onSelectMarket, priceFlashes, showPriceFlashes = 
                   onClick={() => handleSort('mid')}
                   className="cursor-pointer hover:text-white select-none text-right"
                   title="Sort by implied probability (midpoint)"
+                  aria-sort={sortBy === 'mid' ? (sortAsc ? 'ascending' : 'descending') : 'none'}
                 >
                   Implied Odds {sortBy === 'mid' ? (sortAsc ? '▲' : '▼') : ''}
+                  <span className="sr-only">. Click to sort by implied probability.</span>
                 </th>
                 <th
                   scope="col"
                   onClick={() => handleSort('spread')}
                   className="cursor-pointer hover:text-white select-none text-right"
                   title="Sort by bid-ask spread"
+                  aria-sort={sortBy === 'spread' ? (sortAsc ? 'ascending' : 'descending') : 'none'}
                 >
                   Spread {sortBy === 'spread' ? (sortAsc ? '▲' : '▼') : ''}
+                  <span className="sr-only">. Click to sort by bid-ask spread.</span>
                 </th>
                 <th
                   scope="col"
                   onClick={() => handleSort('age')}
                   className="cursor-pointer hover:text-white select-none text-center"
                   title="Sort by data age"
+                  aria-sort={sortBy === 'age' ? (sortAsc ? 'ascending' : 'descending') : 'none'}
                 >
                   Freshness {sortBy === 'age' ? (sortAsc ? '▲' : '▼') : ''}
+                  <span className="sr-only">. Click to sort by data freshness.</span>
                 </th>
                 <th scope="col" className="text-right">Actions</th>
               </tr>
@@ -439,44 +557,68 @@ function MarketsPanel({ books, onSelectMarket, priceFlashes, showPriceFlashes = 
                       isDead ? 'row-stale opacity-60' : isStale ? 'row-stale' : ''
                     }`}
                   >
-                    {/* W38-4 — widened max-w from 320px → 440px to match
-                        the header column and allow long event titles
-                        to wrap to two readable lines (line-clamp-2). */}
-                    <td className="py-2.5 max-w-[440px]">
-                      <div className="flex flex-col gap-0.5">
+                    {/* W39-4 — market-name cell.
+                        Column width: min-w-[280px] / max-w-[440px] (≥200px
+                        per spec, kept from W38-4). The `title` attribute
+                        on the `<td>` itself provides a native hover
+                        tooltip showing the full event + question text so
+                        a trader can read a long title even when the
+                        single-line ellipsis truncates it.
+
+                        Inner spans:
+                          • category badge (icon + label) BEFORE the name
+                          • eventTitle  — single-line `truncate` with
+                            `font-medium` (was `font-bold` + `line-clamp-2`;
+                            W39-4 wants ellipsis + 500 weight)
+                          • question    — single-line `truncate` with
+                            `font-medium` (the main readable market name)
+                          • token-copy chip on the right */}
+                    <td
+                      className="py-2.5 max-w-[440px] align-middle"
+                      title={`${info.eventTitle} — ${info.question} (token ${b.token_id})`}
+                    >
+                      <div className="flex flex-col gap-0.5 min-w-0">
                         {/* Category Tag & Token Copy Button */}
-                        <div className="flex items-center gap-1.5 flex-wrap">
-                          <span className="text-xs" aria-hidden="true">{info.category.icon}</span>
+                        <div className="flex items-center gap-1.5 flex-wrap min-w-0">
+                          <span className="text-xs shrink-0" aria-hidden="true">{info.category.icon}</span>
                           {/* W38-4 — category badge with icon + label so a
                               trader can scan categories at a glance without
                               reading the question. */}
                           <span
-                            className={`text-[9px] font-bold uppercase tracking-wider px-1 py-0.5 rounded border ${info.category.color}`}
+                            className={`text-[9px] font-bold uppercase tracking-wider px-1 py-0.5 rounded border shrink-0 ${info.category.color}`}
                             title={`Category: ${info.category.label}`}
                           >
                             {info.category.label}
                           </span>
-                          {/* W38-4 — line-clamp-2 (was truncate) so long
-                              event titles wrap to two readable lines
-                              instead of destructively truncating mid-word. */}
+                          {/* W39-4 — single-line `truncate` (was `line-clamp-2`)
+                              so the cell uses `text-overflow: ellipsis`.
+                              Weight bumped from `font-bold` → `font-medium`
+                              (500) per the W39-4 spec. Title attribute
+                              preserves the full text for hover tooltips. */}
                           <span
-                            className="text-[9.5px] text-cyan-400 font-bold uppercase tracking-wider line-clamp-2 leading-tight"
+                            className="text-[9.5px] text-cyan-400 font-medium uppercase tracking-wider truncate leading-tight min-w-0"
                             title={info.fullLabel}
                           >
                             {info.eventTitle}
                           </span>
                           <button
                             onClick={(e) => handleCopy(e, b.token_id)}
-                            className="text-[9px] text-[#3e4560] group-hover:text-[#7e8aaa] hover:!text-white transition-colors mono ml-1"
+                            className="text-[9px] text-[#3e4560] group-hover:text-[#7e8aaa] hover:!text-white transition-colors mono ml-1 shrink-0"
                             title="Click to copy Token ID"
+                            aria-label={isCopied ? `Token ID ${b.token_id} copied to clipboard` : `Copy token ID ${b.token_id} to clipboard`}
+                            aria-pressed={isCopied}
                           >
                             {isCopied ? '✓ Copied' : `[#${b.token_id.slice(0, 6)}…]`}
                           </button>
                         </div>
-                        {/* Question Title */}
+                        {/* Question Title — the main readable market name.
+                            W39-4: switched from `whitespace-normal` (full
+                            text wraps) to `truncate` (single-line ellipsis)
+                            so long titles ellipsize cleanly; the `title`
+                            attribute preserves the full text on hover. */}
                         <span
-                          className="text-[#dde1ed] group-hover:text-cyan-300 font-medium leading-snug text-xs block whitespace-normal transition-colors"
-                          title={info.fullLabel}
+                          className="text-[#dde1ed] group-hover:text-cyan-300 font-medium leading-snug text-xs block truncate transition-colors min-w-0"
+                          title={info.question}
                         >
                           {info.question}
                         </span>
@@ -486,7 +628,12 @@ function MarketsPanel({ books, onSelectMarket, priceFlashes, showPriceFlashes = 
                     {/* W15-1 — PriceTicker replaces the static Bid / Ask / Spread cells.
                         The component shows mid (animated + colored by tick direction),
                         a bid/ask chip on the left, a spread chip on the right, and a
-                        change-since-last-tick line beneath. */}
+                        change-since-last-tick line beneath.
+                        W39-4: now also passes `timestamp={b.updated_at}` so the
+                        ticker renders a compact "3s ago" freshness readout
+                        beneath the change line. (Complementary to the dedicated
+                        Freshness column, which shows the absolute UTC time +
+                        status pill — useful when a trader's clock is skewed.) */}
                     <td className="text-right py-2.5 pr-3">
                       <div className="flex justify-end relative">
                         <PriceTicker
@@ -497,6 +644,7 @@ function MarketsPanel({ books, onSelectMarket, priceFlashes, showPriceFlashes = 
                           spread={b.spread}
                           size="sm"
                           label={`${info.eventTitle} ${info.question} mid price`}
+                          timestamp={b.updated_at}
                         />
                       </div>
                     </td>

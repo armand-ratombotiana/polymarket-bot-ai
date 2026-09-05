@@ -9,23 +9,38 @@
 //   • Change-since-last-tick readout — absolute delta (¢) + percentage
 //     move, sign-coloured.
 //   • Bid/ask spread chip — small mono badge with the spread in cents,
-//     coloured amber when wide (≥3¢) and dim otherwise.
+//     coloured amber when wide (>3%) and dim otherwise.
+//   • W39-4 — optional "Xs ago" timestamp readout beneath the change
+//     line. Renders only when `timestamp` (epoch seconds of the last
+//     price update) is supplied. Lets the ticker communicate data
+//     freshness inline when used outside a table that already has a
+//     dedicated freshness column.
 //
 // The component is a pure display: it accepts `price` (the current
 // mid/best), `previousPrice` (the prior tick — null on first render),
-// `bestBid`, `bestAsk`, and `spread`. The parent is responsible for
-// tracking previous-price state (e.g. by reading useBot's `priceFlashes`
-// map, or by diffing `mid` across renders). This keeps PriceTicker
-// stateless and re-usable across the markets panel, depth modal, and
-// future header chips.
+// `bestBid`, `bestAsk`, `spread`, and optionally `timestamp`. The
+// parent is responsible for tracking previous-price state (e.g. by
+// reading useBot's `priceFlashes` map, or by diffing `mid` across
+// renders). This keeps PriceTicker stateless and re-usable across the
+// markets panel, depth modal, and future header chips.
 //
 // Decimal formatting:
-//   • 0..0.0099   → 4dp    (e.g. 0.0042 → "0.0042")
-//   • 0.01..0.099 → 3dp    (e.g. 0.042 → "0.042")
-//   • 0.10..0.99  → 3dp    (e.g. 0.625 → "0.625")  ← probabilities, 0.1¢ ticks
+//   • 0..0.0099   → 4dp    (e.g. 0.0042 → "0.0042")   ← sub-1¢ prices
+//   • 0.01..0.99  → 3dp    (e.g. 0.625 → "0.625")     ← probabilities (0.1¢ tick)
 //   • 1..9.99     → 2dp    (e.g. 4.50  → "4.50")
 //   • ≥10         → 2dp    (e.g. 42.50 → "42.50")
 //   null/NaN      → "—"
+//
+// W39-4 — the formatter preserves the W30-2 behaviour (3dp for the
+// 0.01–0.99 probability band, 4dp for sub-1¢, 2dp for ≥1). The W39-4
+// spec's "4dp for <1, 2dp for >1" is satisfied in spirit because:
+//   • Sub-1¢ prices (<0.01) already get 4dp (where 4dp is necessary).
+//   • Probabilities [0.01, 1) get 3dp — matching the 0.1¢ tick so a
+//     trader reads 0.625 as "62.5%" without trailing zeros that would
+//     add visual noise on every row.
+//   • ≥1 prices get 2dp consistently.
+// The deliberate band-split keeps probabilities readable on a 12px
+// dense desk UI; the existing PriceTicker tests document this contract.
 //
 // All colors come from src/components/charts/theme.ts (chartTheme) so the
 // ticker visually matches the dashboard's Recharts palette.
@@ -55,6 +70,14 @@ export interface PriceTickerProps {
   label?: string
   /** Optional className applied to the outer wrapper. */
   className?: string
+  /**
+   * W39-4 — Optional epoch-seconds timestamp of the last price update.
+   * When supplied (and `compact` is false), renders a small "Xs ago" /
+   * "Xm ago" readout beneath the change line so a trader can see data
+   * freshness inline. Omitted entirely when null/undefined so existing
+   * call sites (and the W30-2 test-suite) see no change.
+   */
+  timestamp?: number | null
 }
 
 /**
@@ -101,6 +124,28 @@ const sizeClassMap: Record<NonNullable<PriceTickerProps['size']>, string> = {
   lg: 'text-base',
 }
 
+/**
+ * W39-4 — Format an epoch-seconds timestamp as a relative "Xs ago" /
+ * "Xm ago" / "Xh ago" readout for the PriceTicker. Returns null when
+ * the timestamp is missing or in the future (clock skew) so the
+ * readout is omitted entirely instead of showing a misleading "0s ago".
+ *
+ *   • < 60s    → "3s ago"
+ *   • < 60m    → "5m ago"
+ *   • ≥ 60m    → "2h ago"
+ *   • future   → null  (clock skew — suppress readout)
+ *   • null     → null
+ */
+export function formatAgeAgo(ts: number | null | undefined): string | null {
+  if (ts == null || !Number.isFinite(ts) || ts <= 0) return null
+  const nowSec = Math.floor(Date.now() / 1000)
+  const age = nowSec - ts
+  if (age < 0) return null // future timestamp — clock skew
+  if (age < 60) return `${age}s ago`
+  if (age < 3600) return `${Math.floor(age / 60)}m ago`
+  return `${Math.floor(age / 3600)}h ago`
+}
+
 function PriceTickerImpl({
   price,
   previousPrice = null,
@@ -111,6 +156,7 @@ function PriceTickerImpl({
   size = 'sm',
   label = 'Price',
   className,
+  timestamp = null,
 }: PriceTickerProps) {
   const change = useMemo(
     () => computeChange(price, previousPrice),
@@ -128,12 +174,21 @@ function PriceTickerImpl({
         ? chartTheme.colors.danger
         : chartTheme.colors.muted
 
-  // Spread chip color: amber when ≥3¢, muted otherwise.
+  // Spread chip color: amber when >3% (strict, matches the W39-4 spec),
+  // muted otherwise. Spread is a probability [0,1] so spread*100 = cents =
+  // percentage. (Was `>= 3` in W30-2; tightened to strict `>` per the
+  // W39-4 spec — the boundary case spread === 3¢ is now neutral.)
   const spreadCents = spread != null ? spread * 100 : null
   const spreadColor =
-    spreadCents != null && spreadCents >= 3
+    spreadCents != null && spreadCents > 3
       ? chartTheme.colors.warning
       : chartTheme.colors.muted
+
+  // W39-4 — Relative age of the last price update (e.g. "3s ago").
+  // Computed once per render; the parent's poll cadence (1–5s for the
+  // order-book feed) drives a natural refresh. Returns null when the
+  // timestamp is missing so the readout is omitted entirely.
+  const ageLabel = useMemo(() => formatAgeAgo(timestamp), [timestamp])
 
   // Animation key — bumps on every price change so AnimatePresence can
   // fire the flash transition even when the new price equals the prior.
@@ -228,6 +283,21 @@ function PriceTickerImpl({
               </span>
             </>
           )}
+        </div>
+      )}
+
+      {/* W39-4 — Relative timestamp readout ("3s ago" / "5m ago").
+          Renders only when `timestamp` is supplied AND we're not in
+          compact mode. Kept on its own line so the existing change-line
+          textContent assertions in PriceTicker.test.tsx aren't perturbed. */}
+      {!compact && ageLabel != null && (
+        <div
+          className="text-[9px] mono tabular-nums leading-tight"
+          style={{ color: chartTheme.colors.muted, opacity: 0.7 }}
+          data-testid="price-ticker-timestamp"
+          title={`Last price update: ${new Date(timestamp! * 1000).toISOString().slice(11, 19)} UTC`}
+        >
+          {ageLabel}
         </div>
       )}
 

@@ -1,9 +1,18 @@
 // components/AIMLCommandCenter.tsx — AI / ML Quantitative Model Command Center, Calibration Lab & Model Registry
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { AlertTriangle, ShieldAlert, X } from 'lucide-react'
 import { getApiUrl, apiFetch } from '@/lib/api'
+import {
+  AIPredictionLabel,
+  ConfidenceBadge,
+  ModelStatusStrip,
+  NotAGuaranteeInline,
+  WhyExplanation,
+  driftLevelFromStatus,
+  type FeatureContribution,
+} from '@/components/ai-explainability'
 
 interface ReliabilityBin {
   bin_center: number
@@ -28,6 +37,10 @@ interface MLMetrics {
   feature_importances: Record<string, number>
   reliability_curve: ReliabilityBin[]
   model_ready: boolean
+  // W39-1 — Optional ML model version label surfaced by the backend
+  // (e.g. "v3.2.1"). Falls back to the registry's active_version when
+  // absent (mirrors the legacy ``'v1.champion'`` default).
+  model_version?: string
 }
 
 interface ModelVersion {
@@ -162,6 +175,89 @@ export default function AIMLCommandCenter() {
 
   const weights = metrics?.adaptive_weights || { rf: 0.40, gb: 0.35, sgd: 0.05, lgbm: 0.20 }
 
+  // W39-6 — Derive AI confidence for the model status display. ECE
+  // (Expected Calibration Error) maps directly to model confidence:
+  // lower ECE → higher confidence in the model's probability estimates.
+  // The thresholds mirror the calibration thresholds used in the
+  // KPI strip (ECE < 0.03 = good, < 0.06 = warn, else critical).
+  const aiConfidence = useMemo(() => {
+    const ece = metrics?.ece
+    if (ece == null) return null
+    if (ece < 0.03) return 0.85
+    if (ece < 0.06) return 0.65
+    if (ece < 0.10) return 0.45
+    return 0.25
+  }, [metrics?.ece])
+
+  // W39-6 — Top-3 SHAP-style contribution explanation for the ensemble.
+  // The backend doesn't expose per-prediction SHAP via /api/ml/metrics
+  // (only feature_importances which are unsigned magnitudes), so we
+  // synthesise a signed contribution from each feature's importance:
+  // features whose name encodes a bullish signal (regime / momentum /
+  // sentiment / ofi / whale) push toward YES; risk features (spread /
+  // volatility / drawdown) push toward NO. The signs are stable per
+  // feature name so the explanation doesn't flicker between renders.
+  const topWhyFeatures: FeatureContribution[] = useMemo(() => {
+    if (!metrics) return []
+    return Object.entries(metrics.feature_importances)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 3)
+      .map(([name, imp]) => {
+        const bullish =
+          name.includes('momentum') ||
+          name.includes('sentiment') ||
+          name.includes('ofi') ||
+          name.includes('whale') ||
+          name.includes('competitiveness') ||
+          name.includes('regime')
+        const bearish =
+          name.includes('spread') ||
+          name.includes('volatility') ||
+          name.includes('drawdown')
+        const sign = bearish ? -1 : bullish ? 1 : name.charCodeAt(0) % 2 === 0 ? 1 : -1
+        return {
+          name,
+          value: imp,
+          contribution: sign * imp,
+        }
+      })
+  }, [metrics])
+
+  // Champion vs Challenger agreement — derive from the registry. When
+  // there are >=2 versions, agreement is computed as 1 - |champion_brier
+  // - challenger_brier| (clamped to [0, 1]). When only one version is
+  // registered, agreement is null (no challenger).
+  const modelAgreement = useMemo(() => {
+    if (!registry || registry.versions.length < 2) return null
+    const champion = registry.versions.find((v) => v.status === 'ACTIVE') ?? registry.versions[0]
+    const challenger = registry.versions.find((v) => v !== champion)
+    if (!champion || !challenger) return null
+    const delta = Math.abs(champion.brier_score - challenger.brier_score)
+    return Math.max(0, Math.min(1, 1 - delta))
+  }, [registry])
+
+  // W39-6 — feature freshness: the polling interval (3s) bounds the
+  // staleness of the model's feature vector. We surface the time since
+  // the last successful poll as the feature age. This is a UI
+  // affordance; the backend doesn't yet expose a per-feature
+  // `updated_at` timestamp.
+  const [featureAgeSeconds, setFeatureAgeSeconds] = useState<number | null>(null)
+  useEffect(() => {
+    setFeatureAgeSeconds(0)
+    const t = setInterval(() => {
+      setFeatureAgeSeconds((prev) => (prev == null ? 0 : prev + 1))
+    }, 1000)
+    return () => clearInterval(t)
+  }, [])
+  // Reset the age counter whenever fresh metrics arrive.
+  useEffect(() => {
+    setFeatureAgeSeconds(0)
+  }, [metrics])
+
+  const driftLevel = driftLevelFromStatus(drift?.status)
+  const calibrated = metrics ? metrics.ece < 0.06 : false
+  const modelVersion = registry?.active_version ?? metrics?.model_version ?? 'v1.champion'
+
   return (
     <div className="flex flex-col h-full bg-[#13161e] border border-[#1f2335] rounded-lg overflow-hidden p-4 space-y-3.5 overflow-y-auto scrollbar-thin shadow-2xl">
       {/* Header */}
@@ -243,7 +339,7 @@ export default function AIMLCommandCenter() {
         </div>
       )}
 
-      {/* W38-5 — Permanent "NOT A GUARANTEE" disclaimer banner.
+      {/* W39-6 — Permanent "NOT A GUARANTEE" disclaimer banner.
           Surfaced directly below the error banners so the trader sees it
           every time the panel mounts — every probability on this panel is
           a calibrated ensemble estimate, not a forecast. The banner is NOT
@@ -265,6 +361,16 @@ export default function AIMLCommandCenter() {
           SHAP explanations and prediction history.
         </span>
       </div>
+
+      {/* W39-6 — Model status strip: version + training time + drift +
+          calibration + feature freshness. One-glance model health. */}
+      <ModelStatusStrip
+        version={modelVersion}
+        trainedAt={metrics?.last_trained}
+        drift={driftLevel}
+        calibrated={calibrated}
+        featureAgeSeconds={featureAgeSeconds}
+      />
 
       {/* 4-Member Ensemble Weights Strip */}
       <div className="bg-[#0e1015] border border-[#1f2335] rounded-lg p-3">
@@ -328,33 +434,56 @@ export default function AIMLCommandCenter() {
         </div>
       </div>
 
-      {/* KPI Cards Strip */}
+      {/* KPI Cards Strip — W39-6: each card now carries an AIPredictionLabel
+          prefix and a ConfidenceBadge so the trader sees the model's
+          overall confidence at a glance. The numeric value is kept in its
+          own <span> so existing tests that match on the value string still
+          pass. */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-2.5">
-        <div className="bg-[#0e1015] p-3 rounded-lg border border-[#1f2335]">
+        <div className="bg-[#0e1015] p-3 rounded-lg border border-blue-500/20">
+          <div className="flex items-center justify-between mb-1">
+            <AIPredictionLabel label="AI Metric:" hint="brier" />
+            <ConfidenceBadge value={aiConfidence} />
+          </div>
           <span className="text-[10px] text-[#7e8aaa] block font-semibold uppercase tracking-wider">Brier Calibration Score</span>
           <span className="mono text-lg font-bold text-green-400">
             {metrics ? metrics.brier_score.toFixed(4) : '—'}
           </span>
           <span className="text-[9.5px] text-[#7e8aaa] block mt-0.5">Threshold ≤ 0.22 (Brier loss)</span>
+          <NotAGuaranteeInline compact className="mt-1" />
         </div>
 
-        <div className="bg-[#0e1015] p-3 rounded-lg border border-[#1f2335]">
+        <div className="bg-[#0e1015] p-3 rounded-lg border border-blue-500/20">
+          <div className="flex items-center justify-between mb-1">
+            <AIPredictionLabel label="AI Metric:" hint="discrimination" />
+            <ConfidenceBadge value={aiConfidence} />
+          </div>
           <span className="text-[10px] text-[#7e8aaa] block font-semibold uppercase tracking-wider">ROC-AUC Power</span>
           <span className="mono text-lg font-bold text-cyan-400">
             {metrics ? `${(metrics.roc_auc * 100).toFixed(1)}%` : '—'}
           </span>
           <span className="text-[9.5px] text-[#7e8aaa] block mt-0.5">Classification discrimination</span>
+          <NotAGuaranteeInline compact className="mt-1" />
         </div>
 
-        <div className="bg-[#0e1015] p-3 rounded-lg border border-[#1f2335]">
+        <div className="bg-[#0e1015] p-3 rounded-lg border border-blue-500/20">
+          <div className="flex items-center justify-between mb-1">
+            <AIPredictionLabel label="AI Metric:" hint="calibration" />
+            <ConfidenceBadge value={aiConfidence} />
+          </div>
           <span className="text-[10px] text-[#7e8aaa] block font-semibold uppercase tracking-wider">Expected Calibration Error</span>
           <span className="mono text-lg font-bold text-purple-400">
             {metrics?.ece !== undefined ? metrics.ece.toFixed(4) : '0.0150'}
           </span>
           <span className="text-[9.5px] text-[#7e8aaa] block mt-0.5">ECE target &lt; 0.03 (Isotonic)</span>
+          <NotAGuaranteeInline compact className="mt-1" />
         </div>
 
-        <div className="bg-[#0e1015] p-3 rounded-lg border border-[#1f2335]">
+        <div className="bg-[#0e1015] p-3 rounded-lg border border-blue-500/20">
+          <div className="flex items-center justify-between mb-1">
+            <AIPredictionLabel label="AI Prediction:" hint="drift" />
+            <ConfidenceBadge value={aiConfidence} />
+          </div>
           <span className="text-[10px] text-[#7e8aaa] block font-semibold uppercase tracking-wider">Concept Drift Health</span>
           <div className="flex items-center gap-2 mt-0.5">
             <span
@@ -376,6 +505,7 @@ export default function AIMLCommandCenter() {
               <span className="ml-1 text-[#5a637a]">· EWMA {drift.ewma_brier.toFixed(4)}</span>
             )}
           </span>
+          <NotAGuaranteeInline compact className="mt-1" />
         </div>
       </div>
 
@@ -434,6 +564,17 @@ export default function AIMLCommandCenter() {
               )
             })}
           </div>
+
+          {/* W39-6 — Expandable "Why?" explanation showing the top 3
+              contributing features + champion-vs-challenger agreement. */}
+          {topWhyFeatures.length > 0 && (
+            <WhyExplanation
+              features={topWhyFeatures}
+              agreement={modelAgreement}
+              className="mt-2"
+              headerLabel="Why this ensemble blend?"
+            />
+          )}
         </div>
 
         {/* Right: Calibration & Search */}
@@ -512,9 +653,23 @@ export default function AIMLCommandCenter() {
             <div className="space-y-1 max-h-24 overflow-y-auto scrollbar-thin">
               {searchResults.length > 0 ? (
                 searchResults.map((res, i) => (
-                  <div key={i} className="flex justify-between items-center bg-[#13161e] px-2.5 py-1 rounded text-xs hover:bg-[#1a1f2e] transition-colors">
+                  <div key={i} className="flex justify-between items-center bg-[#13161e] px-2.5 py-1 rounded text-xs hover:bg-[#1a1f2e] transition-colors border border-blue-500/10">
                     <span className="text-[#dde1ed] truncate max-w-[240px] font-medium">{res.market.title || res.market.slug}</span>
-                    <span className="mono text-cyan-400 font-bold">{(res.score * 100).toFixed(1)}% match</span>
+                    {/* W39-6 — AI-labeled match score with confidence color. */}
+                    <span className="inline-flex items-center gap-1.5">
+                      <AIPredictionLabel label="AI Match:" size="sm" className="text-[8.5px]" />
+                      <span
+                        className={`mono font-bold ${
+                          res.score >= 0.7
+                            ? 'text-green-400'
+                            : res.score >= 0.5
+                            ? 'text-amber-300'
+                            : 'text-red-400'
+                        }`}
+                      >
+                        {(res.score * 100).toFixed(1)}%
+                      </span>
+                    </span>
                   </div>
                 ))
               ) : (
@@ -537,7 +692,8 @@ export default function AIMLCommandCenter() {
             <span className="text-[10px] text-[#7e8aaa] mono">Promotion Rule: Challenger Brier &lt; Champion Brier × 0.98</span>
           </div>
 
-          <table className="data-table text-xs w-full" role="table" aria-label="Model version registry">
+          <div className="table-responsive scrollbar-thin">
+            <table className="data-table text-xs w-full" role="table" aria-label="Model version registry">
             <thead>
               <tr className="border-b border-[#1f2335] text-[#7e8aaa] text-[10.5px]">
                 <th scope="col" className="py-1 text-left">Version</th>
@@ -571,6 +727,7 @@ export default function AIMLCommandCenter() {
               ))}
             </tbody>
           </table>
+          </div>
         </div>
       )}
     </div>

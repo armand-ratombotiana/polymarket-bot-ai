@@ -1,6 +1,6 @@
 // components/TradesPanel.tsx — Recent Trade Executions Feed
 //
-// W22-5 — Migrated from the implicit "parent passes snapshot.recent_trades"
+// W22-5 — Migrated from the implicit "parent-passes-snapshot.recent_trades"
 // pattern (the parent's useBot poll drives updates) to the hybrid
 // `useRealtimeData` hook. The panel now:
 //   1. REST-prefetches /api/trades?limit=100 on mount.
@@ -10,17 +10,31 @@
 //   4. Renders a "● Live" / "⟳ Polling" badge so the trader can tell
 //      at a glance whether the executions list is real-time or lagged.
 //
-// Backwards-compat: callers MAY still pass `trades` as a prop (page.tsx
-// still threads useBot's snapshot through; existing tests pass it too).
-// When provided, the prop overrides the fetched data — the WS
-// subscription still runs so `isRealtime` stays accurate. Mirrors the
-// OrdersPanel migration (W15-5) pattern exactly.
+// W39-5 — Redesigned for clearer execution audit clarity:
+//   • Trade direction indicator ↑ (BUY, green) / ↓ (SELL, red) prepended
+//     to the side badge so the direction is scannable at a glance even
+//     without reading the BUY/SELL text.
+//   • Fees + Slippage columns. Both fall back to "—" when the snapshot
+//     doesn't expose them (the Trade interface marks both optional).
+//   • Audit trail link icon (📋) next to the strategy tag. When the
+//     `onViewAuditTrail` callback is provided (page.tsx wires it to
+//     switch the active sidebar section to the Decision Ledger), the
+//     icon is a clickable button that surfaces the trade's
+//     `decision_id` (or falls back to `trade_id`) so the trader can
+//     jump to the decision ledger for full PREDICTION → SIGNAL → RISK
+//     → ORDER → FILL audit chain. Hidden when no callback is provided
+//     so existing tests (which don't pass onViewAuditTrail) still pass.
+//   • Timestamp rendered as relative ("3m ago") with the absolute ISO
+//     timestamp surfaced via the title attribute for hover + screen
+//     reader context.
+//
+// Backwards-compat: callers MAY still pass `trades` as a prop.
 'use client'
 
 import { useState, useMemo, useCallback, memo } from 'react'
 import { Trade } from '@/hooks/useBot'
 import { formatHierarchicalMarket } from '@/lib/formatters'
-import { fmtAge, fmtPrice, fmtPnl, fmtUsd } from '@/lib/design-tokens'
+import { fmtAge, fmtPrice, fmtPnl, fmtUsd, fmtTimeAbs } from '@/lib/design-tokens'
 import { useRealtimeData } from '@/hooks/useRealtimeData'
 import { Badge } from '@/components/ui/badge'
 
@@ -29,22 +43,20 @@ interface TradesApiResponse {
 }
 
 interface Props {
-  /**
-   * Optional override for the trades list. When provided, the panel
-   * uses this directly and skips rendering the useRealtimeData result
-   * (the WS subscription still runs so the Live/Polling badge reflects
-   * the actual transport state). When omitted, the panel self-fetches
-   * via useRealtimeData('/api/trades?limit=100', { wsChannel: 'trades' }).
-   */
   trades?: Trade[]
-  /**
-   * Optional override for the realtime indicator. When omitted, the
-   * panel derives the badge state from useRealtimeData's `isRealtime`.
-   */
   isRealtime?: boolean
+  /**
+   * W39-5 — optional audit-trail callback. When provided, the panel
+   * renders a 📋 link icon next to each trade's strategy tag; clicking
+   * invokes this callback with the trade's `decision_id` (or
+   * `trade_id` fallback) so the parent (page.tsx) can switch to the
+   * Decision Ledger panel filtered to that decision. When omitted,
+   * the audit icon is hidden — preserves the existing test contract.
+   */
+  onViewAuditTrail?: (decisionId: string) => void
 }
 
-function TradesPanel({ trades: tradesOverride, isRealtime: isRealtimeOverride }: Props) {
+function TradesPanel({ trades: tradesOverride, isRealtime: isRealtimeOverride, onViewAuditTrail }: Props) {
   const {
     data: fetched,
     isLoading,
@@ -83,9 +95,23 @@ function TradesPanel({ trades: tradesOverride, isRealtime: isRealtimeOverride }:
     return { totalVol, netPnl, winRate, totalCount: trades.length }
   }, [trades])
 
+  // W39-5 — aggregate fees + average slippage for the header KPI strip.
+  // Both degrade to "—" when no trade in the visible set exposes the
+  // optional fee/slippage_bps fields.
+  const totalFees = useMemo(
+    () => trades.reduce((acc, t) => acc + (typeof t.fee === 'number' ? t.fee : 0), 0),
+    [trades],
+  )
+  const hasFees = useMemo(() => trades.some((t) => typeof t.fee === 'number'), [trades])
+  const avgSlippageBps = useMemo(() => {
+    const withSlip = trades.filter((t) => typeof t.slippage_bps === 'number')
+    if (withSlip.length === 0) return null
+    return withSlip.reduce((acc, t) => acc + (t.slippage_bps as number), 0) / withSlip.length
+  }, [trades])
+
   const handleExportCsv = useCallback(() => {
     if (trades.length === 0) return
-    const headers = ['Trade ID', 'Timestamp', 'Market Slug', 'Side', 'Price', 'Shares', 'P&L', 'Strategy']
+    const headers = ['Trade ID', 'Timestamp', 'Market Slug', 'Side', 'Price', 'Shares', 'P&L', 'Fee', 'Slippage (bps)', 'Strategy', 'Decision ID']
     const rows = trades.map((t) => [
       t.trade_id,
       new Date(t.timestamp).toISOString(),
@@ -94,7 +120,10 @@ function TradesPanel({ trades: tradesOverride, isRealtime: isRealtimeOverride }:
       t.price.toFixed(4),
       t.size.toFixed(2),
       t.pnl.toFixed(4),
+      typeof t.fee === 'number' ? t.fee.toFixed(4) : '',
+      typeof t.slippage_bps === 'number' ? t.slippage_bps.toFixed(2) : '',
       t.strategy || 'manual',
+      t.decision_id ?? '',
     ])
     const csvContent = 'data:text/csv;charset=utf-8,' + [headers.join(','), ...rows.map((r) => r.join(','))].join('\n')
     const encodedUri = encodeURI(csvContent)
@@ -111,6 +140,17 @@ function TradesPanel({ trades: tradesOverride, isRealtime: isRealtimeOverride }:
     setCopiedId(id)
     setTimeout(() => setCopiedId(null), 1500)
   }, [])
+
+  // W39-5 — stable callback for the audit-trail link icon. Falls back to
+  // trade_id when decision_id isn't published by the backend (preserves
+  // a usable audit jump target in either case).
+  const handleViewAudit = useCallback(
+    (trade: Trade) => {
+      const target = trade.decision_id ?? trade.trade_id
+      onViewAuditTrail?.(target)
+    },
+    [onViewAuditTrail],
+  )
 
   return (
     <div className="card h-full flex flex-col p-3 bg-[#13161e] border border-[#1f2335] shadow-xl">
@@ -138,6 +178,26 @@ function TradesPanel({ trades: tradesOverride, isRealtime: isRealtimeOverride }:
               {fmtPnl(stats.netPnl)}
             </span>
           </div>
+          {/* W39-5 — Fees KPI. Hidden when no trade in the visible set
+              exposes the optional `fee` field, so the header doesn't
+              show a misleading "$0.00" for paper-trading snapshots. */}
+          {hasFees && (
+            <div className="bg-[#0e1015] border border-[#1f2335] px-2 py-0.5 rounded flex items-center gap-1" title="Total fees paid on the visible trade set">
+              <span className="text-[9.5px] text-[#7e8aaa] uppercase font-semibold">Fees:</span>
+              <span className="mono font-bold text-amber-300 text-xs">{fmtUsd(totalFees)}</span>
+            </div>
+          )}
+          {/* W39-5 — Average slippage KPI. Hidden when no trade exposes
+              `slippage_bps` (paper-trading snapshots don't currently
+              measure slippage vs. the quoted mid). */}
+          {avgSlippageBps !== null && (
+            <div className="bg-[#0e1015] border border-[#1f2335] px-2 py-0.5 rounded flex items-center gap-1" title="Average slippage vs. quoted mid (basis points)">
+              <span className="text-[9.5px] text-[#7e8aaa] uppercase font-semibold">Avg Slip:</span>
+              <span className={`mono font-bold text-xs ${avgSlippageBps >= 0 ? 'text-amber-300' : 'text-green-400'}`}>
+                {avgSlippageBps >= 0 ? '+' : '−'}{Math.abs(avgSlippageBps).toFixed(1)} bps
+              </span>
+            </div>
+          )}
           <button
             onClick={handleExportCsv}
             disabled={trades.length === 0}
@@ -211,6 +271,12 @@ function TradesPanel({ trades: tradesOverride, isRealtime: isRealtimeOverride }:
                 <th scope="col" className="text-right">Price</th>
                 <th scope="col" className="text-right">Shares</th>
                 <th scope="col" className="text-right">Value</th>
+                {/* W39-5 — Fees + Slippage columns. Always rendered (so
+                    the header row stays consistent) — individual cells
+                    fall back to "—" when the snapshot doesn't expose
+                    the optional field. */}
+                <th scope="col" className="text-right">Fee</th>
+                <th scope="col" className="text-right">Slippage</th>
                 <th scope="col" className="text-right">P&amp;L</th>
                 <th scope="col" className="text-right">Strategy</th>
                 <th scope="col" className="text-right">Time</th>
@@ -220,6 +286,10 @@ function TradesPanel({ trades: tradesOverride, isRealtime: isRealtimeOverride }:
               {displayedTrades.map((t) => {
                 const info = formatHierarchicalMarket(t.slug)
                 const tradeVal = t.size * t.price
+                const isBuy = t.side.toUpperCase() === 'BUY'
+                // W39-5 — direction indicator glyph prepended to the
+                // side badge so BUY/SELL is scannable by shape alone.
+                const dirGlyph = isBuy ? '↑' : '↓'
                 return (
                   <tr key={t.trade_id} className="hover:bg-blue-500/10 transition-colors">
                     <td className="py-2 max-w-[200px]">
@@ -239,14 +309,20 @@ function TradesPanel({ trades: tradesOverride, isRealtime: isRealtimeOverride }:
                         </span>
                       </div>
                     </td>
+                    {/* W39-5 — Side badge with direction glyph. ↑ BUY is
+                        tinted green; ↓ SELL is tinted red. The glyph
+                        sits to the LEFT of the BUY/SELL text so the
+                        direction is the first thing the eye catches. */}
                     <td className="text-center">
                       <span
-                        className={`inline-block px-2 py-0.5 rounded text-[9px] font-bold ${
-                          t.side === 'BUY'
+                        className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[9px] font-bold ${
+                          isBuy
                             ? 'bg-green-500/15 text-green-400 border border-green-500/30'
                             : 'bg-red-500/15 text-red-400 border border-red-500/30'
                         }`}
+                        title={isBuy ? 'Buy (long open / short close)' : 'Sell (long close / short open)'}
                       >
+                        <span aria-hidden="true" className="text-[11px] leading-none">{dirGlyph}</span>
                         {t.side}
                       </span>
                     </td>
@@ -259,6 +335,27 @@ function TradesPanel({ trades: tradesOverride, isRealtime: isRealtimeOverride }:
                     <td className="mono text-right text-[#7e8aaa] text-xs">
                       {fmtUsd(tradeVal)}
                     </td>
+                    {/* W39-5 — Fee cell. Falls back to "—" when the
+                        snapshot doesn't publish `t.fee` (paper-trading
+                        mode today). */}
+                    <td className="mono text-right text-[10.5px] text-amber-300">
+                      {typeof t.fee === 'number' ? fmtUsd(t.fee) : <span className="text-[#3e4560]">—</span>}
+                    </td>
+                    {/* W39-5 — Slippage cell. Falls back to "—" when the
+                        snapshot doesn't publish `t.slippage_bps`.
+                        Negative slippage (price improvement) tints
+                        green; positive (adverse) tints amber. */}
+                    <td className={`mono text-right text-[10.5px] ${
+                      typeof t.slippage_bps === 'number'
+                        ? t.slippage_bps >= 0
+                          ? 'text-amber-300'
+                          : 'text-green-400'
+                        : 'text-[#3e4560]'
+                    }`}>
+                      {typeof t.slippage_bps === 'number'
+                        ? `${t.slippage_bps >= 0 ? '+' : '−'}${Math.abs(t.slippage_bps).toFixed(1)} bps`
+                        : '—'}
+                    </td>
                     <td
                       className={`mono text-right font-bold ${
                         t.pnl > 0 ? 'text-green-400' : t.pnl < 0 ? 'text-red-400' : 'text-[#7e8aaa]'
@@ -266,12 +363,37 @@ function TradesPanel({ trades: tradesOverride, isRealtime: isRealtimeOverride }:
                     >
                       {t.pnl !== 0 ? fmtPnl(t.pnl) : '—'}
                     </td>
+                    {/* W39-5 — Strategy tag + audit-trail link icon. The
+                        📋 icon is only rendered when `onViewAuditTrail`
+                        is provided (page.tsx opts in for production).
+                        Clicking it invokes the callback with the
+                        trade's decision_id (or trade_id fallback) so
+                        the parent can switch to the Decision Ledger. */}
                     <td className="mono text-right text-[10px] text-[#7e8aaa]">
-                      <span className="px-1.5 py-0.5 rounded bg-[#0e1015] border border-[#1f2335]">
-                        {t.strategy || 'manual'}
+                      <span className="inline-flex items-center gap-1">
+                        <span className="px-1.5 py-0.5 rounded bg-[#0e1015] border border-[#1f2335]">
+                          {t.strategy || 'manual'}
+                        </span>
+                        {onViewAuditTrail && (
+                          <button
+                            type="button"
+                            onClick={() => handleViewAudit(t)}
+                            className="inline-flex items-center justify-center w-5 h-5 rounded border border-[#1f2335] bg-[#0e1015] text-[#7e8aaa] hover:text-cyan-300 hover:border-cyan-500/50 transition-colors"
+                            aria-label={`Open decision ledger audit trail for trade ${t.trade_id}`}
+                            title={`Audit trail · Decision ID: ${t.decision_id ?? t.trade_id}`}
+                          >
+                            <span aria-hidden="true" className="text-[10px]">📋</span>
+                          </button>
+                        )}
                       </span>
                     </td>
-                    <td className="mono text-right text-[#7e8aaa] text-[10.5px]">{fmtAge(t.timestamp)}</td>
+                    {/* W39-5 — Time rendered in relative format ("3m
+                        ago") with the absolute ISO timestamp surfaced
+                        via the title attribute for hover + screen
+                        reader context. */}
+                    <td className="mono text-right text-[#7e8aaa] text-[10.5px]" title={`Executed: ${fmtTimeAbs(t.timestamp)}`}>
+                      {fmtAge(t.timestamp)}
+                    </td>
                   </tr>
                 )
               })}

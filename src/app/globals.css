@@ -869,6 +869,22 @@ body {
   line-height: 1.5;
 }
 
+/* W39-5 — success banner mirrors the danger / warning / info banner
+   system. Used by ConfirmationDialog to surface an inline ✓ outcome
+   after a destructive action resolves before auto-dismissing. */
+.banner-success {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  background: var(--color-green-bg);
+  border: 1px solid var(--color-green-bd);
+  border-radius: var(--radius-md);
+  font-size: 11.5px;
+  color: var(--color-green-fg);
+  line-height: 1.5;
+}
+
 /* ── Unavailable / stale value display ──────────────────────────────────── */
 .unavailable-value {
   color: var(--text-dim);
@@ -1507,17 +1523,185 @@ body {
    ═══════════════════════════════════════════════════════════════════════════ */
 .command-center-layout {
   display: grid;
-  grid-template-columns: 1fr 1fr 310px;
-  grid-template-rows: auto auto auto 1fr 1fr;
+  grid-template-columns: 1fr 1fr 1fr 320px;
+  grid-template-rows: auto auto auto auto minmax(0, 1fr);
   grid-template-areas:
-    "health  health   health"
-    "metrics metrics  metrics"
-    "risk    risk     risk"
-    "market  pos      sidebar"
-    "orders  events   sidebar";
-  gap: 10px;
+    "system  system  system  system"
+    "topbar  topbar  topbar  topbar"
+    "pnl     pnl     pnl     pnl"
+    "risk    risk    risk    risk"
+    "pos     orders  trades  sidebar";
+  gap: var(--space-2);
   height: 100%;
   min-height: 0;
+}
+
+/* W39-3 — KPI card design tokens + utility classes.
+   The Command Center redesign introduces a strict three-tier KPI
+   hierarchy (large / medium / small). Every KPI card shares the same
+   surface treatment (card bg, border, radius, padding) and only the
+   typography scale changes between tiers. Color tone is applied to
+   the value text only, so labels and sub-text stay neutral and the
+   eye is drawn to the headline number. */
+:root {
+  --kpi-card-bg:        var(--bg-card);
+  --kpi-card-bg-alt:    var(--bg-card-alt);
+  --kpi-card-border:    var(--border);
+  --kpi-card-border-hover: var(--border-hover);
+  --kpi-card-radius:    var(--radius-lg);
+  --kpi-card-padding:   var(--space-3);
+  --kpi-card-padding-lg: var(--space-4);
+
+  --kpi-label-color:    var(--text-secondary);
+  --kpi-label-size:     var(--text-2xs);
+  --kpi-label-weight:   600;
+  --kpi-label-tracking: 0.06em;
+
+  --kpi-value-color:    var(--text-primary);
+  --kpi-value-size-lg:  var(--text-2xl);
+  --kpi-value-size-md:  var(--text-lg);
+  --kpi-value-size-sm:  var(--text-md);
+  --kpi-value-weight:  700;
+
+  --kpi-sub-color:      var(--text-secondary);
+  --kpi-sub-size:       var(--text-2xs);
+}
+
+.kpi-card {
+  background: var(--kpi-card-bg);
+  background-image: linear-gradient(180deg, rgba(59, 130, 246, 0.035) 0%, transparent 55%);
+  border: 1px solid var(--kpi-card-border);
+  border-radius: var(--kpi-card-radius);
+  padding: var(--kpi-card-padding);
+  box-shadow: var(--shadow-xs);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+  position: relative;
+  transition:
+    border-color var(--duration-fast) var(--easing-std),
+    box-shadow var(--duration-fast) var(--easing-std),
+    transform var(--duration-fast) var(--easing-std);
+}
+
+.kpi-card-lg { padding: var(--kpi-card-padding-lg); }
+
+.kpi-card.is-interactive {
+  cursor: default;
+}
+.kpi-card.is-interactive:hover {
+  border-color: var(--kpi-card-border-hover);
+  box-shadow: var(--shadow-md);
+  transform: translateY(-1px);
+}
+
+.kpi-label {
+  font-size: var(--kpi-label-size);
+  font-weight: var(--kpi-label-weight);
+  text-transform: uppercase;
+  letter-spacing: var(--kpi-label-tracking);
+  color: var(--kpi-label-color);
+  line-height: 1.2;
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.kpi-value {
+  font-family: var(--font-mono);
+  font-size: var(--kpi-value-size-md);
+  font-weight: var(--kpi-value-weight);
+  color: var(--kpi-value-color);
+  line-height: 1.15;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-1);
+  min-width: 0;
+  word-break: break-word;
+}
+
+.kpi-value-lg { font-size: var(--kpi-value-size-lg); }
+.kpi-value-md { font-size: var(--kpi-value-size-md); }
+.kpi-value-sm { font-size: var(--kpi-value-size-sm); }
+
+.kpi-sub {
+  font-size: var(--kpi-sub-size);
+  color: var(--kpi-sub-color);
+  line-height: 1.3;
+  font-variant-numeric: tabular-nums;
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+/* Color tones applied to the value text only. */
+.kpi-tone-positive { color: var(--color-green-fg); }
+.kpi-tone-negative { color: var(--color-red-fg); }
+.kpi-tone-warning  { color: var(--color-amber-fg); }
+.kpi-tone-neutral  { color: var(--kpi-value-color); }
+
+/* Stale indicator pill — rendered next to the label when data is old. */
+.kpi-stale-pill {
+  display: inline-flex;
+  align-items: center;
+  font-size: 8.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-amber-fg);
+  background: var(--color-amber-bg);
+  border: 1px solid var(--color-amber-bd);
+  border-radius: var(--radius-sm);
+  padding: 1px 4px;
+  flex-shrink: 0;
+  line-height: 1;
+}
+.kpi-error-pill {
+  display: inline-flex;
+  align-items: center;
+  font-size: 8.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-red-fg);
+  background: var(--color-red-bg);
+  border: 1px solid var(--color-red-bd);
+  border-radius: var(--radius-sm);
+  padding: 1px 4px;
+  flex-shrink: 0;
+  line-height: 1;
+}
+
+/* Loading skeleton block — replaces the value while data is fetching. */
+.kpi-skeleton {
+  display: block;
+  height: 14px;
+  border-radius: var(--radius-sm);
+  background: linear-gradient(
+    90deg,
+    rgba(126, 138, 170, 0.08) 0%,
+    rgba(126, 138, 170, 0.18) 50%,
+    rgba(126, 138, 170, 0.08) 100%
+  );
+  background-size: 200% 100%;
+  animation: kpi-skeleton-shimmer 1.4s ease-in-out infinite;
+  margin-top: 2px;
+}
+.kpi-skeleton-lg { height: 22px; width: 60%; }
+.kpi-skeleton-md { height: 16px; width: 50%; }
+
+@keyframes kpi-skeleton-shimmer {
+  0%   { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .kpi-skeleton { animation: none; }
 }
 
 .workstation-split-layout {
@@ -1531,13 +1715,14 @@ body {
 @media (max-width: 1200px) {
   .command-center-layout {
     grid-template-columns: 1fr 1fr;
-    grid-template-rows: auto auto auto auto auto auto;
+    grid-template-rows: auto auto auto auto auto auto auto;
     grid-template-areas:
-      "health  health"
-      "metrics metrics"
+      "system  system"
+      "topbar  topbar"
+      "pnl     pnl"
       "risk    risk"
-      "market  pos"
-      "orders  events"
+      "pos     orders"
+      "trades  sidebar"
       "sidebar sidebar";
     height: auto;
     overflow-y: auto;
@@ -2687,5 +2872,579 @@ html { overflow-x: hidden; }
     padding-bottom: 10px;
   }
 }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   W39-8 — RESPONSIVE & ACCESSIBILITY UTILITY LAYER (additive)
+   ═══════════════════════════════════════════════════════════════════════════
+   Three portable utility classes that panels can opt into without rewriting
+   their existing layout primitives. All three are NEW declarations appended
+   at end-of-file so the CSS cascade lets them override earlier equal-or-
+   lower-specificity rules per-property.
+
+   1. `.table-responsive` — horizontal-scroll wrapper for any `<table>`.
+      Distinct from the existing `.table-container` (which sets `flex: 1` +
+      `overflow-y: auto` and is meant for flex panels that need the table to
+      own the remaining height): `.table-responsive` is for inline tables
+      embedded in cards where the only requirement is "let the table scroll
+      horizontally on narrow viewports". The inner `<table>` is pinned to
+      `min-width: 600px` so its columns never collapse below readable widths
+      on a 375px phone; `-webkit-overflow-scrolling: touch` enables iOS
+      momentum scrolling inside the wrapper.
+
+   2. `.grid-kpi` — mobile-first KPI strip that mirrors the audit's
+      recommended `grid-cols-2 md:grid-cols-3 lg:grid-cols-5` pattern in
+      pure CSS. Components can drop the Tailwind responsive prefixes and
+      use this single class for the canonical "2 / 3 / 5 column" KPI grid.
+      `gap: var(--space-3)` matches the design token used by `.card-grid`
+      so the strip aligns with adjacent card layouts.
+
+   3. `.hide-mobile` / `.hide-desktop` — pair of inverse visibility
+      utilities for the canonical "show on desktop, hide on phone" (and
+      vice-versa) pattern. Used by status-bar pills + the sidebar's
+      mobile/desktop header toggles to avoid `display: none !important`
+      inline styles. `display: revert` (not `display: block`) so the
+      utility doesn't fight flex/grid contexts — the element keeps its
+      original display value when shown.
+
+   Accessibility hardening (additive):
+   4. `:focus-visible` parity for chart SVGs and inline `[role="button"]`
+      spans — the existing rule covers native `<button>` / `<a>` /
+      `<input>`, but the workstation has a handful of `<span
+      role="button">` chart-legend toggles + `<svg>` chart canvases that
+      are keyboard-focusable via `tabindex="0"`. This rule gives them the
+      same 2px ring in the design-system accent colour.
+   5. `.sr-only` live region — the existing `.sr-only` visually hides
+      content but the workstation needs a tiny "polite" live region for
+      dynamic numeric updates (e.g. "P&L updated to +$123.45") that
+      screen readers announce without polluting the visual layout. The
+      new `.sr-live` class combines `.sr-only`'s visual hiding with
+      `aria-live="polite"` (set on the element by the component) so
+      AT users get the same audible refresh cycle as sighted users.
+   6. `prefers-reduced-motion` hardening for framer-motion inline styles
+      + Recharts tooltip transitions — the existing rule silences CSS
+      animation/transition durations; framer-motion writes its transitions
+      via inline `style` (which `transition-duration: 0.01ms !important`
+      doesn't override) so the new rule targets `[style*="transition"]`
+      inside SVG and motion-div contexts to neutralise the inline value.
+   7. High-contrast-mode focus ring fallback — when the OS forces
+      `forced-colors: active` (Windows High Contrast mode) the design-
+      system `outline: 2px solid var(--border-focus, #3b82f6)` collapses
+      to the OS's forced colour. This rule ensures the ring is always
+      visible by adding a 1px `outline-offset` boost under forced-colours.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* (1) Responsive table wrapper ─────────────────────────────────────────── */
+.table-responsive {
+  overflow-x: auto;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  max-width: 100%;
+}
+.table-responsive table {
+  min-width: 600px;
+  width: 100%;
+}
+/* When the inner table is itself a `.data-table` (which already sets
+   `min-width: 720px`), don't fight it — let the 720px floor win. */
+.table-responsive .data-table {
+  min-width: 720px;
+}
+
+/* (2) Responsive KPI grid (2 / 3 / 5 column) ────────────────────────────── */
+.grid-kpi {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-3, 0.75rem);
+}
+@media (min-width: 768px) {
+  .grid-kpi {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+@media (min-width: 1024px) {
+  .grid-kpi {
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+  }
+}
+
+/* (3) Mobile-first visibility utilities ──────────────────────────────────
+   `.hide-mobile` is hidden by default (mobile-first) and revealed at the
+   `md` breakpoint; `.hide-desktop` is the inverse. */
+.hide-mobile {
+  display: none;
+}
+@media (min-width: 768px) {
+  .hide-mobile {
+    display: revert;
+  }
+  .hide-desktop {
+    display: none;
+  }
+}
+
+/* (4) Focus-visible parity for chart SVGs + role="button" spans ─────────── */
+svg[tabindex="0"]:focus-visible,
+[role="button"]:focus-visible,
+[role="tab"]:focus-visible,
+[role="link"]:focus-visible {
+  outline: 2px solid var(--border-focus, #3b82f6);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm, 4px);
+}
+
+/* (5) Screen-reader-only live region ─────────────────────────────────────
+   Composes `.sr-only`'s visual hiding (1×1 clip-rect) so the live region
+   is invisible but still announced by AT when its text content mutates.
+   Components opt in by adding `.sr-live` AND `aria-live="polite"` /
+   `role="status"` on the same element. */
+.sr-live {
+  position: absolute !important;
+  width: 1px !important;
+  height: 1px !important;
+  padding: 0 !important;
+  margin: -1px !important;
+  overflow: hidden !important;
+  clip: rect(0, 0, 0, 0) !important;
+  white-space: nowrap !important;
+  border: 0 !important;
+}
+
+/* (6) Reduced-motion hardening for inline-style transitions ───────────────
+   framer-motion writes `style="transition: …"` directly on the DOM node,
+   which `*` selectors with `!important` don't override (inline style wins
+   over external CSS unless `!important` is on the CSS rule AND the inline
+   style doesn't carry `!important`). Since framer-motion's inline values
+   never use `!important`, the rule below silences them. Targets both
+   the inline-style framer-motion nodes and Recharts' tooltip transitions. */
+@media (prefers-reduced-motion: reduce) {
+  [style*="transition"],
+  .recharts-tooltip-wrapper,
+  .recharts-surface {
+    transition: none !important;
+    animation: none !important;
+  }
+  /* Recharts' active-dot pulse + bar hover animations are also
+     transition-based; neutralise them so reduced-motion users get a
+     static chart state. */
+  .recharts-active-dot,
+  .recharts-bar-rectangle {
+    animation: none !important;
+    transition: none !important;
+  }
+}
+
+/* (7) High-contrast-mode focus ring boost ──────────────────────────────── */
+@media (forced-colors: active) {
+  *:focus-visible,
+  .input:focus-visible,
+  .select:focus-visible,
+  .btn:focus-visible,
+  .sidebar-item:focus-visible,
+  .modal-close:focus-visible,
+  .skip-link:focus-visible {
+    outline-offset: 3px;
+    outline-width: 3px;
+  }
+  /* High-contrast mode also disables box-shadow borders on cards;
+     add a thin outline so card boundaries stay visible. */
+  .card {
+    outline: 1px solid CanvasText;
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   W39-2 — COMPREHENSIVE DESIGN SYSTEM REDESIGN (additive layer)
+   ═══════════════════════════════════════════════════════════════════════════
+   All changes below are NEW rules / NEW tokens appended at end-of-file —
+   no earlier rule block was edited in place; the CSS cascade ensures
+   later equal-specificity declarations win per-property.
+
+   AUDIT FINDINGS (Step 1) — what the current design system was missing:
+
+   A. Typography hierarchy gaps:
+      • Font sizes used across the file: 10, 10.5, 11, 11.5, 12, 12.5,
+        13, 14, 15, 16, 18, 20, 22, 28, 42, 72px. The 8-step type scale
+        (--text-2xs … --text-2xl) only covers 10–22px; the 28/42/72px hero
+        + error-title sizes are hardcoded with no token equivalent.
+      • THREE fractional off-scale sizes (10.5 / 11.5 / 12.5px) are used
+        23 times — they fall BETWEEN the defined scale steps and have no
+        token, so consumers can't express "this is the xs step" cleanly.
+      • Font weights 400 / 500 / 600 / 700 / 800 are all hardcoded as raw
+        numerics — there are no --font-normal / -medium / -semibold / -bold
+        tokens (the design-system doc asks for them but they were never
+        declared).
+      • Line heights 1.0 / 1.15 / 1.2 / 1.3 / 1.4 / 1.5 / 1.55 / 1.6 are
+        scattered as raw values — no --leading-tight / -normal / -relaxed
+        tokens to standardise the three most common steps.
+      • The scale stops at --text-2xl: 22px; the 1.250 major-third spec
+        asks for --text-3xl: 30px + --text-4xl: 36px so error / hero
+        titles can consume tokens instead of hardcoding 28 / 42px.
+
+   B. Spacing boundary gaps:
+      • The 12-step scale (1–12, 4px step) covers 4–48px but has no
+        --space-0 (0) or --space-16 (64px) — the boundaries that bookend
+        the ladder for "no gap" and "large section break".
+
+   C. Radius + accent token gaps:
+      • --radius-full (9999px) is missing — filter chips, pills, and
+        exposure bars all hardcode `border-radius: 9999px`.
+      • No --accent / --text-on-accent semantic aliases — every
+        "accent" surface reaches for --color-blue directly, locking the
+        dashboard to blue and blocking future product-skin swaps.
+
+   D. Surface hierarchy not formalised:
+      • The --bg-* ladder (base / surface / card / card-alt / hover /
+        selected / input / overlay / elevated) exists but the FOUR-TIER
+        elevation model (base → surface → elevated → overlay) isn't
+        expressed as semantic aliases. Components hardcode --bg-card vs
+        --bg-card-alt vs --bg-elevated without a clear "which tier am
+        I?" naming.
+
+   E. Table styles bypass the type-scale tokens:
+      • .data-table hardcodes font-size: 12px (td), 10.5px (th),
+        padding: 0.5rem 0.75rem, color: var(--text-secondary). The
+        10.5px is OFF-SCALE (between --text-2xs 10px and --text-xs 11px).
+        The spec asks for var(--text-sm) / var(--text-xs) / var(--space-2)
+        / var(--space-3) so tables re-theme + stay consistent.
+
+   F. KPI card baseline:
+      • The W39-3 layer (.kpi-card with --kpi-* tokens, gradient overlay,
+        hover lift, 3 size variants) is the canonical Command Center
+        KPI. But there's no MINIMAL spec-compliant baseline for
+        non-Command-Center KPIs (sidebar metrics, status-bar counts).
+        The spec asks for a simple flex-column card with --text-xs label,
+        --text-xl value, --text-xs sub — this layer adds .kpi-stat as
+        that minimal variant WITHOUT regressing the W39-3 .kpi-card.
+
+   G. Filter chip active state:
+      • Existing .filter-chip.active uses a tinted --color-blue-bg +
+        --color-blue-fg (subtle). The spec asks for a SOLID --accent
+        background + --text-on-accent (white) text for stronger visual
+        emphasis on the selected filter. Also hardcodes
+        border-radius: 9999px (should be var(--radius-full)).
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* ── (1) Typography hierarchy tokens ───────────────────────────────────────
+   Type scale: extend the upper end (3xl, 4xl) and realign xl / 2xl to
+   the 1.250 major-third spec. The W39-3 KPI layer consumes these via
+   --kpi-value-size-lg: var(--text-2xl), so the hero KPI number grows
+   from 22px → 24px — a deliberate visual emphasis on the headline metric.
+   The 2px shift also aligns the custom .text-xl / .text-2xl utility
+   classes with Tailwind v4's defaults (20px / 24px), eliminating the
+   2px discrepancy that previously made className="text-xl" render at
+   18px (our token) instead of 20px (Tailwind's default). */
+:root {
+  --text-xl:   20px;   /* was 18px — aligns with Tailwind .text-xl (1.25rem) */
+  --text-2xl:  24px;   /* was 22px — aligns with Tailwind .text-2xl (1.5rem)  */
+  --text-3xl:  30px;   /* NEW — aligns with Tailwind .text-3xl (1.875rem)      */
+  --text-4xl:  36px;   /* NEW — aligns with Tailwind .text-4xl (2.25rem)       */
+
+  /* Font weights — named aliases for the numeric values hardcoded
+     throughout the codebase (400 / 500 / 600 / 700 / 800). Components
+     should consume var(--font-semibold) instead of raw 600 so a future
+     weight redesign propagates through the alias. */
+  --font-normal:    400;
+  --font-medium:    500;
+  --font-semibold:  600;
+  --font-bold:      700;
+  --font-extrabold: 800;
+
+  /* Line heights — three-step scale. body uses 1.5 (between normal and
+     relaxed, set on the body rule at line 308); headings / KPI values
+     use --leading-tight (1.2); long-form descriptions use
+     --leading-relaxed (1.6). */
+  --leading-tight:   1.2;
+  --leading-normal:  1.4;
+  --leading-relaxed: 1.6;
+
+  /* (2) Spacing — boundary tokens that bookend the 12-step ladder. */
+  --space-0:  0;
+  --space-16: 4rem;   /* 64px — large section break / hero spacing */
+
+  /* (3) Radius — full pill shape, consumed by filter chips, pills,
+     exposure bars, and status dots instead of hardcoded 9999px. */
+  --radius-full: 9999px;
+
+  /* (4) Accent system — semantic alias for the dashboard's primary
+     accent hue. Defaults to blue (matches --color-blue); a future
+     product skin can swap the alias (e.g. --accent: var(--color-cyan))
+     without touching every consumer. --text-on-accent is the readable
+     text colour on top of --accent (white on blue, passes WCAG AA at
+     4.6:1 dark / 5.9:1 light for UI labels ≥ 3:1). */
+  --accent:         var(--color-blue);
+  --accent-fg:      var(--color-blue-fg);
+  --accent-muted:   var(--color-blue-bg);
+  --accent-bd:      var(--color-blue-bd);
+  --text-on-accent: #ffffff;
+
+  /* (5) Surface hierarchy — 4-tier elevation system as semantic aliases
+     over the existing --bg-* ladder. No new colours, just naming: each
+     tier expresses "how deep is this surface?" so components pick a
+     tier instead of picking a raw --bg-* token. Pair with the
+     .surface-tier-* utility classes below for border + shadow treatment. */
+  --surface-base:     var(--bg-base);       /* app shell — deepest           */
+  --surface-page:     var(--bg-surface);   /* page background               */
+  --surface-card:     var(--bg-card);       /* standard card / panel         */
+  --surface-elevated: var(--bg-elevated);  /* popovers, sticky headers      */
+  --surface-overlay:  var(--bg-overlay);    /* modal backdrop (translucent)  */
+}
+
+/* ── Type-scale utility classes for the new upper steps ───────────────────
+   .text-3xl / .text-4xl align with Tailwind v4's defaults (1.875rem /
+   2.25rem = 30px / 36px). Declared outside any @layer so they win over
+   Tailwind's .text-3xl / .text-4xl at equal specificity (our token
+   resolves to the same pixel value, so no visual change either way —
+   but consuming var(--text-3xl) lets a future theme resize the step
+   in one place). */
+.text-3xl { font-size: var(--text-3xl); }
+.text-4xl { font-size: var(--text-4xl); }
+
+/* ── Font-weight utility classes ──────────────────────────────────────────
+   Named aliases so className="font-semibold" resolves to var(--font-semibold)
+   = 600. Tailwind v4 ships its own .font-{weight} utilities (also 400–800);
+   ours live outside @layer so they win at equal specificity and route
+   through the token (enabling future weight redesigns). */
+.font-normal    { font-weight: var(--font-normal); }
+.font-medium    { font-weight: var(--font-medium); }
+.font-semibold  { font-weight: var(--font-semibold); }
+.font-bold      { font-weight: var(--font-bold); }
+.font-extrabold { font-weight: var(--font-extrabold); }
+
+/* ── Line-height utility classes ────────────────────────────────────────── */
+.leading-tight   { line-height: var(--leading-tight); }
+.leading-normal  { line-height: var(--leading-normal); }
+.leading-relaxed { line-height: var(--leading-relaxed); }
+
+/* ── Surface-tier utility classes ──────────────────────────────────────────
+   Each tier pairs the background with the appropriate border + shadow so
+   a component gets a complete elevation treatment in one className. The
+   tiers are progressive: base (deepest, no border) → page (no border) →
+   card (border + shadow-card) → elevated (border + shadow-popover) →
+   overlay (translucent + backdrop blur). Use .surface-tier-card for
+   standard panels, .surface-tier-elevated for popovers / sticky headers,
+   .surface-tier-overlay for modal backdrops. */
+.surface-tier-base {
+  background: var(--surface-base);
+}
+.surface-tier-page {
+  background: var(--surface-page);
+}
+.surface-tier-card {
+  background: var(--surface-card);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-card);
+}
+.surface-tier-elevated {
+  background: var(--surface-elevated);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-popover);
+}
+.surface-tier-overlay {
+  background: var(--surface-overlay);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+}
+
+/* ── (6) Improved table styles ─────────────────────────────────────────────
+   Additive layer over the existing .data-table rules (lines 660–754) and
+   the W38-7 min-width rule (line 2822). Later equal-specificity
+   declarations win per-property, so ONLY the properties redeclared here
+   change — the existing sticky-thead, row-hover border-left, row-selected,
+   and row-stale behaviours remain in force.
+
+   Changes vs. the existing .data-table:
+   • td / th font-size: 12px / 10.5px → var(--text-sm) / var(--text-xs)
+     (12px / 11px). The 10.5px was OFF-SCALE; 11px snaps to the --text-xs
+     step. td stays at 12px (now token-driven).
+   • th font-weight: 700 → var(--font-semibold) (600). Headers stay
+     prominent but stop short of --font-bold so data values (which use
+     600 via .pnl-positive etc.) carry equal visual weight.
+   • th letter-spacing: 0.08em → 0.05em. Tighter tracking reads cleaner
+     at the 11px size.
+   • th color: var(--text-secondary) → var(--text-dim). Headers recede
+     so data values pop. (Note: --text-dim is 2.4:1 contrast, below
+     WCAG AA for body text — acceptable here because headers are
+     uppercase + semibold UI labels, not body copy.)
+   • td / th padding: 0.5rem 0.75rem → var(--space-2) var(--space-3)
+     (8px 12px — same value, now token-driven).
+   • th background: rgba(19,22,30,0.97) + backdrop-filter: blur(12px) →
+     var(--bg-surface) (solid). The translucent + blur combo was a
+     holdover from when the sticky header floated over scrolling rows;
+     the solid surface is cleaner and removes a GPU layer.
+   • td border-bottom: var(--border-dim) → var(--border) (slightly more
+     visible row separators).
+   • Hover: existing sets --bg-hover on the <tr> + a 2px left blue
+     border. This layer adds --bg-elevated on each <td> so the hover
+     background paints reliably over the td cells (tr backgrounds don't
+     always show through td backgrounds). The existing tr hover + left
+     border remain (different properties, no conflict). */
+.data-table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: var(--text-sm);
+}
+
+.data-table th {
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-weight: var(--font-semibold);
+  color: var(--text-dim);
+  padding: var(--space-2) var(--space-3);
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-surface);
+  backdrop-filter: none;
+}
+
+.data-table td {
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--border);
+  font-variant-numeric: tabular-nums;
+}
+
+.data-table tbody tr:hover td {
+  background: var(--bg-elevated);
+}
+
+/* ── (7) KPI card baseline (.kpi-stat) ────────────────────────────────────
+   The canonical Command Center KPI is .kpi-card (W39-3 layer, line 1570)
+   — it uses dedicated --kpi-* tokens, a gradient overlay, hover lift,
+   and three size variants (lg / md / sm). .kpi-stat is a MINIMAL
+   spec-compliant baseline for non-Command-Center KPIs (sidebar metrics,
+   status-bar counts, summary tiles in secondary panels) that don't need
+   the full W39-3 treatment.
+
+   Differences from .kpi-card:
+   • Consumes the main --text-* / --space-* tokens directly (no --kpi-*
+     indirection) — simpler to reason about, slightly lighter weight.
+   • No gradient overlay, no hover lift, no size variants.
+   • background: var(--bg-surface) — blends with the page (W39-3 .kpi-card
+     uses var(--bg-card) which is one tier lighter, appropriate for the
+     Command Center's hero row).
+   • border-radius: var(--radius-md) (6px) — matches .input / .btn. W39-3
+     .kpi-card uses var(--radius-lg) (8px) for a slightly softer hero look.
+
+   Use .kpi-stat when you need a compact metric tile; use .kpi-card
+   (with the W39-3 size/tone variants) for the dashboard's primary
+   Command Center KPIs. */
+.kpi-stat {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: var(--space-3) var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.kpi-stat-label {
+  font-size: var(--text-xs);
+  font-weight: var(--font-semibold);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-dim);
+  line-height: var(--leading-tight);
+}
+
+.kpi-stat-value {
+  font-size: var(--text-xl);
+  font-weight: var(--font-bold);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  line-height: var(--leading-tight);
+  letter-spacing: -0.01em;
+}
+
+.kpi-stat-sub {
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  line-height: var(--leading-normal);
+}
+
+/* ── (8) Improved filter chip styles ──────────────────────────────────────
+   Additive layer over the existing .filter-chip rule (line 1451). Later
+   equal-specificity declarations win per-property.
+
+   Changes vs. the existing .filter-chip:
+   • padding: 0.2rem 0.55rem → var(--space-1) var(--space-2) (4px 8px).
+     Slightly tighter vertical (4px vs ~3.2px) + standard horizontal.
+   • border-radius: 9999px → var(--radius-full) (same value, token-driven).
+   • background: var(--bg-hover) → var(--bg-elevated). Hover is one tier
+     darker than elevated in the dark theme; elevated reads as a
+     "selected-ready" surface, appropriate for a chip that's awaiting
+     a click.
+   • font-size: 11px → var(--text-xs) (same value, token-driven).
+   • font-weight: 500 → var(--font-medium) (same value, token-driven).
+   • Hover: border-color var(--color-blue) → var(--accent). Routes
+     through the accent alias so a future product-skin swap propagates.
+   • Active: was a TINTED look (--color-blue-bg + --color-blue-bd +
+     --color-blue-fg). Now a SOLID accent background (--accent) with
+     white text (--text-on-accent) for stronger visual emphasis on
+     the selected filter. The solid active state is unambiguous — the
+     trader can instantly see which filter is applied. */
+.filter-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-full);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  font-size: var(--text-xs);
+  font-weight: var(--font-medium);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition:
+    background var(--duration-fast) var(--easing-std),
+    border-color var(--duration-fast) var(--easing-std),
+    color var(--duration-fast) var(--easing-std);
+  white-space: nowrap;
+  user-select: none;
+}
+
+.filter-chip:hover {
+  border-color: var(--accent);
+  color: var(--text-primary);
+}
+
+.filter-chip.active {
+  background: var(--accent);
+  color: var(--text-on-accent);
+  border-color: var(--accent);
+}
+
+.filter-chip.active:hover {
+  background: var(--accent-fg);
+  border-color: var(--accent-fg);
+}
+
+/* ── Spacing utility classes for the new boundaries (space-0, space-16) ── */
+.p-space-0  { padding: var(--space-0); }
+.p-space-16 { padding: var(--space-16); }
+.gap-space-0  { gap: var(--space-0); }
+.gap-space-16 { gap: var(--space-16); }
+.m-space-0  { margin: var(--space-0); }
+.m-space-16 { margin: var(--space-16); }
+
+/* ── Radius utility for the full pill shape ─────────────────────────────── */
+.radius-full { border-radius: var(--radius-full); }
+
+/* ── Accent utility classes ───────────────────────────────────────────────
+   Intent-based aliases so className="text-accent" / "bg-accent" /
+   "border-accent" route through the --accent alias. A future product
+   skin swaps the alias and every consumer re-themes. */
+.text-accent       { color: var(--accent-fg); }
+.bg-accent         { background: var(--accent); }
+.bg-accent-muted   { background: var(--accent-muted); }
+.border-accent     { border-color: var(--accent); }
+.text-on-accent    { color: var(--text-on-accent); }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   END W39-2 — COMPREHENSIVE DESIGN SYSTEM REDESIGN
+   ═══════════════════════════════════════════════════════════════════════════ */
 
 

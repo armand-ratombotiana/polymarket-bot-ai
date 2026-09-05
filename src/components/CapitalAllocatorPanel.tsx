@@ -1045,18 +1045,18 @@ export default function CapitalAllocatorPanel() {
                 {allocations.length} closed
               </span>
             </div>
-            <div className="max-h-80 overflow-y-auto">
-              <table className="data-table">
+            <div className="max-h-80 table-responsive scrollbar-thin">
+              <table className="data-table" aria-label="Capital allocation history">
                 <thead>
                   <tr>
-                    <th>Token</th>
-                    <th>Strategy</th>
-                    <th>Edge</th>
-                    <th>Conf</th>
-                    <th>Size</th>
-                    <th>% Cap</th>
-                    <th>P&amp;L</th>
-                    <th>Time</th>
+                    <th scope="col">Token</th>
+                    <th scope="col">Strategy</th>
+                    <th scope="col">Edge</th>
+                    <th scope="col">Conf</th>
+                    <th scope="col">Size</th>
+                    <th scope="col">% Cap</th>
+                    <th scope="col">P&amp;L</th>
+                    <th scope="col">Time</th>
                   </tr>
                 </thead>
                 <tbody>

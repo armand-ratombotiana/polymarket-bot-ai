@@ -14,6 +14,28 @@
 //      a "⟳ Polling" badge while it isn't — so the trader can tell at a
 //      glance whether the displayed positions are real-time or lagged.
 //
+// W39-5 — Redesigned for trading-operations clarity:
+//   • Right-aligned numeric columns (Shares, Avg Entry, Mark, Cost Basis,
+//     Realized P&L, Unrealized).
+//   • Color-coded P&L (green positive, red negative) — already present,
+//     re-affirmed.
+//   • Strategy badge in the Market Contract cell (when `position.strategy`
+//     is provided by the snapshot).
+//   • Risk status indicator dot (green/amber/red) next to the outcome
+//     badge. When `position.risk_status` is provided it wins; otherwise
+//     the panel derives a status from the unrealized P&L magnitude:
+//     green when positive or zero, amber when the loss is < 10% of cost
+//     basis, red when ≥ 10%.
+//   • "Time held" column with human-readable "3h 24m" formatting, derived
+//     from `position.opened_at` (when provided). Hidden when no position
+//     in the visible set exposes an `opened_at` timestamp.
+//   • Close Position button restyled as an explicitly destructive action —
+//     filled red background, "✕ Close" copy, and (when the new
+//     `requireConfirmation` prop is true) opens an inline ConfirmationDialog
+//     before invoking `onClosePosition`, with a position-specific impact
+//     summary ("Size: 10 shares, Mark: $0.55, Est. proceeds: $5.50") +
+//     risk warning.
+//
 // Backwards-compat: callers MAY still pass `positions` as a prop (the
 // existing tests do this, and page.tsx still threads the prop through).
 // When provided, the prop overrides the fetched data — the WS subscription
@@ -25,13 +47,16 @@
 import { useState, useMemo, useCallback, memo } from 'react'
 import { Position } from '@/hooks/useBot'
 import { formatHierarchicalMarket } from '@/lib/formatters'
-import { fmtPnl, fmtUsd } from '@/lib/design-tokens'
+import { fmtPnl, fmtUsd, fmtDurationHm, fmtTimeAbs, fmtPrice } from '@/lib/design-tokens'
 import { useRealtimeData } from '@/hooks/useRealtimeData'
 import { Badge } from '@/components/ui/badge'
+import ConfirmationDialog from './ConfirmationDialog'
 
 interface PositionsApiResponse {
   positions: Position[]
 }
+
+type RiskStatus = 'healthy' | 'warning' | 'danger'
 
 interface Props {
   /**
@@ -49,37 +74,70 @@ interface Props {
   /**
    * Optional override for the realtime indicator. When omitted, the
    * panel derives the badge state from useRealtimeData's `isRealtime`
-   * flag. Useful when the parent (e.g. page.tsx) is already tracking the
-   * WS connection state via useBot and wants to drive the badge
-   * consistently across sibling panels.
+   * flag.
    */
   isRealtime?: boolean
-  /**
-   * W15-2 — preference flag. When false, the entire "Unrealized"
-   * column (header `<th>` + every row's `<td>`) is hidden. Traders
-   * who haven't reconciled exposure may want to hide this until
-   * the backend reliably publishes `current_price`. Defaults to `true`
-   * so every existing call site + existing test keeps the prior
-   * behaviour.
-   */
   showUnrealizedPnl?: boolean
-  /**
-   * W15-2 — preference flag. When false, the `.price-up` /
-   * `.price-down` CSS class is suppressed on the Mark cell (traders
-   * who find the flashing distracting). Defaults to `true` so every
-   * existing call site + existing test keeps the prior behaviour.
-   */
   showPriceFlashes?: boolean
+  /**
+   * W39-5 — when true, clicking the Close Position button opens an inline
+   * ConfirmationDialog before invoking `onClosePosition`. Defaults to
+   * `false` so existing tests (which pass onClosePosition and click
+   * Close directly) keep their direct-call behaviour; page.tsx opts in
+   * to confirmation for production safety.
+   */
+  requireConfirmation?: boolean
 }
 
-// W9-6 — wrapped in React.memo with a custom comparator. The component
-// receives `priceFlashes` (changes every ~500ms as flashes clear), so a
-// shallow compare would cause many missed memo hits. The comparator below
-// skips the priceFlashes object identity by diffing only the inputs that
-// drive the rendered output: positions array reference, dailyPnl number,
-// and the callback identities. priceFlashes is intentionally compared by
-// JSON-stringified snapshot so two flashes maps with identical contents
-// don't trigger a re-render (rare but possible).
+// W39-5 — derive a risk-status dot color from unrealized P&L + cost basis.
+// `risk_status` (when provided by the backend risk engine) wins; otherwise
+// we apply a conservative heuristic:
+//   • green  — unrealized_pnl ≥ 0 (in profit, or breakeven)
+//   • amber  — loss < 10% of total_invested (small drawdown, within risk tolerance)
+//   • red    — loss ≥ 10% of total_invested (material drawdown, attention needed)
+// When unrealized_pnl isn't published, we degrade gracefully to amber
+// (signalling "unmeasured" rather than falsely green).
+function deriveRiskStatus(p: Position): RiskStatus {
+  if (p.risk_status) return p.risk_status
+  if (typeof p.unrealized_pnl !== 'number') return 'warning'
+  if (p.unrealized_pnl >= 0) return 'healthy'
+  const lossPct = p.total_invested > 0 ? Math.abs(p.unrealized_pnl) / p.total_invested : 0
+  return lossPct >= 0.1 ? 'danger' : 'warning'
+}
+
+const RISK_DOT_CLASS: Record<RiskStatus, string> = {
+  healthy: 'bg-green-400',
+  warning: 'bg-amber-400',
+  danger:  'bg-red-400',
+}
+
+const RISK_DOT_TITLE: Record<RiskStatus, string> = {
+  healthy: 'Risk: Healthy (in profit or breakeven)',
+  warning: 'Risk: Watch (small drawdown or unmeasured)',
+  danger:  'Risk: Material drawdown — review exposure',
+}
+
+// W39-5 — Strategy badge class. The strategy string is rendered verbatim
+// (e.g. "mm_avellaneda_stoikov") inside a neutral chip. Trailing "manual"
+// (case-insensitive) is highlighted as a human override.
+function StrategyBadge({ strategy }: { strategy: string }) {
+  const isManual = /manual/i.test(strategy)
+  return (
+    <span
+      className={`inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-bold uppercase tracking-wide border ${
+        isManual
+          ? 'bg-purple-500/15 text-purple-300 border-purple-500/30'
+          : 'bg-cyan-500/10 text-cyan-300 border-cyan-500/30'
+      }`}
+      title={`Strategy: ${strategy}`}
+    >
+      {strategy}
+    </span>
+  )
+}
+
+// W9-6 — wrapped in React.memo with a custom comparator. See the comment
+// at the bottom of the file for the full reasoning.
 function PositionsPanel({
   positions: positionsOverride,
   dailyPnl,
@@ -89,35 +147,30 @@ function PositionsPanel({
   isRealtime: isRealtimeOverride,
   showUnrealizedPnl = true,
   showPriceFlashes = true,
+  requireConfirmation = false,
 }: Props) {
   const [filterQuery, setFilterQuery] = useState('')
   const [outcomeFilter, setOutcomeFilter] = useState<'ALL' | 'YES' | 'NO'>('ALL')
   const [sortBy, setSortBy] = useState<'size' | 'pnl' | 'market'>('size')
+  // W39-5 — token id of the position the trader is currently confirming
+  // a Close on. When non-null, the inline ConfirmationDialog is rendered.
+  const [confirmCloseTokenId, setConfirmCloseTokenId] = useState<string | null>(null)
 
-  // W15-5 — hybrid REST + WS subscription. Always invoked (Rules of Hooks
-  // forbid conditional calls), even when the caller passes a `positions`
-  // override — the WS subscription still drives `isRealtime` so the
-  // Live/Polling badge accurately reflects the transport state.
   const {
     data: fetched,
     isLoading,
     isRealtime: wsIsRealtime,
   } = useRealtimeData<PositionsApiResponse>('/api/positions', {
     wsChannel: 'positions',
-    pollInterval: 5000, // was 2s under useBot's REST poll; relaxed to 5s
+    pollInterval: 5000,
   })
 
-  // Resolve the effective positions array + realtime flag. The override
-  // takes precedence when provided (backwards-compat with tests + the
-  // page.tsx wiring that still threads useBot's snapshot through).
   const positions = positionsOverride ?? fetched?.positions ?? []
   const isRealtime = isRealtimeOverride ?? wsIsRealtime
 
   const MAX_PER_MARKET = 3.0 // USD 3.00 institutional limit
   const MAX_TOTAL_PORTFOLIO = 25.0 // USD 25.00 total exposure cap
 
-  // W9-6 — memoize aggregate reductions so they only recompute when the
-  // positions array identity changes (not on every input/filter change).
   const totalInvested = useMemo(() => positions.reduce((acc, p) => acc + p.total_invested, 0), [positions])
   const totalRealized = useMemo(() => positions.reduce((acc, p) => acc + p.realised_pnl, 0), [positions])
 
@@ -142,11 +195,26 @@ function PositionsPanel({
       })
   }, [positions, filterQuery, outcomeFilter, sortBy])
 
-  // W9-6 — wrap CSV export in useCallback so it isn't recreated on every
-  // render (only depends on `positions`).
+  // W39-5 — only render the "Time Held" column when at least one visible
+  // position exposes an `opened_at` timestamp. Hiding the column entirely
+  // when no row has data avoids an empty header in the paper-trading
+  // snapshot (which doesn't currently publish `opened_at`).
+  const showTimeHeldColumn = useMemo(
+    () => filteredPositions.some((p) => typeof p.opened_at === 'number'),
+    [filteredPositions],
+  )
+
+  // W39-5 — the position currently pending Close confirmation (when
+  // `requireConfirmation` is true). Looked up by token_id so the dialog
+  // can render a position-specific impact summary.
+  const confirmingPosition = useMemo(
+    () => (confirmCloseTokenId ? positions.find((p) => p.token_id === confirmCloseTokenId) ?? null : null),
+    [confirmCloseTokenId, positions],
+  )
+
   const handleExportCsv = useCallback(() => {
     if (positions.length === 0) return
-    const headers = ['Token ID', 'Market Slug', 'Outcome', 'Shares', 'Avg Entry Price', 'Total Cost USD', 'Realized PnL']
+    const headers = ['Token ID', 'Market Slug', 'Outcome', 'Shares', 'Avg Entry Price', 'Total Cost USD', 'Realized PnL', 'Strategy', 'Opened At']
     const rows = positions.map((p) => [
       p.token_id,
       `"${p.slug.replace(/"/g, '""')}"`,
@@ -155,6 +223,8 @@ function PositionsPanel({
       p.avg_entry_price.toFixed(4),
       p.total_invested.toFixed(4),
       p.realised_pnl.toFixed(4),
+      p.strategy ?? 'manual',
+      p.opened_at ? new Date(p.opened_at * 1000).toISOString() : '',
     ])
     const csvContent = 'data:text/csv;charset=utf-8,' + [headers.join(','), ...rows.map((r) => r.join(','))].join('\n')
     const encodedUri = encodeURI(csvContent)
@@ -168,6 +238,62 @@ function PositionsPanel({
 
   const portfolioExposurePct = Math.min((totalInvested / MAX_TOTAL_PORTFOLIO) * 100, 100)
 
+  // W39-5 — Close handler. When `requireConfirmation` is true, the click
+  // opens the inline ConfirmationDialog (which then calls onClosePosition
+  // on confirm). When false, the click calls onClosePosition directly —
+  // preserves the legacy direct-call behaviour that the existing tests
+  // assert against.
+  const handleCloseClick = useCallback(
+    (tokenId: string) => {
+      if (requireConfirmation) {
+        setConfirmCloseTokenId(tokenId)
+      } else {
+        onClosePosition?.(tokenId)
+      }
+    },
+    [requireConfirmation, onClosePosition],
+  )
+
+  const handleConfirmClose = useCallback(() => {
+    if (confirmCloseTokenId) {
+      onClosePosition?.(confirmCloseTokenId)
+    }
+    setConfirmCloseTokenId(null)
+  }, [confirmCloseTokenId, onClosePosition])
+
+  const handleCancelClose = useCallback(() => {
+    setConfirmCloseTokenId(null)
+  }, [])
+
+  // W39-5 — pre-compute the impact summary string for the dialog so the
+  // trader sees exactly what closing will do before confirming. Falls back
+  // gracefully when mark price / shares aren't available.
+  const confirmImpact = useMemo(() => {
+    if (!confirmingPosition) return ''
+    const shares = confirmingPosition.yes_shares > 0
+      ? confirmingPosition.yes_shares
+      : (confirmingPosition.no_shares ?? 0)
+    const mark = typeof confirmingPosition.current_price === 'number'
+      ? confirmingPosition.current_price
+      : null
+    const proceeds = mark !== null ? shares * mark : null
+    const parts: string[] = [`Size: ${shares.toFixed(1)} shares`]
+    if (mark !== null) {
+      parts.push(`Mark: ${fmtPrice(mark)}`)
+      if (proceeds !== null) parts.push(`Est. proceeds: ${fmtUsd(proceeds)}`)
+    } else {
+      parts.push(`Cost basis: ${fmtUsd(confirmingPosition.total_invested)}`)
+    }
+    return parts.join(' · ')
+  }, [confirmingPosition])
+
+  const confirmDescription = useMemo(() => {
+    if (!confirmingPosition) return ''
+    const info = formatHierarchicalMarket(confirmingPosition.slug)
+    const isYes = confirmingPosition.yes_shares > 0
+    return `Close position for ${info.fullLabel} (${isYes ? 'YES' : 'NO'})? This submits a marketable opposing order to flatten your exposure immediately.`
+  }, [confirmingPosition])
+
   return (
     <div className="card h-full flex flex-col p-3 bg-[#13161e] border border-[#1f2335] shadow-xl">
       {/* Header with Stats Strip */}
@@ -178,11 +304,6 @@ function PositionsPanel({
             💼 ACTIVE POSITIONS ({positions.length})
           </span>
           <span className="badge badge-amber text-[9.5px]">USD 25 Exposure Cap</span>
-          {/* W15-5 — Live / Polling badge. Reflects the actual transport
-              state of the underlying useRealtimeData subscription. The
-              dot color + label give the trader an at-a-glance signal of
-              whether the displayed rows are real-time (WS push) or
-              lagged (5s poll fallback). */}
           {isRealtime ? (
             <Badge variant="success" className="text-[9.5px] py-0.5">● Live</Badge>
           ) : (
@@ -223,12 +344,6 @@ function PositionsPanel({
         </div>
       </div>
 
-      {/* W15-5 — loading state. Only surfaces on the FIRST fetch (before
-          useRealtimeData has resolved any data) AND when no `positions`
-          override was passed. Once the initial REST fetch returns, the
-          panel renders the table even when the WS is still handshaking —
-          the Live/Polling badge in the header conveys the transport lag
-          instead of blanking the panel. */}
       {isLoading && positions.length === 0 && (
         <div className="flex items-center justify-center py-8 text-xs text-[#7e8aaa]">
           <span className="spinner mr-2" aria-hidden="true" />
@@ -259,7 +374,6 @@ function PositionsPanel({
         </div>
 
         <div className="flex items-center gap-1.5">
-          {/* Outcome Filter */}
           <div className="inline-flex bg-[#0e1015] border border-[#1f2335] rounded p-0.5 text-[10px]" role="group" aria-label="Filter positions by outcome">
             {(['ALL', 'YES', 'NO'] as const).map((side) => (
               <button
@@ -277,7 +391,6 @@ function PositionsPanel({
             ))}
           </div>
 
-          {/* Sort Selector */}
           <select
             value={sortBy}
             onChange={(e) => setSortBy(e.target.value as any)}
@@ -308,19 +421,19 @@ function PositionsPanel({
             <thead>
               <tr className="border-b border-[#1f2335] text-[#7e8aaa] text-[10.5px]">
                 <th scope="col" className="min-w-[190px] py-1.5 text-left">Market Contract</th>
+                <th scope="col" className="text-center">Risk</th>
                 <th scope="col" className="text-center">Outcome</th>
                 <th scope="col" className="text-right">Shares</th>
                 <th scope="col" className="text-right">Avg Entry</th>
-                {/* S1 — live mark price column */}
                 <th scope="col" className="text-right">Mark</th>
                 <th scope="col" className="text-right">Cost Basis</th>
                 <th scope="col" className="text-center min-w-[110px]">Cap Limit ($3 Max)</th>
                 <th scope="col" className="text-right">Realized P&amp;L</th>
-                {/* S1 — unrealized mark-to-market P&amp;L column.
-                    W15-2: the entire column is hidden when the
-                    `showUnrealizedPnl` preference is false. */}
                 {showUnrealizedPnl && (
                   <th scope="col" className="text-right">Unrealized</th>
+                )}
+                {showTimeHeldColumn && (
+                  <th scope="col" className="text-right">Time Held</th>
                 )}
                 <th scope="col" className="text-center">Action</th>
               </tr>
@@ -331,11 +444,6 @@ function PositionsPanel({
                 const utilizationPct = Math.min((p.total_invested / MAX_PER_MARKET) * 100, 100)
                 const isYes = p.yes_shares > 0
                 const isNearCap = utilizationPct > 80
-                // W12 — Resolve this row's price-flash direction once per render.
-                // Undefined (no flash active) yields no extra class on the Mark cell.
-                // W15-2 — when the `showPriceFlashes` preference is false the
-                // CSS class is suppressed (the flashDir lookup still runs so the
-                // memo comparator + downstream logic stay simple).
                 const flashDir = priceFlashes?.[p.token_id]
                 const flashClass =
                   showPriceFlashes && flashDir === 'up'
@@ -343,13 +451,16 @@ function PositionsPanel({
                     : showPriceFlashes && flashDir === 'down'
                       ? ' price-down'
                       : ''
+                // W39-5 — risk status dot derivation per row.
+                const riskStatus = deriveRiskStatus(p)
 
                 return (
                   <tr
                     key={p.token_id}
                     className="hover:bg-blue-500/10 transition-colors group"
                   >
-                    {/* Market Title */}
+                    {/* Market Title — includes the strategy badge when
+                        the snapshot provides one (W39-5). */}
                     <td
                       className="py-2.5 max-w-[240px]"
                     >
@@ -360,10 +471,11 @@ function PositionsPanel({
                         aria-label={`Open depth chart and trade modal for ${info.fullLabel}`}
                       >
                         <div className="flex flex-col gap-0.5">
-                          <div className="flex items-center gap-1.5">
+                          <div className="flex items-center gap-1.5 flex-wrap">
                             <span className="text-[9px] text-cyan-400 font-bold uppercase tracking-wider truncate">
                               {info.category.icon} {info.eventTitle}
                             </span>
+                            {p.strategy && <StrategyBadge strategy={p.strategy} />}
                           </div>
                           <span
                             className="text-[#dde1ed] group-hover:text-cyan-300 font-medium leading-snug text-xs block whitespace-normal transition-colors"
@@ -373,6 +485,18 @@ function PositionsPanel({
                           </span>
                         </div>
                       </button>
+                    </td>
+
+                    {/* W39-5 — Risk status indicator dot. Title attribute
+                        exposes the human-readable risk classification to
+                        screen readers + hover tooltips. */}
+                    <td className="text-center">
+                      <span
+                        className={`inline-block w-2.5 h-2.5 rounded-full ${RISK_DOT_CLASS[riskStatus]}`}
+                        role="img"
+                        aria-label={RISK_DOT_TITLE[riskStatus]}
+                        title={RISK_DOT_TITLE[riskStatus]}
+                      />
                     </td>
 
                     {/* Outcome Badge */}
@@ -398,12 +522,7 @@ function PositionsPanel({
                       ${p.avg_entry_price.toFixed(3)}
                     </td>
 
-                    {/* S1 — Mark (current price). Falls back to "—" when the
-                        backend hasn't populated current_price yet.
-                        W12: apply .price-up / .price-down when a flash is
-                        active for this row's token_id.
-                        W15-2: flashClass is empty when the preference is
-                        off so the cell renders plain. */}
+                    {/* Mark */}
                     <td className={`mono text-right text-[#dde1ed] text-xs${flashClass}`}>
                       {typeof p.current_price === 'number'
                         ? `$${p.current_price.toFixed(3)}`
@@ -445,8 +564,7 @@ function PositionsPanel({
                         green/red. Falls back to "—" when unrealized_pnl is
                         not provided by the backend.
                         W15-2 — the entire cell is hidden when the
-                        `showUnrealizedPnl` preference is false (matches the
-                        conditional `<th>` header). */}
+                        `showUnrealizedPnl` preference is false. */}
                     {showUnrealizedPnl && (
                       <td
                         className={`mono text-right font-bold text-xs ${
@@ -456,11 +574,24 @@ function PositionsPanel({
                               : 'text-red-400'
                             : 'text-[#3e4560]'
                         }`
-                      }
+                        }
                       >
                         {typeof p.unrealized_pnl === 'number'
                           ? fmtPnl(p.unrealized_pnl)
                           : '—'}
+                      </td>
+                    )}
+
+                    {/* W39-5 — Time Held column. Hidden entirely when no
+                        visible position exposes `opened_at`. The title
+                        attribute carries the absolute timestamp for hover
+                        tooltips + screen-reader context. */}
+                    {showTimeHeldColumn && (
+                      <td
+                        className="mono text-right text-[#7e8aaa] text-[10.5px]"
+                        title={typeof p.opened_at === 'number' ? fmtTimeAbs(p.opened_at) : undefined}
+                      >
+                        {typeof p.opened_at === 'number' ? fmtDurationHm(p.opened_at) : '—'}
                       </td>
                     )}
 
@@ -474,11 +605,16 @@ function PositionsPanel({
                         >
                           Trade
                         </button>
-                        {/* S1 — Close position button. Only invokes the handler
-                            when onClosePosition is provided (additive prop). */}
+                        {/* W39-5 — Close Position button restyled as an
+                            explicitly destructive action. Filled red
+                            background (not just red text), explicit
+                            "✕" icon, and the destructive-action
+                            aria-label. When `requireConfirmation` is
+                            true, the click opens the ConfirmationDialog
+                            instead of calling onClosePosition directly. */}
                         <button
-                          onClick={() => onClosePosition?.(p.token_id)}
-                          className="btn btn-ghost btn-sm text-[10px] px-2 py-0.5 border border-[#1f2335] text-red-400 hover:text-white hover:border-red-500/50"
+                          onClick={() => handleCloseClick(p.token_id)}
+                          className="btn btn-sm text-[10px] px-2 py-0.5 border border-red-500/40 bg-red-500/10 text-red-400 hover:text-white hover:bg-red-500/30 hover:border-red-500/60 font-bold flex items-center gap-1"
                           aria-label={`Close position for ${info.fullLabel}`}
                           title="Close position at market"
                         >
@@ -493,35 +629,40 @@ function PositionsPanel({
           </table>
         )}
       </div>
+
+      {/* W39-5 — Close Position confirmation dialog. Rendered inline so
+          the panel can drive its own impact summary from the live
+          position snapshot (size + mark + estimated proceeds) without
+          threading every position through the parent. */}
+      <ConfirmationDialog
+        open={confirmCloseTokenId !== null && confirmingPosition !== null}
+        severity="danger"
+        title="Close Position?"
+        description={confirmDescription}
+        impact={confirmImpact}
+        riskWarning="Market close executes immediately at the best available price. On thin books this may slip materially below the displayed mark — review the order book depth before confirming."
+        confirmLabel="✕ Close Position"
+        cancelLabel="Keep Position"
+        onConfirm={handleConfirmClose}
+        onCancel={handleCancelClose}
+      />
     </div>
   )
 }
 
-// W9-6 — React.memo with a custom comparator. `positions` is the only
-// prop whose identity changes frequently (every snapshot). `dailyPnl` is a
-// primitive. `onSelectMarket` / `onClosePosition` are stable (useCallback
-// in useBot + page.tsx). `priceFlashes` mutates on every tick, so we diff
-// its keys/values with a JSON string rather than identity. When all four
-// compare equal, the component skips re-rendering entirely — a meaningful
-// win since this panel renders ~50 positions × ~9 columns on the command
-// center grid plus its own dedicated tab.
-//
-// W15-5 — the `isRealtime` override is a primitive boolean; it's diffed
-// inline alongside `dailyPnl`. The useRealtimeData hook lives inside the
-// component and re-runs on every render — but its internal state updates
-// (data / isLoading / isRealtime) trigger React's normal re-render path,
-// so memo on the prop surface doesn't interfere with WS-driven re-renders.
+// W9-6 — React.memo with a custom comparator. See the original (pre-W39-5)
+// header comment for the full reasoning. The W39-5 additions are:
+//   • `requireConfirmation` is a primitive boolean, diffed inline so a
+//     parent flipping the confirmation preference re-renders the panel.
 export default memo(PositionsPanel, (prev, next) => {
   if (prev.positions !== next.positions) return false
   if (prev.dailyPnl !== next.dailyPnl) return false
   if (prev.onSelectMarket !== next.onSelectMarket) return false
   if (prev.onClosePosition !== next.onClosePosition) return false
   if (prev.isRealtime !== next.isRealtime) return false
-  // W15-2 — preference flags are primitive booleans; diff inline so a
-  // preference flip re-renders the table (column show/hide + flash class).
   if (prev.showUnrealizedPnl !== next.showUnrealizedPnl) return false
   if (prev.showPriceFlashes !== next.showPriceFlashes) return false
-  // priceFlashes is intentionally compared by serialized contents.
+  if (prev.requireConfirmation !== next.requireConfirmation) return false
   if (JSON.stringify(prev.priceFlashes) !== JSON.stringify(next.priceFlashes)) return false
   return true
 })

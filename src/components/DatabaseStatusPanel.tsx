@@ -552,7 +552,7 @@ export default function DatabaseStatusPanel() {
         </CardHeader>
         <CardContent className="px-3 py-3">
           {pgHealth ? (
-            <div className="grid grid-cols-2 md:grid-cols-5 gap-2.5 text-xs">
+            <div className="grid-kpi text-xs">
               <div>
                 <div className="text-[10px] uppercase tracking-wider text-[#7e8aaa] mb-0.5">
                   Status

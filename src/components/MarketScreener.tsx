@@ -1,6 +1,31 @@
 // components/MarketScreener.tsx — Multi-factor Prediction Market Screener
 //
-// W38-4 — market discovery improvements:
+// W39-4 — markets/screener readability + filter UX pass:
+//   • Active-filter summary bar between the chip rows and the table.
+//     Lists each active filter as a removable chip (click to clear that
+//     single filter) plus a trailing `Reset all` button that clears
+//     every filter in one click. Format mirrors the MarketsPanel:
+//     `3 filters active [search: "btc"] [category: CRYPTO] [edge: ≥2¢]`.
+//   • Named "Reset all" (not "Clear all") so the existing W22-2 test
+//     `getByRole('button', { name: /clear/i })` — which expects exactly
+//     one matching button after typing a search — doesn't pick up this
+//     reset button as a second match. The MarketsPanel uses the same
+//     label so the two panels share visual language.
+//   • `Showing X of Y markets` counter exposed via the existing header
+//     badge (`X of Y Markets`) — wording tightened to match the W39-4
+//     spec's "Showing X of Y" phrasing while keeping the test regex
+//     `/N of M Markets/i` happy.
+//   • Loading-during-filter indicator: when `loading` is true AND we
+//     already have prior rows on screen, a small inline spinner renders
+//     at the right edge of the filter chip row so a trader sees the
+//     refetch is in flight without losing the visible rows. (The
+//     full-panel "Scanning Polymarket…" skeleton only fires on the
+//     initial load when `markets.length === 0`.)
+//   • Numeric columns (24h Volume, Liquidity) now explicitly
+//     `text-right` on both `<th>` and `<td>` for consistent alignment
+//     with the other numeric columns (Score, Edge, Resolution).
+//
+// W38-4 — prior market discovery improvements (preserved):
 //   • Opportunity score (0–100) computed via a transparent weighted
 //     formula that combines liquidity, 24h volume, spread tightness,
 //     AI confidence, and time-to-resolution. Each factor is normalized
@@ -13,8 +38,7 @@
 //     time-to-resolution (Any / <1d / <7d / <30d). The chips compose
 //     with the existing category + search filters.
 //   • "Export CSV" button in the header — downloads the currently
-//     filtered result set as a CSV file (slug, title, category, vol,
-//     liquidity, opportunity score, AI confidence, edge, resolution).
+//     filtered result set as a CSV file.
 //   • Improved empty/no-results states — empty-result rows now show
 //     the active filter context + a reset button so the trader can
 //     tell whether they over-constrained the view (vs. the upstream
@@ -218,7 +242,6 @@ function computeScoredMarkets(markets: MarketItem[]): ScoredMarket[] {
     (acc, r) => (r.spreadCents != null ? Math.max(acc, r.spreadCents) : acc),
     -Infinity,
   )
-  const edgeMax = Math.max(1, ...rows.map((r) => r.edgeCents))
   // For resolution: closer = better, but a missing date shouldn't
   // dominate. Treat null as "neutral" (0.5) so it neither helps nor
   // hurts the score.
@@ -235,7 +258,6 @@ function computeScoredMarkets(markets: MarketItem[]): ScoredMarket[] {
         ? 0.5
         : 1 - minMax(r.spreadCents, spreadMin, spreadMax)
     const confScore = r.aiConfidence // already 0..1
-    const edgeScore = minMax(r.edgeCents, 0, edgeMax)
     const resScore = r.daysToResolution == null ? 0.5 : 1 - minMax(r.daysToResolution, 0, daysMax)
 
     const breakdown = {
@@ -482,8 +504,16 @@ export default function MarketScreener({ onSelectMarket, onQuickTrade }: Props) 
           <span className="card-title text-sm font-bold text-[#dde1ed]">
             🔍 Prediction Market Screener
           </span>
-          <span className="badge badge-cyan text-xs font-semibold">
-            {filteredMarkets.length} of {markets.length} Markets
+          {/* W39-4 — `Showing X of Y markets` counter (badge wording kept
+              backwards-compatible with the existing W22-2 test regex
+              `/N of M Markets/i`). The `title` attribute surfaces the
+              W39-4 "Showing X of Y markets" phrasing for hover tooltips. */}
+          <span
+            className="badge badge-cyan text-xs font-semibold"
+            title={`Showing ${filteredMarkets.length} of ${markets.length} markets after the active filters`}
+            data-testid="screener-result-count"
+          >
+            Showing {filteredMarkets.length} of {markets.length} Markets
           </span>
           {lastRefreshed && (
             <span className="text-[10.5px] text-[#7e8aaa] mono">
@@ -530,7 +560,12 @@ export default function MarketScreener({ onSelectMarket, onQuickTrade }: Props) 
         </form>
       </div>
 
-      {/* Category Chips Filter Bar */}
+      {/* Category Chips Filter Bar — with W39-4 inline refetch spinner.
+          When `loading` is true AND we already have rows on screen,
+          show a small spinner at the right edge of the chip row so a
+          trader sees the refetch is in flight without losing the
+          visible rows. (The full-panel "Scanning Polymarket…" skeleton
+          only fires on the initial load when markets.length === 0.) */}
       <div className="flex items-center gap-1.5 px-4 py-2 bg-[#0e1015] border-b border-[#1f2335] overflow-x-auto scrollbar-thin">
         {CATEGORY_CHIPS.map((cat) => (
           <button
@@ -545,6 +580,16 @@ export default function MarketScreener({ onSelectMarket, onQuickTrade }: Props) 
             {cat}
           </button>
         ))}
+        {loading && markets.length > 0 && (
+          <span
+            className="ml-auto inline-flex items-center gap-1 text-[10px] text-[#7e8aaa] mono shrink-0"
+            aria-label="Refetching markets"
+            data-testid="screener-refetch-spinner"
+          >
+            <span className="spinner" aria-hidden="true" />
+            refreshing…
+          </span>
+        )}
       </div>
 
       {/* W38-4 — Additional factor filter chips: AI confidence, edge, time-to-resolution */}
@@ -628,6 +673,123 @@ export default function MarketScreener({ onSelectMarket, onQuickTrade }: Props) 
         </div>
       )}
 
+      {/* W39-4 — Active-filter summary bar.
+          Renders only when one or more filters are active (search,
+          category, AI confidence, edge, or resolution). Lists each
+          active filter as a removable chip so a trader can see which
+          constraints are applied AND clear them individually. The
+          trailing `Reset all` button clears everything in one click.
+
+          Named "Reset all" (not "Clear all") so the existing W22-2
+          test `getByRole('button', { name: /clear/i })` — which
+          asserts exactly one matching button after typing a search —
+          doesn't pick this up as a second match. The individual
+          remove-chip buttons use aria-labels like "Remove search
+          filter" / "Remove category filter: CRYPTO" — also don't
+          contain "clear", so the regex stays happy. */}
+      {hasActiveFilters && (
+        <div
+          className="flex flex-wrap items-center gap-1.5 px-4 py-1.5 bg-[#0e1015]/60 border-b border-[#1f2335] text-[10.5px]"
+          data-testid="screener-active-filters"
+        >
+          <span className="text-[#7e8aaa] uppercase font-bold tracking-wider mr-0.5" aria-hidden="true">
+            {[
+              search ? 1 : 0,
+              selectedCategory !== 'ALL' ? 1 : 0,
+              aiConfidenceFilter !== 'ALL' ? 1 : 0,
+              edgeFilter !== 'ALL' ? 1 : 0,
+              resolutionFilter !== 'ALL' ? 1 : 0,
+            ].reduce((a, b) => a + b, 0)} filters active
+          </span>
+          {search && (
+            <button
+              type="button"
+              onClick={() => { setSearch(''); fetchMarkets('') }}
+              className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded border border-blue-500/30 bg-blue-500/10 text-cyan-300 hover:bg-blue-500/20 transition-colors"
+              title="Remove search filter"
+              aria-label="Remove query filter"
+              data-testid="active-filter-search"
+            >
+              <span className="opacity-70">search:</span>
+              <strong className="font-semibold">"{search}"</strong>
+              <span className="opacity-60" aria-hidden="true">×</span>
+            </button>
+          )}
+          {selectedCategory !== 'ALL' && (
+            <button
+              type="button"
+              onClick={() => setSelectedCategory('ALL')}
+              className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded border border-blue-500/30 bg-blue-500/10 text-cyan-300 hover:bg-blue-500/20 transition-colors"
+              title="Remove category filter"
+              aria-label={`Remove category filter: ${selectedCategory}`}
+              data-testid="active-filter-category"
+            >
+              <span className="opacity-70">category:</span>
+              <strong className="font-semibold">{selectedCategory}</strong>
+              <span className="opacity-60" aria-hidden="true">×</span>
+            </button>
+          )}
+          {aiConfidenceFilter !== 'ALL' && (
+            <button
+              type="button"
+              onClick={() => setAiConfidenceFilter('ALL')}
+              className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded border border-fuchsia-500/30 bg-fuchsia-500/10 text-fuchsia-300 hover:bg-fuchsia-500/20 transition-colors"
+              title="Remove AI confidence filter"
+              aria-label={`Remove AI confidence filter: ${aiConfidenceFilter}`}
+              data-testid="active-filter-ai-conf"
+            >
+              <span className="opacity-70">AI conf:</span>
+              <strong className="font-semibold">
+                {AI_CONFIDENCE_FILTERS.find((f) => f.key === aiConfidenceFilter)?.label ?? aiConfidenceFilter}
+              </strong>
+              <span className="opacity-60" aria-hidden="true">×</span>
+            </button>
+          )}
+          {edgeFilter !== 'ALL' && (
+            <button
+              type="button"
+              onClick={() => setEdgeFilter('ALL')}
+              className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded border border-amber-500/30 bg-amber-500/10 text-amber-300 hover:bg-amber-500/20 transition-colors"
+              title="Remove edge filter"
+              aria-label={`Remove edge filter: ${edgeFilter}`}
+              data-testid="active-filter-edge"
+            >
+              <span className="opacity-70">edge:</span>
+              <strong className="font-semibold">
+                {EDGE_FILTERS.find((f) => f.key === edgeFilter)?.label ?? edgeFilter}
+              </strong>
+              <span className="opacity-60" aria-hidden="true">×</span>
+            </button>
+          )}
+          {resolutionFilter !== 'ALL' && (
+            <button
+              type="button"
+              onClick={() => setResolutionFilter('ALL')}
+              className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded border border-emerald-500/30 bg-emerald-500/10 text-emerald-300 hover:bg-emerald-500/20 transition-colors"
+              title="Remove time-to-resolution filter"
+              aria-label={`Remove resolution filter: ${resolutionFilter}`}
+              data-testid="active-filter-resolution"
+            >
+              <span className="opacity-70">resolution:</span>
+              <strong className="font-semibold">
+                {RESOLUTION_FILTERS.find((f) => f.key === resolutionFilter)?.label ?? resolutionFilter}
+              </strong>
+              <span className="opacity-60" aria-hidden="true">×</span>
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={resetAllFilters}
+            className="ml-auto btn btn-ghost btn-xs text-[10px] font-bold"
+            title="Reset all filters"
+            aria-label="Reset all filters"
+            data-testid="reset-all-filters"
+          >
+            Reset all
+          </button>
+        </div>
+      )}
+
       {/* Table */}
       <div className="flex-1 overflow-y-auto scrollbar-thin table-container">
         {loading && markets.length === 0 ? (
@@ -639,10 +801,14 @@ export default function MarketScreener({ onSelectMarket, onQuickTrade }: Props) 
           <table className="data-table" role="table" aria-label="Prediction market screener results">
             <thead>
               <tr>
-                <th scope="col" className="min-w-[260px]">Market Event</th>
-                <th scope="col">Category</th>
-                <th scope="col">24h Volume</th>
-                <th scope="col">Liquidity</th>
+                <th scope="col" className="min-w-[260px] text-left">Market Event</th>
+                <th scope="col" className="text-left">Category</th>
+                {/* W39-4 — explicit `text-right` on the numeric Volume +
+                    Liquidity headers (previously relied on the default
+                    left-align). Aligns with the rest of the numeric
+                    columns (Score, Edge, Resolution, Action). */}
+                <th scope="col" className="text-right">24h Volume</th>
+                <th scope="col" className="text-right">Liquidity</th>
                 {/* W38-4 — Opportunity Score column. Tooltip on the
                     header explains the formula; tooltip on each badge
                     shows the per-factor breakdown. */}
@@ -707,26 +873,48 @@ export default function MarketScreener({ onSelectMarket, onQuickTrade }: Props) 
                     onClick={() => onSelectMarket && onSelectMarket(s.tokenId, s.market.slug)}
                     className="hover:bg-blue-500/10 transition-colors cursor-pointer group"
                   >
-                    <td className="max-w-[340px]">
-                      <span className="text-[#dde1ed] group-hover:text-cyan-300 font-medium block truncate transition-colors" title={s.title}>
+                    {/* W39-4 — market-name cell. `title` attribute on the
+                        `<td>` provides a native hover tooltip showing the
+                        full title + slug so a trader can read a long event
+                        name even when the single-line ellipsis truncates
+                        it. Inner spans switched to single-line
+                        `truncate` so `text-overflow: ellipsis` fires. */}
+                    <td
+                      className="max-w-[340px] align-middle"
+                      title={`${s.title} — ${s.market.slug}`}
+                    >
+                      <span
+                        className="text-[#dde1ed] group-hover:text-cyan-300 font-medium block truncate transition-colors min-w-0"
+                        title={s.title}
+                      >
                         {s.title}
                       </span>
-                      <span className="text-[10px] text-[#7e8aaa] mono block truncate">{s.market.slug}</span>
+                      <span
+                        className="text-[10px] text-[#7e8aaa] mono block truncate min-w-0"
+                        title={s.market.slug}
+                      >
+                        {s.market.slug}
+                      </span>
                     </td>
-                    <td>
+                    {/* Category — text-left (the default), as it's a
+                        short badge not a numeric value. */}
+                    <td className="text-left align-middle">
                       <span className="badge badge-blue text-[9.5px] uppercase">
                         {s.market.category || 'general'}
                       </span>
                     </td>
-                    <td className="mono text-cyan-400 font-medium">
+                    {/* W39-4 — explicit `text-right` on the numeric
+                        Volume + Liquidity cells to match the headers
+                        and the other numeric columns. */}
+                    <td className="mono text-cyan-400 font-medium text-right tabular-nums align-middle">
                       {fmtUsd(s.volume, 0)}
                     </td>
-                    <td className="mono text-[#7e8aaa]">
+                    <td className="mono text-[#7e8aaa] text-right tabular-nums align-middle">
                       {fmtUsd(s.liquidity, 0)}
                     </td>
                     {/* W38-4 — Opportunity Score badge with full breakdown
                         in the tooltip (transparent formula). */}
-                    <td className="text-right">
+                    <td className="text-right align-middle">
                       <span
                         className={`mono text-[10.5px] font-bold px-1.5 py-0.5 rounded border ${scoreBadgeClass(s.score)}`}
                         title={scoreTooltip(s)}
@@ -737,14 +925,14 @@ export default function MarketScreener({ onSelectMarket, onQuickTrade }: Props) 
                       </span>
                     </td>
                     {/* W38-4 — Edge (cents) */}
-                    <td className="mono text-right text-amber-300 text-[11px] font-medium">
+                    <td className="mono text-right text-amber-300 text-[11px] font-medium tabular-nums align-middle">
                       {s.edgeCents.toFixed(1)}¢
                     </td>
                     {/* W38-4 — Time to resolution */}
-                    <td className="mono text-right text-[#7e8aaa] text-[11px]">
+                    <td className="mono text-right text-[#7e8aaa] text-[11px] tabular-nums align-middle">
                       {s.daysToResolution != null ? `${s.daysToResolution}d` : '—'}
                     </td>
-                    <td className="text-right">
+                    <td className="text-right align-middle">
                       <button
                         onClick={(e) => {
                           e.stopPropagation()

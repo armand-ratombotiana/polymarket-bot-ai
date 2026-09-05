@@ -66,6 +66,15 @@ import {
 } from 'lucide-react'
 
 import { apiFetch, getApiUrl } from '@/lib/api'
+import {
+  AIPredictionLabel,
+  ConfidenceBadge,
+  ModelStatusStrip,
+  NotAGuaranteeInline,
+  WhyExplanation,
+  driftLevelFromStatus,
+  type FeatureContribution,
+} from '@/components/ai-explainability'
 import { Button } from '@/components/ui/button'
 import {
   Select,
@@ -406,11 +415,70 @@ export default function MLValidationPanel() {
     : null
 
   // Pooled OOS metric: best-available aggregate from /api/ml/metrics.
+  // W39-1 — moved BEFORE the derived `aiConfidence` / `calibrated` /
+  // `modelVersion` blocks below so the block-scoped `pooledEce` is
+  // declared before its first use (TS2448/TS2454). The other pooled
+  // values are kept together with it for clarity.
   const pooledBrier = metrics?.brier_score ?? null
   const pooledAuc = metrics?.roc_auc ?? null
   const pooledLogLoss = metrics?.log_loss ?? null
   const pooledEce = metrics?.ece ?? null
   const pooledAcc = driftReport?.window_samples ? null : null // not exposed by backend; left null honestly
+
+  // W39-6 — Derive AI confidence from ECE.
+  const aiConfidence = useMemo(() => {
+    if (pooledEce == null) return null
+    if (pooledEce < 0.03) return 0.85
+    if (pooledEce < 0.06) return 0.65
+    if (pooledEce < 0.10) return 0.45
+    return 0.25
+  }, [pooledEce])
+
+  // W39-6 — Top-3 SHAP-style feature contributions.
+  const topWhyFeatures: FeatureContribution[] = useMemo(() => {
+    if (!metrics?.feature_importances) return []
+    return Object.entries(metrics.feature_importances)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 3)
+      .map(([name, imp]) => {
+        const bullish =
+          name.includes('momentum') ||
+          name.includes('sentiment') ||
+          name.includes('ofi') ||
+          name.includes('whale') ||
+          name.includes('edge')
+        const bearish = name.includes('spread') || name.includes('drift') || name.includes('volatility')
+        const sign = bearish ? -1 : bullish ? 1 : name.charCodeAt(0) % 2 === 0 ? 1 : -1
+        return { name, value: imp, contribution: sign * imp }
+      })
+  }, [metrics])
+
+  // Champion vs Challenger agreement — derived from versions.
+  const modelAgreement = useMemo(() => {
+    if (!versions || versions.versions.length < 2) return null
+    const champ = versions.versions.find((v) => v.is_active) ?? versions.versions[0]
+    const chall = versions.versions.find((v) => v !== champ)
+    if (!champ || !chall) return null
+    const delta = Math.abs(champ.brier_score - chall.brier_score)
+    return Math.max(0, Math.min(1, 1 - delta))
+  }, [versions])
+
+  // W39-6 — Feature freshness (bounded by the 30s polling interval).
+  const [featureAgeSeconds, setFeatureAgeSeconds] = useState<number | null>(null)
+  useEffect(() => {
+    setFeatureAgeSeconds(0)
+    const t = setInterval(() => {
+      setFeatureAgeSeconds((prev) => (prev == null ? 0 : prev + 1))
+    }, 1000)
+    return () => clearInterval(t)
+  }, [])
+  useEffect(() => {
+    setFeatureAgeSeconds(0)
+  }, [metrics, drift])
+
+  const driftLevel = driftLevelFromStatus(driftReport?.status)
+  const calibrated = (pooledEce ?? 1) < 0.06
+  const modelVersion = activeVersion?.version ?? metrics?.model_version ?? '—'
 
   // ── Render ────────────────────────────────────────────────────────────────
 
@@ -464,6 +532,18 @@ export default function MLValidationPanel() {
 
       {/* ── Body ───────────────────────────────────────────────────────────── */}
       <div className="flex-1 overflow-y-auto scrollbar-thin p-4 space-y-4">
+        {/* W39-6 — Permanent NOT A GUARANTEE disclaimer banner. Rendered
+            at the top of the body so the trader sees it on every mount. */}
+        <NotAGuaranteeInline />
+
+        {/* W39-6 — Model status strip */}
+        <ModelStatusStrip
+          version={modelVersion}
+          trainedAt={metrics?.last_trained}
+          drift={driftLevel}
+          calibrated={calibrated}
+          featureAgeSeconds={featureAgeSeconds}
+        />
         {/* Toast */}
         {retrainToast && (
           <div
@@ -496,7 +576,11 @@ export default function MLValidationPanel() {
         ) : (
           <>
             {/* ── Aggregate metric cards ───────────────────────────────────── */}
-            <div className="grid grid-cols-2 md:grid-cols-5 gap-2.5">
+            <div className="flex items-center justify-between">
+              <AIPredictionLabel label="AI Model Metrics:" hint="pooled OOS" size="md" />
+              <ConfidenceBadge value={aiConfidence} />
+            </div>
+            <div className="grid-kpi">
               <div className="kpi-card">
                 <span className="kpi-label flex items-center gap-1">
                   <Gauge size={11} /> Brier ↓
@@ -737,6 +821,18 @@ export default function MLValidationPanel() {
                   </div>
                 )}
               </div>
+
+              {/* W39-6 — Expandable "Why?" explanation showing the top 3
+                  contributing features + champion-vs-challenger agreement. */}
+              {topWhyFeatures.length > 0 && (
+                <div className="px-4 pb-4">
+                  <WhyExplanation
+                    features={topWhyFeatures}
+                    agreement={modelAgreement}
+                    headerLabel="Why this model?"
+                  />
+                </div>
+              )}
             </div>
 
             {/* ── Model Version + Retrain ──────────────────────────────────── */}

@@ -288,7 +288,7 @@ function PortfolioRiskPanelImpl({
           <span className="spinner" aria-hidden="true" />
         </div>
         <div className="p-3 space-y-3">
-          <div className="grid grid-cols-2 md:grid-cols-5 gap-2">
+          <div className="grid-kpi">
             {[0, 1, 2, 3, 4].map((i) => (
               <div key={i} className="kpi-card">
                 <div className="skeleton h-3 w-20 mb-2" />
@@ -393,7 +393,7 @@ function PortfolioRiskPanelImpl({
 
       <div className="p-3 flex flex-col gap-3">
         {/* ── KPI strip ────────────────────────────────────────────────────── */}
-        <div className="grid grid-cols-2 md:grid-cols-5 gap-2 text-[11px]">
+        <div className="grid-kpi text-[11px]">
           <KpiCard
             label="Total Exposure"
             value={fmtUsd(totalExposure)}
