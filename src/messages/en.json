@@ -30,7 +30,8 @@
     "retention": "Retention",
     "safety": "Safety Gate",
     "rate_limits": "Rate Limits",
-    "audit": "Audit Log"
+    "audit": "Audit Log",
+    "ingestion": "Data Ingestion"
   },
   "groups": {
     "main": "Main",

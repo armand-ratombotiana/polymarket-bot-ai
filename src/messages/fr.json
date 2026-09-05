@@ -30,7 +30,8 @@
     "retention": "Rétention",
     "safety": "Porte Sécurité",
     "rate_limits": "Limites Taux",
-    "audit": "Journal Audit"
+    "audit": "Journal Audit",
+    "ingestion": "Ingestion Données"
   },
   "groups": {
     "main": "Principal",

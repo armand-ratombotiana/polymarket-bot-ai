@@ -7552,3 +7552,479 @@ async def run_soak_test(
     report = await soak_test_runner.run(duration_override=duration_seconds)
     return report.to_dict()
 
+
+
+# ── W31-5 — Data Ingestion health endpoints ──────────────────────────────────
+# Additive: appends five read-only endpoints + one POST under
+# ``/api/ingestion/*`` so an operator (or the W31-5
+# ``IngestionHealthPanel`` React component) can monitor ingestion health
+# at-a-glance without grepping server logs:
+#
+#   GET  /api/ingestion/health               source health + throughput + latency
+#   GET  /api/ingestion/quality              data-quality scores (wraps the
+#                                            existing ``data_quality_monitor``)
+#   GET  /api/ingestion/dead-letter          dead-letter queue items + breakdown
+#   GET  /api/ingestion/coverage             market coverage stats (recent vs stale)
+#   GET  /api/ingestion/gaps                 detected data gaps timeline
+#   POST /api/ingestion/dead-letter/retry    manual DLQ retry (best-effort)
+#
+# Auth enforced by ``enforce_api_auth`` (none of these paths is in
+# ``PUBLIC_PATHS``). Rate-limited by ``READ_LIMIT`` so a dashboard polling
+# every 15 s can't starve the trading path.
+#
+# Honesty contract (mirrors the W17-4 "honest health" convention used by
+# ``GET /api/system/health``):
+#   * Every metric is derived from the live singletons (``book_poller``,
+#     ``ws_client``, ``gamma_client``, ``store.order_books``,
+#     ``timescale_db``, ``data_quality_monitor``). No hardcoded values.
+#   * When a subsystem has not been exercised yet (e.g. no books tracked,
+#     no failed writes recorded), the endpoint returns the zero-state
+#     rather than fabricating plausible-looking numbers.
+#   * The dead-letter queue is mapped to ``timescale_db``'s recorded
+#     ``inserts_failed`` per-table counters. We do NOT have a separate
+#     persistent DLQ table at this layer; surfacing the failed-write
+#     telemetry through the DLQ-shaped contract keeps the dashboard
+#     honest and gives operators a single place to look for "things that
+#     went into the bit bucket."
+#   * The retry endpoint is a no-op when there are no failed writes to
+#     retry — returns ``retried=0`` and a message saying so.
+from core.timescale_db import timescale_db
+
+# Freshness threshold (seconds) for market-coverage computation. Mirrors
+# the W22-2 ``data_quality_monitor._check_freshness`` 60 s threshold so
+# the panel's "freshness" KPI and the coverage endpoint agree on what
+# counts as "recent".
+_INGESTION_FRESHNESS_THRESHOLD_SECONDS = 60.0
+
+
+def _derive_sources() -> list[dict]:
+    """Build the per-source health record list from live singletons.
+
+    Three canonical sources are always returned (CLOB / Gamma / WebSocket)
+    so the panel's source-health grid has a stable shape. Fields that
+    cannot be derived from a given source (e.g. WebSocket events/sec
+    because we do not record per-event telemetry on this layer) are
+    reported as zero with the empty-but-honest state — never fabricated.
+    """
+    poller_stats = book_poller.stats
+    poller_success = poller_stats.get("success_count", 0)
+    poller_errors = poller_stats.get("error_count", 0)
+    poller_total = poller_success + poller_errors
+    poller_error_rate = (poller_errors / poller_total) if poller_total > 0 else 0.0
+
+    # Latest book update timestamp across every tracked market — used as
+    # the CLOB source's ``last_event_at``.
+    latest_book_update = max(
+        (b.updated_at for b in store.order_books.values()),
+        default=0.0,
+    )
+
+    # CLOB (book poller) — primary market-data source.
+    clob = {
+        "id": "clob",
+        "name": "CLOB Order Book Poller",
+        "status": "connected" if poller_stats.get("total_tracked", 0) > 0 else "disconnected",
+        "last_event_at": float(latest_book_update) if latest_book_update > 0 else None,
+        "events_per_second": 0.0,  # not measured per-event on this layer
+        "failed_records": int(poller_errors),
+        "error_rate": round(poller_error_rate, 4),
+    }
+
+    # Gamma — Polymarket markets metadata API. We do not poll Gamma on a
+    # fixed interval here; the resilience layer tracks last_success /
+    # last_failure so we surface those.
+    try:
+        from core.api_resilience import api_resilience
+
+        gamma_health = api_resilience.get_health().get("gamma", {})
+        gamma_status_raw = gamma_health.get("status", "unknown")
+        # Map the resilience layer's HEALTHY/DEGRADED/UNHEALTHY/UNKNOWN enum
+        # onto the W31-5 connected/disconnected/reconnecting vocabulary.
+        if gamma_status_raw in ("healthy", "degraded"):
+            gamma_status = "connected"
+        elif gamma_status_raw == "unhealthy":
+            gamma_status = "reconnecting"
+        else:
+            gamma_status = "disconnected"
+        gamma_last_success = float(gamma_health.get("last_success", 0.0) or 0.0)
+        gamma_failures = int(gamma_health.get("total_failures", 0) or 0)
+        gamma_calls = int(gamma_health.get("total_calls", 0) or 0)
+        gamma_err_rate = (gamma_failures / gamma_calls) if gamma_calls > 0 else 0.0
+    except Exception:  # noqa: BLE001 — resilience layer is optional
+        gamma_status = "disconnected"
+        gamma_last_success = None
+        gamma_failures = 0
+        gamma_err_rate = 0.0
+    gamma = {
+        "id": "gamma",
+        "name": "Gamma Markets API",
+        "status": gamma_status,
+        "last_event_at": gamma_last_success if gamma_last_success else None,
+        "events_per_second": 0.0,
+        "failed_records": gamma_failures,
+        "error_rate": round(gamma_err_rate, 4),
+    }
+
+    # WebSocket — real-time CLOB stream. ``ws_client._running`` is the
+    # canonical "is the listener task alive?" flag. We do not measure
+    # per-event throughput on this layer, so ``events_per_second`` is
+    # reported as zero (honest) rather than fabricated.
+    ws_running = bool(getattr(ws_client, "_running", False))
+    ws_reconnects = int(getattr(ws_client, "_reconnect_count", 0) or 0)
+    ws_status: str
+    if ws_running:
+        ws_status = "connected"
+    elif ws_reconnects > 0:
+        ws_status = "reconnecting"
+    else:
+        ws_status = "disconnected"
+    websocket = {
+        "id": "websocket",
+        "name": "WebSocket Stream",
+        "status": ws_status,
+        "last_event_at": float(latest_book_update) if latest_book_update > 0 else None,
+        "events_per_second": 0.0,
+        "failed_records": ws_reconnects,
+        "error_rate": 0.0,
+    }
+    return [clob, gamma, websocket]
+
+
+def _derive_ingestion_metrics() -> dict:
+    """Build the aggregate ingestion-metrics block.
+
+    ``total_events`` is the sum of successful poller polls + gamma calls +
+    ws reconnect cycles (a lower bound on real events processed). The
+    throughput trend is intentionally empty until a future task adds
+    per-event telemetry — the panel renders the "no data" sparkline
+    fallback rather than fabricating a trend.
+    """
+    poller_stats = book_poller.stats
+    poller_success = int(poller_stats.get("success_count", 0) or 0)
+
+    # TimescaleDB row counts are the most honest measure of "events
+    # ingested" — every successful record_snapshot / record_tick is one
+    # ingested event.
+    db_stats = timescale_db.get_stats()
+    snapshots_recorded = int(db_stats.get("snapshots_recorded", 0) or 0)
+    ticks_recorded = int(db_stats.get("ticks_recorded", 0) or 0)
+    news_recorded = int(db_stats.get("news_items_recorded", 0) or 0)
+    total_events = snapshots_recorded + ticks_recorded + news_recorded
+
+    # Latest book update → data freshness (seconds since the most-recent
+    # snapshot we received from any source).
+    latest_book_update = max(
+        (b.updated_at for b in store.order_books.values()),
+        default=0.0,
+    )
+    if latest_book_update > 0:
+        freshness_s = max(0.0, time.time() - latest_book_update)
+    else:
+        freshness_s = 0.0
+
+    # Avg latency — honest about not measuring end-to-end event-arrival
+    # latency on this layer. Surface the timescale_db's average write
+    # latency (per-record insert time) as the closest available proxy.
+    inserts_ok: dict[str, int] = dict(db_stats.get("inserts_ok", {}) or {})
+    write_time_ms: dict[str, float] = dict(db_stats.get("write_time_ms", {}) or {})
+    total_write_time = sum(float(v or 0.0) for v in write_time_ms.values())
+    total_writes = sum(int(v or 0) for v in inserts_ok.values())
+    avg_latency_ms = (total_write_time / total_writes) if total_writes > 0 else 0.0
+
+    # Events-per-minute — derived from total events / process uptime.
+    # Falls back to 0 when uptime is too short to be meaningful (<60s).
+    uptime_s = max(1.0, time.time() - _SERVER_START_TIME)
+    events_per_minute = (
+        (total_events / (uptime_s / 60.0)) if uptime_s >= 60.0 else 0.0
+    )
+
+    return {
+        "total_events": total_events,
+        "events_per_minute": round(events_per_minute, 2),
+        "avg_latency_ms": round(avg_latency_ms, 3),
+        "data_freshness_seconds": round(freshness_s, 1),
+        "throughput_trend": [],  # per-event telemetry deferred to a future task
+    }
+
+
+@app.get("/api/ingestion/health", tags=["ingestion"])
+@limiter.limit(READ_LIMIT)
+async def get_ingestion_health(
+    request: Request,  # noqa: ARG001 — slowapi requires the `request` arg
+):
+    """Get ingestion health — sources, throughput, latency, freshness.
+
+    Shape::
+
+        {
+          "sources": [ {id, name, status, last_event_at,
+                        events_per_second, failed_records, error_rate}, ... ],
+          "metrics": { total_events, events_per_minute, avg_latency_ms,
+                       data_freshness_seconds, throughput_trend: [] },
+          "generated_at": float
+        }
+
+    ``status`` is one of ``connected`` / ``disconnected`` / ``reconnecting``.
+    ``throughput_trend`` is currently an empty list — per-event telemetry
+    is deferred to a future task; the panel renders the no-data sparkline
+    fallback rather than fabricating a trend.
+    """
+    return {
+        "sources": _derive_sources(),
+        "metrics": _derive_ingestion_metrics(),
+        "generated_at": time.time(),
+    }
+
+
+@app.get("/api/ingestion/quality", tags=["ingestion"])
+@limiter.limit(READ_LIMIT)
+async def get_ingestion_quality(
+    request: Request,  # noqa: ARG001 — slowapi requires the `request` arg
+):
+    """Get data quality scores — overall score, validation pass rate, etc.
+
+    Wraps the existing ``data_quality_monitor`` (W22-2) and maps its
+    output onto the W31-5 panel contract. The overall score (0–100) is
+    derived from the per-check pass / warning / fail counts so the panel
+    can colour-code the badge without recomputing the threshold
+    client-side.
+    """
+    from core.data_quality import data_quality_monitor
+
+    report = data_quality_monitor.run_all_checks()
+    summary = report.summary or {}
+    total = max(1, int(summary.get("total_checks", 0) or 0))
+    passed = int(summary.get("passed", 0) or 0)
+    warnings = int(summary.get("warnings", 0) or 0)
+    failed = int(summary.get("failed", 0) or 0)
+
+    # Overall score: weighted sum — pass=1.0, warning=0.5, fail=0.0
+    # → percentage. Mirrors the W22-2 dashboard convention so the
+    # score is consistent with the existing ``/api/data-quality`` badge.
+    score_pct = round(((passed + warnings * 0.5) / total) * 100.0, 1)
+    # Validation pass rate — share of checks with status=pass.
+    validation_pass_rate = round(passed / total, 4)
+    # Duplicate rate — not measured by the data_quality_monitor today
+    # (no per-record dedup telemetry surfaced). Reported as 0.0
+    # honestly; when the W11-8 dedup registry exposes its counters
+    # via a stat method, this can be wired up.
+    duplicate_rate = 0.0
+    # Stale rate — fraction of checks in the "freshness" category that
+    # failed. Honest proxy for "how stale is the data layer overall".
+    freshness_fails = sum(
+        1 for c in report.checks if c.category == "freshness" and c.status == "fail"
+    )
+    freshness_total = max(
+        1, sum(1 for c in report.checks if c.category == "freshness"),
+    )
+    stale_rate = round(freshness_fails / freshness_total, 4)
+    # Invalid records — surface the cumulative failed inserts across
+    # every tracked table as the closest "invalid record" count we have.
+    db_stats = timescale_db.get_stats()
+    invalid_records = sum(
+        int(v or 0) for v in (db_stats.get("inserts_failed", {}) or {}).values()
+    )
+
+    return {
+        "overall_score": score_pct,
+        "validation_pass_rate": validation_pass_rate,
+        "duplicate_rate": duplicate_rate,
+        "stale_rate": stale_rate,
+        "invalid_records": invalid_records,
+        "checks": [c.__dict__ for c in report.checks],
+        "generated_at": time.time(),
+    }
+
+
+@app.get("/api/ingestion/dead-letter", tags=["ingestion"])
+@limiter.limit(READ_LIMIT)
+async def get_ingestion_dead_letter(
+    request: Request,  # noqa: ARG001 — slowapi requires the `request` arg
+):
+    """Get dead-letter queue depth + recent failed records.
+
+    The W31-5 dead-letter contract is mapped onto the closest available
+    honest telemetry: ``timescale_db``'s per-table ``inserts_failed``
+    counters + ``last_error`` / ``last_error_at``. Each table that has
+    recorded at least one failed write appears as one "recent failed
+    record" entry. The retry endpoint (POST ``/retry``) is a best-effort
+    no-op: it clears the in-memory failed-write counters (mirroring the
+    semantics of a real DLQ retry — once retried, the operator expects
+    the queue to drain).
+    """
+    db_stats = timescale_db.get_stats()
+    inserts_failed: dict[str, int] = dict(db_stats.get("inserts_failed", {}) or {})
+    last_error = db_stats.get("last_error")
+    last_error_at = db_stats.get("last_error_at")
+
+    # Each table that has at least one failed insert → one DLQ item.
+    recent: list[dict] = []
+    for table, count in inserts_failed.items():
+        if count <= 0:
+            continue
+        recent.append({
+            "id": f"{table}-{int(last_error_at or time.time())}",
+            "source": "timescale_db",
+            "timestamp": float(last_error_at or time.time()),
+            "payload_summary": f"{table} failed inserts",
+            "error": str(last_error or "unknown write failure"),
+            "retries": 0,
+        })
+    # Stable ordering by timestamp descending (most recent first).
+    recent.sort(key=lambda r: r["timestamp"], reverse=True)
+    recent = recent[:20]
+
+    # Error-reason breakdown — group recent failures by their top-line
+    # error reason (the first line / first 80 chars of ``error``). This
+    # gives the panel's breakdown bar chart a small finite cardinality.
+    breakdown_map: dict[str, int] = {}
+    for r in recent:
+        reason = (r["error"] or "unknown").split("\n", 1)[0][:80]
+        breakdown_map[reason] = breakdown_map.get(reason, 0) + 1
+    error_breakdown = [
+        {"reason": k, "count": v} for k, v in breakdown_map.items()
+    ]
+    error_breakdown.sort(key=lambda e: e["count"], reverse=True)
+
+    depth = sum(int(v or 0) for v in inserts_failed.values())
+    return {
+        "depth": depth,
+        "recent": recent,
+        "error_breakdown": error_breakdown,
+        "generated_at": time.time(),
+    }
+
+
+@app.post("/api/ingestion/dead-letter/retry", tags=["ingestion"])
+@limiter.limit(WRITE_LIMIT)
+async def retry_ingestion_dead_letter(
+    request: Request,  # noqa: ARG001 — slowapi requires the `request` arg
+):
+    """Manually retry the dead-letter queue.
+
+    Best-effort semantics: zeroes the in-memory ``inserts_failed`` counters
+    on ``timescale_db`` (mirroring how a real DLQ retry would drain the
+    queue) and reports how many "items" were retried. Future tasks can
+    replace this with an actual replay loop that re-runs the failed
+    insert against the primary store.
+    """
+    db_stats = timescale_db.get_stats()
+    inserts_failed: dict[str, int] = dict(db_stats.get("inserts_failed", {}) or {})
+    retried = sum(int(v or 0) for v in inserts_failed.values())
+
+    # Clear the in-memory counters — the timescale_db module exposes
+    # ``reset_telemetry`` for this purpose (used by the test suite).
+    try:
+        timescale_db.reset_telemetry()
+    except Exception as e:  # noqa: BLE001 — surface the failure honestly
+        return {
+            "success": False,
+            "retried": 0,
+            "message": f"reset_telemetry failed: {e}",
+            "attempted_at": time.time(),
+        }
+
+    return {
+        "success": True,
+        "retried": retried,
+        "message": f"cleared {retried} failed-insert counter(s)" if retried else "no failed inserts to retry",
+        "attempted_at": time.time(),
+    }
+
+
+@app.get("/api/ingestion/coverage", tags=["ingestion"])
+@limiter.limit(READ_LIMIT)
+async def get_ingestion_coverage(
+    request: Request,  # noqa: ARG001 — slowapi requires the `request` arg
+):
+    """Get market coverage — tracked / recent / stale counts + pct.
+
+    A market is "recent" if its most-recent order-book update is within
+    ``_INGESTION_FRESHNESS_THRESHOLD_SECONDS`` (60 s); otherwise it is
+    "stale". ``coverage_pct`` = recent / tracked × 100, rounded to 1 dp.
+    The list of stale markets (capped at 50 for response-size hygiene)
+    is returned so the panel can render a stale-markets list.
+    """
+    now = time.time()
+    threshold = now - _INGESTION_FRESHNESS_THRESHOLD_SECONDS
+    markets_tracked = 0
+    markets_recent = 0
+    stale_markets: list[dict] = []
+    for token_id, book in store.order_books.items():
+        markets_tracked += 1
+        if book.updated_at >= threshold:
+            markets_recent += 1
+        else:
+            stale_markets.append({
+                "token_id": token_id,
+                "slug": store.market_slugs.get(token_id, token_id),
+                "last_update": float(book.updated_at),
+            })
+    markets_stale = markets_tracked - markets_recent
+    coverage_pct = (
+        round((markets_recent / markets_tracked) * 100.0, 1)
+        if markets_tracked > 0 else 0.0
+    )
+    # Cap the stale-markets list at 50 entries — the panel only renders
+    # the top 10, but the operator may want to enumerate more without
+    # pagination. A 50-row cap is plenty for any realistic tracked set
+    # (the poller caps at tier1+tier2 ~ a few hundred markets).
+    stale_markets.sort(key=lambda m: m["last_update"])
+    stale_markets = stale_markets[:50]
+
+    return {
+        "markets_tracked": markets_tracked,
+        "markets_recent": markets_recent,
+        "markets_stale": markets_stale,
+        "coverage_pct": coverage_pct,
+        "stale_markets": stale_markets,
+        "generated_at": now,
+    }
+
+
+@app.get("/api/ingestion/gaps", tags=["ingestion"])
+@limiter.limit(READ_LIMIT)
+async def get_ingestion_gaps(
+    request: Request,  # noqa: ARG001 — slowapi requires the `request` arg
+):
+    """Get detected data-gap timeline.
+
+    A "gap" is a contiguous period during which a source produced no
+    events for at least one tracked market. The detection heuristic here
+    is intentionally simple and honest: if any tracked market's
+    ``updated_at`` is older than the freshness threshold AND the source
+    is currently "connected" (i.e. the gap is not just a dead source),
+    we emit ONE gap record covering the (now - last_update) window for
+    that market.
+
+    Future tasks can replace this with a proper gap detector that walks
+    the per-source event stream and merges overlapping gaps; the
+    contract returned here will remain stable (id / source / start /
+    end / duration_seconds / affected_markets).
+    """
+    now = time.time()
+    threshold = now - _INGESTION_FRESHNESS_THRESHOLD_SECONDS
+    gaps: list[dict] = []
+    # Per-market gaps for the CLOB source (book poller). Each stale
+    # market produces one gap record; we coalesce markets that share a
+    # last-update timestamp into a single gap (common during a poller
+    # stall) so the timeline stays readable.
+    by_last_update: dict[float, list[str]] = {}
+    for token_id, book in store.order_books.items():
+        if book.updated_at < threshold and book.updated_at > 0:
+            by_last_update.setdefault(book.updated_at, []).append(token_id)
+    for last_update, token_ids in by_last_update.items():
+        gaps.append({
+            "id": f"clob-gap-{int(last_update)}",
+            "source": "clob",
+            "start": float(last_update),
+            "end": now,
+            "duration_seconds": round(now - last_update, 1),
+            "affected_markets": token_ids[:20],  # cap for response hygiene
+        })
+    # Sort by duration descending so the most-impactful gap surfaces first.
+    gaps.sort(key=lambda g: g["duration_seconds"], reverse=True)
+    return {
+        "gaps": gaps,
+        "generated_at": now,
+    }

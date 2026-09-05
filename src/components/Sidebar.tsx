@@ -41,6 +41,7 @@ export type NavSection =
   | 'system-safety'
   | 'system-rate-limit'
   | 'system-audit'
+  | 'system-ingestion'
 
 interface NavItem {
   id: NavSection
@@ -157,6 +158,10 @@ const NAV_GROUPS: NavGroup[] = [
       { id: 'system-safety', labelKey: 'nav.safety', label: 'Safety Gate', shortLabel: 'Safety', icon: '🛡', group: 'system' },
       { id: 'system-rate-limit', labelKey: 'nav.rate_limits', label: 'Rate Limits', shortLabel: 'Limits', icon: '⏱', group: 'system' },
       { id: 'system-audit', labelKey: 'nav.audit', label: 'Audit Log', shortLabel: 'Audit', icon: '📋', group: 'system' },
+      // W31-5 — Data Ingestion health panel: source health grid, throughput /
+      // latency / freshness metrics, data-quality scores, dead-letter queue,
+      // gap timeline, market coverage. Polls /api/ingestion/* every 15s.
+      { id: 'system-ingestion', labelKey: 'nav.ingestion', label: 'Data Ingestion', shortLabel: 'Ingest', icon: '⇶', group: 'system' },
     ],
   },
 ]

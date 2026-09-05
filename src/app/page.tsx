@@ -160,6 +160,9 @@ const AuditLogPanel = lazyPanel(() => import('@/components/AuditLogPanel'), 'Loa
 const RateLimitPanel = lazyPanel(() => import('@/components/RateLimitPanel'), 'Loading Rate Limits…')
 // W21-7 — Database Status panel (PG vs SQLite + health + table stats).
 const DatabaseStatusPanel = lazyPanel(() => import('@/components/DatabaseStatusPanel'), 'Loading Database Status…')
+// W31-5 — Data Ingestion health panel: source health, throughput / latency,
+// quality scores, dead-letter queue, gaps, market coverage.
+const IngestionHealthPanel = lazyPanel(() => import('@/components/IngestionHealthPanel'), 'Loading Ingestion Health…')
 
 // Modals
 import DepthChartModal from '@/components/DepthChartModal'
@@ -1021,6 +1024,15 @@ export default function Dashboard() {
               <PanelErrorBoundary label="Rate Limits">
               <div style={{ height: '100%', overflow: 'auto' }} className="scrollbar-thin">
                 <RateLimitPanel />
+              </div>
+              </PanelErrorBoundary>
+            )}
+
+            {/* ── System — Data Ingestion (W31-5) ──────────────────────── */}
+            {activeSection === 'system-ingestion' && (
+              <PanelErrorBoundary label="Data Ingestion">
+              <div style={{ height: '100%', overflow: 'auto' }} className="scrollbar-thin">
+                <IngestionHealthPanel />
               </div>
               </PanelErrorBoundary>
             )}

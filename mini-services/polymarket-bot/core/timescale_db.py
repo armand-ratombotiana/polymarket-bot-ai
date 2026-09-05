@@ -997,6 +997,26 @@ class TimescaleDBEngine:
             "last_error_at": self._telemetry["last_error_at"],
         }
 
+    def reset_telemetry(self) -> None:
+        """Zero every in-memory telemetry counter.
+
+        Used by the W31-5 ``POST /api/ingestion/dead-letter/retry``
+        endpoint — the dead-letter contract is mapped onto the
+        ``inserts_failed`` per-table counters, and "retrying" the queue
+        should drain those counters (mirroring how a real DLQ retry
+        would clear the queue). Persisted rows in the SQLite / PG
+        tables are NOT touched — this is purely an in-memory telemetry
+        reset.
+        """
+        for table in self._telemetry["inserts_ok"]:
+            self._telemetry["inserts_ok"][table] = 0
+        for table in self._telemetry["inserts_failed"]:
+            self._telemetry["inserts_failed"][table] = 0
+        for table in self._telemetry["write_time_ms"]:
+            self._telemetry["write_time_ms"][table] = 0.0
+        self._telemetry["last_error"] = None
+        self._telemetry["last_error_at"] = None
+
 
 # Global singleton
 timescale_db = TimescaleDBEngine()
