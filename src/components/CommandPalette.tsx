@@ -83,6 +83,9 @@ function buildNavCommands(onNavigate: (section: NavSection) => void): CommandIte
     { id: 'nav-arbitrage', label: 'Arbitrage', group: 'Navigate', icon: '⇌', kbd: '6', action: () => onNavigate('strategies-arbitrage') },
     { id: 'nav-analysis', label: 'Deep Analysis', group: 'Navigate', icon: '⊘', kbd: '7', action: () => onNavigate('intelligence-analysis'), keywords: ['forecast'] },
     { id: 'nav-aiml', label: 'AI / ML Engine', group: 'Navigate', icon: '⊛', action: () => onNavigate('intelligence-aiml'), keywords: ['ml', 'model', 'engine'] },
+    // W38-5 — Explainable AI / ML Prediction panel: trustworthy AI
+    // prediction surface with SHAP explainability + prediction history.
+    { id: 'nav-explainer', label: 'AI Prediction Explainer', group: 'Navigate', icon: '◍', action: () => onNavigate('intelligence-explainer'), keywords: ['ai', 'ml', 'explain', 'shap', 'trustworthy', 'prediction'] },
     { id: 'nav-copilot', label: 'Copilot', group: 'Navigate', icon: '◈', action: () => onNavigate('intelligence-copilot'), keywords: ['ai', 'assistant'] },
     { id: 'nav-shadow', label: 'Shadow Inference', group: 'Navigate', icon: '⬡', action: () => onNavigate('intelligence-shadow') },
     { id: 'nav-validation', label: 'ML Validation', group: 'Navigate', icon: '⊕', action: () => onNavigate('intelligence-validation') },

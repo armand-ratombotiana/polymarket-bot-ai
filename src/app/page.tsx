@@ -38,6 +38,13 @@ import EquityCurve from '@/components/EquityCurve'
 import AnalyticsPanel from '@/components/AnalyticsPanel'
 import MLPanel from '@/components/MLPanel'
 import EventLog from '@/components/EventLog'
+// W38-3 — Compact system health bar (backend / WS / freshness / risk /
+// kill switch) + grouped aggregated metrics strip (Portfolio | Trading |
+// Risk | AI | System). Mounted at the top of the Command Center so the
+// trader can scan the workstation's posture before drilling into the
+// risk / markets / positions detail panels below.
+import CommandCenterHealthBar from '@/components/CommandCenterHealthBar'
+import CommandCenterMetricsStrip from '@/components/CommandCenterMetricsStrip'
 
 // Markets
 import MarketsPanel from '@/components/MarketsPanel'
@@ -137,6 +144,11 @@ function lazyPanel(
 // Intelligence — Wave 8
 const ShadowInferencePanel = lazyPanel(() => import('@/components/ShadowInferencePanel'), 'Loading Shadow Inference…')
 const MLValidationPanel = lazyPanel(() => import('@/components/MLValidationPanel'), 'Loading ML Validation…')
+// W38-5 — Explainable AI / ML Prediction panel: clear labeling + SHAP
+// explainability + prediction history. Loaded with `next/dynamic` + `ssr:
+// false` so the Recharts reliability-diagram chunk stays out of the initial
+// bundle.
+const AIPredictionExplainerPanel = lazyPanel(() => import('@/components/AIPredictionExplainerPanel'), 'Loading AI Prediction Explainer…')
 
 // Analytics — Wave 8
 const AttributionPanel = lazyPanel(() => import('@/components/AttributionPanel'), 'Loading Attribution…')
@@ -650,6 +662,22 @@ export default function Dashboard() {
             {activeSection === 'command' && (
               <PanelErrorBoundary label="Command Center">
               <div className="command-center-layout">
+                {/* W38-3 — Compact 5-indicator system health bar + grouped
+                    metrics strip. Sits above the risk/market/pos/orders/events
+                    grid so the trader scans the workstation's posture (backend
+                    / WS / freshness / risk / kill switch + 16 KPIs grouped by
+                    Portfolio | Trading | Risk | AI | System) before drilling
+                    into the detail panels below. */}
+                <div style={{ gridArea: 'health', minHeight: 0 }}>
+                  <CommandCenterHealthBar
+                    snapshot={snapshot}
+                    status={status}
+                    wsConnected={wsConnected}
+                  />
+                </div>
+                <div style={{ gridArea: 'metrics', minHeight: 0 }}>
+                  <CommandCenterMetricsStrip snapshot={snapshot} />
+                </div>
                 <div style={{ gridArea: 'risk', minHeight: 0 }}>
                   <RiskStatusPanel />
                 </div>
@@ -841,6 +869,15 @@ export default function Dashboard() {
               <PanelErrorBoundary label="AI / ML Engine">
               <div style={{ height: '100%', overflow: 'hidden' }}>
                 <AIMLCommandCenter />
+              </div>
+              </PanelErrorBoundary>
+            )}
+
+            {/* ── Intelligence — AI Prediction Explainer (W38-5) ──────── */}
+            {activeSection === 'intelligence-explainer' && (
+              <PanelErrorBoundary label="AI Prediction Explainer">
+              <div style={{ height: '100%', overflow: 'auto' }} className="scrollbar-thin">
+                <AIPredictionExplainerPanel />
               </div>
               </PanelErrorBoundary>
             )}

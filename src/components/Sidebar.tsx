@@ -22,6 +22,7 @@ export type NavSection =
   | 'strategies-performance'
   | 'intelligence-analysis'
   | 'intelligence-aiml'
+  | 'intelligence-explainer'
   | 'intelligence-copilot'
   | 'intelligence-shadow'
   | 'intelligence-validation'
@@ -123,6 +124,12 @@ const NAV_GROUPS: NavGroup[] = [
     items: [
       { id: 'intelligence-analysis', labelKey: 'nav.analysis', label: 'Deep Analysis', shortLabel: 'Analysis', icon: '⊘', kbd: '7', group: 'intelligence' },
       { id: 'intelligence-aiml', labelKey: 'nav.aiml', label: 'AI / ML Engine', shortLabel: 'AI/ML', icon: '⊛', group: 'intelligence' },
+      // W38-5 — Explainable AI / ML Prediction panel: trustworthy AI
+      // prediction surface with clear labeling, SHAP explainability, and
+      // prediction history. Sits next to AI/ML Engine so the trader can
+      // hop between the model telemetry (command center) and the
+      // per-prediction explainer without losing context.
+      { id: 'intelligence-explainer', labelKey: 'nav.explainer', label: 'AI Prediction Explainer', shortLabel: 'Explainer', icon: '◍', group: 'intelligence' },
       { id: 'intelligence-copilot', labelKey: 'nav.copilot', label: 'Copilot', shortLabel: 'Copilot', icon: '◈', group: 'intelligence' },
       { id: 'intelligence-shadow', labelKey: 'nav.shadow', label: 'Shadow Inference', shortLabel: 'Shadow', icon: '⬡', group: 'intelligence' },
       { id: 'intelligence-validation', labelKey: 'nav.validation', label: 'ML Validation', shortLabel: 'ML Valid', icon: '⊕', group: 'intelligence' },

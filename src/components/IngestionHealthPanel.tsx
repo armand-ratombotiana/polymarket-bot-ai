@@ -132,6 +132,7 @@ import {
   Zap,
   TrendingUp,
 } from 'lucide-react'
+import ConfirmationDialog from './ConfirmationDialog'
 
 // ───────────────────────────────────────────────────────────────────────────
 // Types — mirror the JSON shapes documented above
@@ -170,6 +171,15 @@ export interface IngestionQualityPayload {
   duplicate_rate: number
   stale_rate: number
   invalid_records: number
+  // W38-6 — Schema-validation fields (optional so the panel tolerates
+  // a pre-W38-6 backend that hasn't yet shipped the
+  // /api/ingestion/quality schema_version / schema_drift_detected /
+  // rejected_records additions). When absent, the Schema Validation
+  // Status card renders a graceful "unavailable" placeholder rather
+  // than fabricating plausible-looking numbers.
+  schema_version?: number | string | null
+  schema_drift_detected?: boolean
+  rejected_records?: number
   checks?: Array<{ name: string; status: string; detail: string }>
   generated_at: number
 }
@@ -232,6 +242,126 @@ export interface GapsPayload {
 }
 
 // ───────────────────────────────────────────────────────────────────────────
+// W38-6 — Operational visibility extension types.
+//
+// The panel now also consumes three additional read-only endpoints:
+// reliability, backfill status, pipeline status. The shapes mirror
+// the JSON contract documented in the W34-5 reliability tracker, the
+// W32-3 backfill engine, and the W32-3 pipeline-control status
+// snapshot. Every field is optional on the consumer side so the panel
+// gracefully tolerates a partial / missing payload (it falls back to
+// "—" placeholders rather than crashing).
+// ───────────────────────────────────────────────────────────────────────────
+
+export interface ReliabilityWindowMap {
+  '24h'?: number
+  '7d'?: number
+  '30d'?: number
+  [key: string]: number | undefined
+}
+
+export interface ReliabilitySnapshot {
+  source: string
+  score: number
+  status: 'healthy' | 'degraded' | 'unreliable' | 'unknown' | string
+  uptime_pct: ReliabilityWindowMap
+  avg_latency_ms: ReliabilityWindowMap
+  error_rate: ReliabilityWindowMap
+  rate_limit_hits: ReliabilityWindowMap
+  gap_count: ReliabilityWindowMap
+  recent_events?: Array<{
+    timestamp: number
+    success: boolean
+    latency_ms: number
+    error: string
+  }>
+  score_inputs?: {
+    success_rate: number
+    latency_consistency: number
+    gap_frequency_score: number
+    error_recovery_score: number
+  }
+}
+
+export interface ReliabilityPayload {
+  count: number
+  sources: Record<string, ReliabilitySnapshot>
+  avg_score: number
+  source_filter?: string | null
+  generated_at: number
+}
+
+export interface BackfillRun {
+  id: number
+  type: string
+  started_at: number
+  ended_at: number
+  total_processed: number
+  total_added: number
+  total_skipped: number
+  total_errors: number
+  error_message: string
+}
+
+export interface BackfillCheckpoint {
+  type: string
+  last_offset: number
+  last_token_id: string
+  last_run_at: number
+  completed: boolean
+}
+
+export interface BackfillStatusPayload {
+  runs: BackfillRun[]
+  checkpoints: Record<string, BackfillCheckpoint | null>
+  engine_stats?: {
+    target_rps?: number
+    current_interval?: number
+    consecutive_rate_limits?: number
+    concurrency?: number
+    page_size?: number
+    max_pages?: number
+  }
+  generated_at: number
+}
+
+export interface PipelineStatusPayload {
+  running: boolean
+  ws_running: boolean
+  ws_reconnect_count: number
+  ws_subscribed_tokens: number
+  rest_running: boolean
+  rest_tracked_tokens: number
+  pipeline_stats?: Record<string, unknown>
+  raw_vault_stats?: Record<string, unknown>
+  last_started_at: number | null
+  last_stopped_at: number | null
+  generated_at: number
+}
+
+// W38-6 — Operational action result. Every action button (Start /
+// Stop / Retry / Launch Backfill / Clear DLQ / Replay Events) posts to
+// its respective WRITE endpoint and surfaces the result inline so the
+// operator sees the post-action outcome without waiting for the next
+// poll tick.
+export interface ActionResult {
+  ok: boolean
+  message: string
+  attempted_at: number
+}
+
+// Discriminated union of the five confirmation dialogs the panel can
+// raise. Each variant carries just enough state for the dialog body +
+// the onConfirm handler to execute the underlying POST / DELETE.
+type ConfirmDialogState =
+  | { kind: 'start' }
+  | { kind: 'stop' }
+  | { kind: 'retry-failed' }
+  | { kind: 'launch-backfill' }
+  | { kind: 'clear-dlq' }
+  | { kind: 'replay-events' }
+
+// ───────────────────────────────────────────────────────────────────────────
 // W35-3 — Live error feed entry.
 //
 // Mirrors the dead-letter recent item shape but is owned by the panel:
@@ -277,6 +407,32 @@ const DEAD_LETTER_ENDPOINT = '/api/ingestion/dead-letter'
 const DEAD_LETTER_RETRY_ENDPOINT = '/api/ingestion/dead-letter/retry'
 const COVERAGE_ENDPOINT = '/api/ingestion/coverage'
 const GAPS_ENDPOINT = '/api/ingestion/gaps'
+
+// W38-6 — Operational visibility + control endpoints. Three read-only
+// status endpoints + five WRITE control endpoints. The reads join the
+// existing 15s poll cycle in fetchAll; the writes fire on operator
+// action and never poll.
+const RELIABILITY_ENDPOINT = '/api/ingestion/reliability'
+const BACKFILL_STATUS_ENDPOINT = '/api/ingestion/backfill/status'
+const PIPELINE_STATUS_ENDPOINT = '/api/ingestion/pipeline/status'
+const PIPELINE_START_ENDPOINT = '/api/ingestion/pipeline/start'
+const PIPELINE_STOP_ENDPOINT = '/api/ingestion/pipeline/stop'
+const BACKFILL_MARKETS_ENDPOINT = '/api/ingestion/backfill/markets'
+const REPLAY_ENDPOINT = '/api/ingestion/replay'
+
+// W38-6 — Source filter used by the Replay Events control. The
+// backend's POST /api/ingestion/replay?source=... requires a non-empty
+// source string (empty source → scanned=0). 'clob' is the primary
+// REST ingestion source today (Gamma feeds the metadata layer, WS is
+// dormant per the KD-08 / KD-24 / D5 decision documented in
+// api/server.py's pipeline-start route).
+const DEFAULT_REPLAY_SOURCE = 'clob'
+
+// W38-6 — Cap on the number of recent backfill runs rendered in the
+// Backfill Progress card. Mirrors the W32-3 status endpoint's default
+// ``limit=20`` so the panel doesn't fetch more than the backend will
+// return by default.
+const BACKFILL_STATUS_LIMIT = 20
 
 // ───────────────────────────────────────────────────────────────────────────
 // Formatting helpers
@@ -337,6 +493,30 @@ function scoreColor(score: number): string {
   if (score >= 90) return 'text-green-400'
   if (score >= 75) return 'text-amber-400'
   return 'text-red-400'
+}
+
+// W38-6 — Colour picker for reliability score (0–100). Mirrors the
+// scoreColor convention but with a wider green band (>95), an amber
+// band (80–95), and red below 80 — matches the W34-5 ReliabilityStatus
+// HEALTHY / DEGRADED / UNRELIABLE thresholds documented in
+// ``ingestion/reliability.py``.
+function reliabilityScoreColor(score: number): string {
+  if (!Number.isFinite(score)) return 'text-[#7e8aaa]'
+  if (score > 95) return 'text-green-400'
+  if (score >= 80) return 'text-amber-400'
+  return 'text-red-400'
+}
+
+// W38-6 — Reliability status → badge variant. Mirrors the source-status
+// badge convention (green for healthy, amber for degraded, red for
+// unreliable, neutral for unknown).
+function reliabilityStatusVariant(
+  status: string,
+): 'success' | 'warning' | 'destructive' | 'secondary' {
+  if (status === 'healthy') return 'success'
+  if (status === 'degraded') return 'warning'
+  if (status === 'unreliable') return 'destructive'
+  return 'secondary'
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -587,11 +767,24 @@ export default function IngestionHealthPanel() {
   const [deadLetter, setDeadLetter] = useState<DeadLetterPayload | null>(null)
   const [coverage, setCoverage] = useState<CoveragePayload | null>(null)
   const [gaps, setGaps] = useState<GapsPayload | null>(null)
+  // W38-6 — Operational visibility state: per-source reliability
+  // snapshots, recent backfill runs, and the live pipeline state.
+  const [reliability, setReliability] = useState<ReliabilityPayload | null>(null)
+  const [backfillStatus, setBackfillStatus] = useState<BackfillStatusPayload | null>(null)
+  const [pipelineStatus, setPipelineStatus] = useState<PipelineStatusPayload | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [retrying, setRetrying] = useState(false)
   const [dlqRetryResult, setDlqRetryResult] = useState<DeadLetterRetryResult | null>(null)
   const [lastUpdated, setLastUpdated] = useState<number | null>(null)
+
+  // W38-6 — Confirmation dialog + action state. Each operational
+  // button click opens a ConfirmationDialog (per the W38-8 dialog
+  // contract). On confirm, the dispatcher fires the appropriate
+  // WRITE endpoint and surfaces the inline result.
+  const [confirmDialog, setConfirmDialog] = useState<ConfirmDialogState | null>(null)
+  const [actionPending, setActionPending] = useState(false)
+  const [lastActionResult, setLastActionResult] = useState<ActionResult | null>(null)
 
   // W35-3 — Live throughput sparkline buffer. Every time a new health
   // payload arrives (REST prefetch, REST poll, or WS push), the effect
@@ -609,21 +802,37 @@ export default function IngestionHealthPanel() {
   const [errorFeed, setErrorFeed] = useState<LiveErrorEvent[]>([])
   const seenErrorIdsRef = useRef<Set<string>>(new Set())
 
-  // Fetch the four remaining ingestion endpoints (everything except
+  // Fetch the remaining ingestion endpoints (everything except
   // /api/ingestion/health, which now flows through useRealtimeData).
   // Errors from any individual endpoint are surfaced as a single banner
   // (mirrors the DatabaseStatusPanel pattern: the panel keeps rendering
   // whatever it has, but the operator sees *why* the latest poll
   // failed).
+  //
+  // W38-6 — extended to also fetch reliability + backfill status +
+  // pipeline status (the three new read-only operational surfaces).
+  // Each fetch resolves independently — a single endpoint failure does
+  // NOT block the others (Promise.all + per-response ok check).
   const fetchAll = useCallback(async () => {
     try {
-      const [qualityRes, dlqRes, coverageRes, gapsRes] = await Promise.all([
+      const [
+        qualityRes,
+        dlqRes,
+        coverageRes,
+        gapsRes,
+        reliabilityRes,
+        backfillRes,
+        pipelineRes,
+      ] = await Promise.all([
         apiFetch(QUALITY_ENDPOINT),
         apiFetch(DEAD_LETTER_ENDPOINT),
         apiFetch(COVERAGE_ENDPOINT),
         apiFetch(GAPS_ENDPOINT),
+        apiFetch(RELIABILITY_ENDPOINT),
+        apiFetch(`${BACKFILL_STATUS_ENDPOINT}?limit=${BACKFILL_STATUS_LIMIT}`),
+        apiFetch(PIPELINE_STATUS_ENDPOINT),
       ])
-      const [q, d, c, g] = await Promise.all([
+      const [q, d, c, g, r, b, p] = await Promise.all([
         qualityRes.ok
           ? (qualityRes.json() as Promise<IngestionQualityPayload>)
           : Promise.resolve(null),
@@ -636,11 +845,23 @@ export default function IngestionHealthPanel() {
         gapsRes.ok
           ? (gapsRes.json() as Promise<GapsPayload>)
           : Promise.resolve(null),
+        reliabilityRes.ok
+          ? (reliabilityRes.json() as Promise<ReliabilityPayload>)
+          : Promise.resolve(null),
+        backfillRes.ok
+          ? (backfillRes.json() as Promise<BackfillStatusPayload>)
+          : Promise.resolve(null),
+        pipelineRes.ok
+          ? (pipelineRes.json() as Promise<PipelineStatusPayload>)
+          : Promise.resolve(null),
       ])
       setQuality(q)
       setDeadLetter(d)
       setCoverage(c)
       setGaps(g)
+      setReliability(r)
+      setBackfillStatus(b)
+      setPipelineStatus(p)
       setLastUpdated(Date.now())
       setError(null)
     } catch (e) {
@@ -1581,8 +1802,79 @@ export default function IngestionHealthPanel() {
         <span className="text-cyan-400">{QUALITY_ENDPOINT}</span>,{' '}
         <span className="text-cyan-400">{DEAD_LETTER_ENDPOINT}</span>,{' '}
         <span className="text-cyan-400">{COVERAGE_ENDPOINT}</span>,{' '}
-        <span className="text-cyan-400">{GAPS_ENDPOINT}</span>
+        <span className="text-cyan-400">{GAPS_ENDPOINT}</span>,{' '}
+        <span className="text-cyan-400">{RELIABILITY_ENDPOINT}</span>,{' '}
+        <span className="text-cyan-400">{BACKFILL_STATUS_ENDPOINT}</span>,{' '}
+        <span className="text-cyan-400">{PIPELINE_STATUS_ENDPOINT}</span>
       </div>
+
+      {/* ── W38-6 — Confirmation dialog for the operational actions ── */}
+      {confirmDialog && (
+        <ConfirmationDialog
+          open
+          severity={
+            confirmDialog.kind === 'clear-dlq'
+              ? 'danger'
+              : confirmDialog.kind === 'stop' || confirmDialog.kind === 'replay-events'
+                ? 'warning'
+                : 'info'
+          }
+          title={
+            confirmDialog.kind === 'start'
+              ? 'Start Ingestion?'
+              : confirmDialog.kind === 'stop'
+                ? 'Stop Ingestion?'
+                : confirmDialog.kind === 'retry-failed'
+                  ? 'Retry Failed Records?'
+                  : confirmDialog.kind === 'launch-backfill'
+                    ? 'Launch Backfill?'
+                    : confirmDialog.kind === 'clear-dlq'
+                      ? 'Clear Dead-Letter Queue?'
+                      : 'Replay Events?'
+          }
+          description={
+            confirmDialog.kind === 'start'
+              ? 'This will flip the pipeline running flag to True and kick off the WS + REST ingestion sources.'
+              : confirmDialog.kind === 'stop'
+                ? 'This will flip the pipeline running flag to False and call stop() on the WS + REST ingestion sources. New ingestion events will pause until the pipeline is restarted.'
+                : confirmDialog.kind === 'retry-failed'
+                  ? 'This will POST to /api/ingestion/dead-letter/retry — every pending record in the dead-letter queue will be marked retried.'
+                  : confirmDialog.kind === 'launch-backfill'
+                    ? 'This will POST to /api/ingestion/backfill/markets?resume=true — the metadata backfill resumes from the last persisted checkpoint as a background asyncio task.'
+                    : confirmDialog.kind === 'clear-dlq'
+                      ? 'This will DELETE every record currently in the dead-letter queue. The rows are permanently removed (no audit trail). Use this only for records you have already reviewed.'
+                      : `This will POST to /api/ingestion/replay?source=${DEFAULT_REPLAY_SOURCE} — every CLOB record in the raw vault will be re-fed through the ingestion pipeline. The dedup layer prevents duplicates from reaching downstream storage.`
+          }
+          impact={
+            confirmDialog.kind === 'clear-dlq'
+              ? `This will permanently delete ${
+                  deadLetter?.depth ?? 0
+                } record(s) from the dead-letter queue.`
+              : confirmDialog.kind === 'stop'
+                ? 'Ingestion will pause — no new market / trade / book updates will be processed until the pipeline is restarted.'
+                : confirmDialog.kind === 'replay-events'
+                  ? 'Replay runs inline — the POST blocks until every record is re-processed (default cap 1000 records).'
+                  : undefined
+          }
+          confirmLabel={
+            confirmDialog.kind === 'start'
+              ? 'Start Ingestion'
+              : confirmDialog.kind === 'stop'
+                ? 'Stop Ingestion'
+                : confirmDialog.kind === 'retry-failed'
+                  ? 'Retry Failed Records'
+                  : confirmDialog.kind === 'launch-backfill'
+                    ? 'Launch Backfill'
+                    : confirmDialog.kind === 'clear-dlq'
+                      ? 'Clear Dead-Letter Queue'
+                      : 'Replay Events'
+          }
+          cancelLabel="Cancel"
+          onConfirm={() => void handleConfirmAction(confirmDialog.kind)}
+          onCancel={() => setConfirmDialog(null)}
+          loading={actionPending}
+        />
+      )}
     </div>
   )
 }

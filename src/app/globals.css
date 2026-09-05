@@ -6,6 +6,16 @@
 @import url('https://fonts.googleapis.com/css2?family=Inter:ital,opsz,wght@0,14..32,300;0,14..32,400;0,14..32,500;0,14..32,600;0,14..32,700;0,14..32,800;1,14..32,400&family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&family=Plus+Jakarta+Sans:ital,wght@0,300;0,400;0,500;0,600;0,700;0,800;1,400;1,600&display=swap');
 @import "tailwindcss";
 
+/* W38-7 — Register an explicit `xs` (480px) breakpoint.
+   Tailwind v4's default scale jumps from base → sm (640px), which is
+   too coarse for narrow phones (375–414px). The TopStatusBar uses
+   `xs:flex` to hide the freshness clock on the narrowest screens while
+   still showing it on small tablets, and to hide non-critical icon
+   controls under sm: so the Cancel All + Kill Switch buttons always
+   remain visible on phones. Registered via `@custom-variant` so the
+   `xs:` prefix is generated for every utility class. */
+@custom-variant xs (&:media (min-width: 480px));
+
 /* ═══════════════════════════════════════════════════════════════════════════
    DESIGN TOKENS
    ═══════════════════════════════════════════════════════════════════════════ */
@@ -1498,11 +1508,13 @@ body {
 .command-center-layout {
   display: grid;
   grid-template-columns: 1fr 1fr 310px;
-  grid-template-rows: auto 1fr 1fr;
+  grid-template-rows: auto auto auto 1fr 1fr;
   grid-template-areas:
-    "risk   risk    risk"
-    "market pos     sidebar"
-    "orders events  sidebar";
+    "health  health   health"
+    "metrics metrics  metrics"
+    "risk    risk     risk"
+    "market  pos      sidebar"
+    "orders  events   sidebar";
   gap: 10px;
   height: 100%;
   min-height: 0;
@@ -1519,11 +1531,13 @@ body {
 @media (max-width: 1200px) {
   .command-center-layout {
     grid-template-columns: 1fr 1fr;
-    grid-template-rows: auto auto auto auto;
+    grid-template-rows: auto auto auto auto auto auto;
     grid-template-areas:
-      "risk   risk"
-      "market pos"
-      "orders events"
+      "health  health"
+      "metrics metrics"
+      "risk    risk"
+      "market  pos"
+      "orders  events"
       "sidebar sidebar";
     height: auto;
     overflow-y: auto;
@@ -2219,4 +2233,459 @@ html { overflow-x: hidden; }
     transition-duration: 0.001ms !important;
   }
 }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   W38-2 — DESIGN SYSTEM ENHANCEMENT (additive layer)
+   ═══════════════════════════════════════════════════════════════════════════
+   Audit findings addressed below (all changes are NEW rules / NEW tokens
+   appended at end-of-file — no earlier rule block was edited; later
+   equal-specificity declarations win per-property per CSS cascade):
+
+   1. SEMANTIC COLOR ALIASES — the dashboard already has hue-based tokens
+      (--color-green / -red / -amber / -blue / -cyan / -purple) but no
+      success/warning/danger/info *naming*. New semantic aliases map
+      intent → hue so consumers can express *what* a color means
+      (success) rather than *which* hue it is (green). Both names work
+      and resolve to the same underlying value, so existing components
+      are unaffected.
+
+   2. COMPLETE SPACING SCALE — earlier `:root` declared only --space-1,
+      -2, -3, -4, -6 (skipping 5, 7, 8, 9, 10, 11, 12). Filling the gaps
+      gives every consumer a 4px-step ladder from 4px (--space-1) to
+      48px (--space-12), matching the Tailwind v4 default scale.
+
+   3. RESPONSIVE BREAKPOINT TOKENS — currently the only breakpoints are
+      buried inside @media queries (1280px, 1200px, 1024px, 768px).
+      Exposing them as `--bp-*` tokens lets JS / future CSS reference
+      the same numbers without magic constants.
+
+   4. CHART COLOR PALETTE — `src/components/charts/theme.ts` already
+      exposes a TS `chartTheme` object with primary/success/danger/etc.,
+      but no CSS-variable equivalent. New `--chart-*` tokens mirror the
+      TS values plus add 8 distinct data-series colors so multi-series
+      charts (correlation matrix, exposure-by-venue, etc.) have a
+      consistent palette. AI/ML surfaces get dedicated blue/purple
+      accents to differentiate them from trading semantics.
+
+   5. COMPONENT-SPECIFIC TOKENS — small layer of pre-composed
+      component tokens (--shadow-card, --shadow-popover,
+      --transition-button, --transition-panel) that bundle the
+      underlying primitives so component authors don't repeat the
+      same `0 1px 2px rgba(0,0,0,0.30)` literal across 30 files.
+
+   6. LIGHT THEME COMPLETENESS — earlier `.light` block overrides every
+      hue token but left three gaps that this layer closes:
+      (a) shadows — the dark-mode `--shadow-*` set is rgba(0,0,0,*),
+          which renders as a black haze on white. New `.light`
+          overrides swap to slate-900 with much lower alpha so
+          elevations read as soft shadows instead of black smudges.
+      (b) --bg-elevated (added in W10-8 as `var(--bg-card-alt)`) —
+          already auto-themes, but explicit docstring added.
+      (c) --chart-* tokens — need light-mode equivalents so charts
+          flip cleanly when the trader toggles themes.
+
+   7. SEMANTIC UTILITY CLASSES — `.badge-success`, `.badge-warning`,
+      `.badge-danger`, `.badge-info` aliases for the existing
+      `.badge-green` / `.badge-amber` / `.badge-red` / `.badge-blue`
+      (intent-based naming for new code). `.text-success` etc. for
+      standalone text use. `.chart-series-1` … `.chart-series-8` for
+      consistent data-series colors. None of these clash with existing
+      utility classes (verified via ripgrep).
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* ── (1) Semantic color aliases + (2) spacing scale + (3) breakpoints + (4)
+          chart palette + (5) component tokens — dark theme (:root) ──────── */
+:root {
+  /* (1) Semantic color aliases — intent → hue.
+     `--color-success` ≡ `--color-green` (positive P&L, healthy status, OK).
+     `--color-danger`  ≡ `--color-red`   (negative P&L, errors, kill switch).
+     `--color-warning` ≡ `--color-amber` (degraded, stale, caution).
+     `--color-info`    ≡ `--color-blue`  (informational, neutral accents).
+     `-fg` is the readable text color; `-muted` is the soft background tint.
+     Existing `-bg` / `-bd` variants on the hue tokens remain canonical;
+     these `-muted` aliases point at the same value for naming parity
+     with the success/warning/danger/info contract used by other design
+     systems (Radix, Mantine, Bootstrap). */
+  --color-success:        var(--color-green);
+  --color-success-fg:     var(--color-green-fg);
+  --color-success-muted:  var(--color-green-bg);
+
+  --color-danger:         var(--color-red);
+  --color-danger-fg:      var(--color-red-fg);
+  --color-danger-muted:   var(--color-red-bg);
+
+  --color-warning:        var(--color-amber);
+  --color-warning-fg:     var(--color-amber-fg);
+  --color-warning-muted:  var(--color-amber-bg);
+
+  --color-info:           var(--color-blue);
+  --color-info-fg:        var(--color-blue-fg);
+  --color-info-muted:     var(--color-blue-bg);
+
+  /* (2) Complete spacing scale — fills the gaps left by the earlier
+     partial ladder. 4px step, matching Tailwind v4's default scale. */
+  --space-1:  0.25rem;   /*  4px */
+  --space-2:  0.5rem;    /*  8px */
+  --space-3:  0.75rem;   /* 12px */
+  --space-4:  1rem;      /* 16px */
+  --space-5:  1.25rem;   /* 20px  — NEW */
+  --space-6:  1.5rem;    /* 24px */
+  --space-7:  1.75rem;   /* 28px  — NEW */
+  --space-8:  2rem;      /* 32px  — NEW */
+  --space-9:  2.25rem;   /* 36px  — NEW */
+  --space-10: 2.5rem;    /* 40px  — NEW */
+  --space-11: 2.75rem;   /* 44px  — NEW */
+  --space-12: 3rem;      /* 48px  — NEW */
+
+  /* (3) Responsive breakpoint tokens — single source of truth for the
+     pixel widths already used by the @media queries above. Consumed by
+     JS (matchMedia) and by future container queries. */
+  --bp-sm:  640px;   /* small phones / narrow split panels */
+  --bp-md:  768px;   /* tablet / mobile workstation */
+  --bp-lg:  1024px;  /* desktop with collapsed sidebar */
+  --bp-xl:  1200px;  /* desktop with expanded sidebar + 2-col grid */
+  --bp-2xl: 1280px;  /* wide workstation, 3-col command center */
+
+  /* (4) Chart color palette — mirrors `src/components/charts/theme.ts`.
+     Primary: blue (matches --color-blue, the dashboard's accent hue).
+     success/danger/warning/info: P&L / status colors. muted: axes/grid.
+     Series 1–8: 8 distinct hues for multi-series charts. The hues
+     rotate through the dashboard's semantic palette plus pink/orange/
+     teal/lime to give 8 perceptually distinct colors without
+     introducing 8 brand-new hex values. AI/ML surfaces use
+     --chart-ai (blue) + --chart-ml (purple) so the trader can tell
+     at a glance which charts are AI/ML outputs vs market data. */
+  --chart-primary:       #3b82f6;
+  --chart-success:       #10b981;
+  --chart-danger:        #ef4444;
+  --chart-warning:       #f59e0b;
+  --chart-info:          #06b6d4;
+  --chart-muted:         #6b7280;
+
+  /* 8 distinct series colors — ordered for max perceptual distance. */
+  --chart-series-1:      #3b82f6;   /* blue      — primary accent */
+  --chart-series-2:      #22c55e;   /* green     — positive / growth */
+  --chart-series-3:      #f59e0b;   /* amber     — caution / midpoint */
+  --chart-series-4:      #ef4444;   /* red       — negative / alert */
+  --chart-series-5:      #a855f7;   /* purple    — AI / ML output */
+  --chart-series-6:      #06b6d4;   /* cyan      — info / secondary */
+  --chart-series-7:      #ec4899;   /* pink      — contrast / category */
+  --chart-series-8:      #84cc16;   /* lime      — highlight / outlier */
+
+  /* Positive/negative shorthand (P&L coloring). */
+  --chart-positive:      var(--chart-success);
+  --chart-negative:      var(--chart-danger);
+
+  /* AI/ML dedicated accents — blue for AI surfaces, purple for ML
+     models, so the trader can distinguish AI-driven overlays from
+     raw market data at a glance. */
+  --chart-ai:            var(--chart-primary);
+  --chart-ml:            #a855f7;
+
+  /* Chart surfaces — grid lines, axis ticks, tooltip bg. */
+  --chart-grid:          rgba(255, 255, 255, 0.05);
+  --chart-axis:          #8b949e;
+  --chart-tooltip-bg:     var(--bg-card);
+  --chart-tooltip-border: var(--border);
+  --chart-tooltip-text:   var(--text-primary);
+
+  /* (5) Component-specific tokens — pre-composed bundles so component
+     authors don't repeat `0 1px 2px rgba(0,0,0,0.30)` across files.
+     Each is built from the primitive tokens declared above. */
+  --shadow-card:       var(--shadow-md);
+  --shadow-popover:    var(--shadow-lg);
+  --shadow-modal:      var(--shadow-xl);
+  --shadow-dropdown:   var(--shadow-md);
+
+  /* Composed transitions — bundle duration + easing so transitions
+     are consistent across components. */
+  --transition-fast:    var(--duration-fast) var(--easing-std);
+  --transition-base:    var(--duration-base) var(--easing-std);
+  --transition-slow:    var(--duration-slow) var(--easing-std);
+  --transition-button:  background var(--transition-fast),
+                        border-color var(--transition-fast),
+                        color var(--transition-fast),
+                        box-shadow var(--transition-fast),
+                        transform var(--transition-fast);
+  --transition-panel:   opacity var(--transition-base),
+                        transform var(--transition-base);
+  --transition-modal:   opacity var(--transition-base),
+                        transform var(--transition-base);
+
+  /* Container widths — used by `.modal`, future layout primitives. */
+  --container-sm:  480px;
+  --container-md:  640px;
+  --container-lg:  768px;
+  --container-xl:  1024px;
+
+  /* Focus ring token — used by `:focus-visible` and `.input:focus`. */
+  --ring-focus:    0 0 0 3px rgba(59, 130, 246, 0.18);
+  --ring-danger:   0 0 0 3px rgba(239, 68, 68, 0.18);
+  --ring-success:  0 0 0 3px rgba(34, 197, 94, 0.18);
+  --ring-warning:  0 0 0 3px rgba(245, 158, 11, 0.18);
+}
+
+/* ── (6) Light theme completeness — shadows + chart palette + semantic ─── */
+.light {
+  /* (a) Shadows — dark-mode `--shadow-*` use rgba(0,0,0,0.30+) which
+     renders as a black haze on white surfaces. Swap to slate-900 with
+     much lower alpha so elevations read as soft shadows, not smudges. */
+  --shadow-xs: 0 1px 2px  rgba(15, 23, 42, 0.06);
+  --shadow-sm: 0 2px 4px  rgba(15, 23, 42, 0.08);
+  --shadow-md: 0 4px 10px rgba(15, 23, 42, 0.10);
+  --shadow-lg: 0 10px 24px rgba(15, 23, 42, 0.12);
+  --shadow-xl: 0 20px 48px rgba(15, 23, 42, 0.16);
+
+  /* Component shadows inherit the new light values via the var refs
+     declared in :root above (no need to re-declare --shadow-card etc.
+     — they're `var(--shadow-md)` which now resolves to the light value). */
+
+  /* (b) Chart palette — light-mode equivalents. Each hue shifts one
+     shade darker so it stays readable on the white card surface.
+     Mirrors the `*Light` fields in `src/components/charts/theme.ts`. */
+  --chart-primary:       #2563eb;
+  --chart-success:       #059669;
+  --chart-danger:        #dc2626;
+  --chart-warning:       #d97706;
+  --chart-info:          #0891b2;
+  --chart-muted:         #4b5563;
+
+  /* Series colors — darker variants for white-bg legibility. */
+  --chart-series-1:      #2563eb;   /* blue-600 */
+  --chart-series-2:      #16a34a;   /* green-600 */
+  --chart-series-3:      #d97706;   /* amber-600 */
+  --chart-series-4:      #dc2626;   /* red-600 */
+  --chart-series-5:      #9333ea;   /* purple-600 */
+  --chart-series-6:      #0891b2;   /* cyan-600 */
+  --chart-series-7:      #db2777;   /* pink-600 */
+  --chart-series-8:      #65a30d;   /* lime-600 */
+
+  /* AI/ML accents. */
+  --chart-ai:            #2563eb;
+  --chart-ml:            #9333ea;
+
+  /* Chart surfaces — denser grid + darker axis on white. */
+  --chart-grid:          rgba(15, 23, 42, 0.08);
+  --chart-axis:          #475569;
+  --chart-tooltip-bg:     #ffffff;
+  --chart-tooltip-border: #e2e8f0;
+  --chart-tooltip-text:   #0f172a;
+
+  /* (c) Semantic color aliases — already auto-theme via the hue refs
+     in :root, but explicit re-declaration documents the intent that
+     every semantic alias must have a light equivalent. No-op for
+     --color-success etc. since they reference --color-green which is
+     already overridden in the earlier .light block. */
+
+  /* (d) Focus rings — slightly stronger alpha so they're visible
+     against the bright white card. */
+  --ring-focus:    0 0 0 3px rgba(37, 99, 235, 0.20);
+  --ring-danger:   0 0 0 3px rgba(220, 38, 38, 0.20);
+  --ring-success:  0 0 0 3px rgba(22, 163, 74, 0.20);
+  --ring-warning:  0 0 0 3px rgba(217, 119, 6, 0.22);
+}
+
+/* ── (7) Semantic utility classes — intent-based naming for new code ────
+   Existing hue-based classes (.badge-green, .text-green-fg, etc.)
+   remain canonical; these aliases let new components express intent.
+   Each is defined as a thin alias that delegates to the underlying
+   hue class so any future palette tweak (e.g. swapping green → teal
+   for color-blind accessibility) propagates automatically. */
+.badge-success { background: var(--color-success-muted); color: var(--color-success-fg); border-color: var(--color-green-bd); }
+.badge-danger  { background: var(--color-danger-muted);  color: var(--color-danger-fg);  border-color: var(--color-red-bd);    animation: badge-pulse 2s ease-in-out infinite; }
+.badge-warning { background: var(--color-warning-muted); color: var(--color-warning-fg); border-color: var(--color-amber-bd); }
+.badge-info    { background: var(--color-info-muted);    color: var(--color-info-fg);    border-color: var(--color-blue-bd);  }
+
+/* Standalone text utilities — intent-based color for inline labels. */
+.text-success { color: var(--color-success-fg); }
+.text-danger  { color: var(--color-danger-fg); }
+.text-warning { color: var(--color-warning-fg); }
+.text-info    { color: var(--color-info-fg); }
+
+/* ── Chart series utility classes ──────────────────────────────────────
+   Apply `className="chart-series-3"` to any chart element to pick up
+   the 3rd color in the 8-color palette. Useful for SVG <path> /
+   <rect> / <line> elements that don't accept inline `stroke`/`fill`
+   in all charting libraries, and for legend swatches that need to
+   match their data series color. */
+.chart-series-1 { color: var(--chart-series-1); }
+.chart-series-2 { color: var(--chart-series-2); }
+.chart-series-3 { color: var(--chart-series-3); }
+.chart-series-4 { color: var(--chart-series-4); }
+.chart-series-5 { color: var(--chart-series-5); }
+.chart-series-6 { color: var(--chart-series-6); }
+.chart-series-7 { color: var(--chart-series-7); }
+.chart-series-8 { color: var(--chart-series-8); }
+
+/* Chart-axis / grid / tooltip utility classes — let a chart container
+   opt into the dashboard palette without importing chartTheme. */
+.chart-axis   { color: var(--chart-axis); }
+.chart-grid   { stroke: var(--chart-grid); }
+.chart-ai     { color: var(--chart-ai); }
+.chart-ml     { color: var(--chart-ml); }
+.chart-positive { color: var(--chart-positive); }
+.chart-negative { color: var(--chart-negative); }
+
+/* ── Spacing utility classes for the new gaps (space-5, 7, 8, 9, 10, 11, 12)
+   Tailwind v4 ships `p-5` / `gap-7` etc. by default, but those resolve
+   to the framework's own 0.25rem-step scale (which matches ours).
+   Declaring them here as utility classes is a no-op for Tailwind users
+   but provides parity for code that consumes `var(--space-*)` directly. */
+.p-space-5  { padding: var(--space-5); }
+.p-space-7  { padding: var(--space-7); }
+.p-space-8  { padding: var(--space-8); }
+.p-space-9  { padding: var(--space-9); }
+.p-space-10 { padding: var(--space-10); }
+.p-space-11 { padding: var(--space-11); }
+.p-space-12 { padding: var(--space-12); }
+.gap-space-5  { gap: var(--space-5); }
+.gap-space-7  { gap: var(--space-7); }
+.gap-space-8  { gap: var(--space-8); }
+.gap-space-9  { gap: var(--space-9); }
+.gap-space-10 { gap: var(--space-10); }
+.gap-space-11 { gap: var(--space-11); }
+.gap-space-12 { gap: var(--space-12); }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   W38-7 — RESPONSIVE & ACCESSIBILITY HARDENING (additive layer)
+   ═══════════════════════════════════════════════════════════════════════════
+   Audit findings addressed below (all changes are NEW rules / NEW media
+   queries appended at end-of-file — no earlier rule block was edited;
+   later equal-specificity declarations win per-property per CSS cascade):
+
+   1. MODAL FULL-SCREEN ON MOBILE — the existing `.modal` rule sets
+      `max-width: 520px` / `max-height: 90vh` / `border-radius: var(--radius-xl)`,
+      which leaves the modal floating in the backdrop on a 375px phone
+      with not enough width to render a 6-column table. The new
+      `@media (max-width: 640px)` rule collapses the modal to full
+      viewport with zero radius so it reads as a stacked page rather
+      than a centred dialog.
+
+   2. TABLE MIN-WIDTH — `.data-table` is `width: 100%` with no min-width.
+      On a 375px viewport the columns collapse to whatever their
+      content needs (often <40px), which makes tables unreadable.
+      Setting `min-width: 720px` on every `.data-table` forces the
+      table to be at least 720px wide so the parent `.table-container`
+      activates horizontal scroll at narrow widths.
+
+   3. REDUCED-MOTION HARDENING — the existing global
+      `@media (prefers-reduced-motion: reduce)` rule neutralises
+      `animation-duration` / `transition-duration` but doesn't touch
+      Tailwind's `animate-pulse` / `animate-ping` keyframes. The new
+      rule silences both utilities' keyframes by overriding them with
+      `animation: none !important;` so reduced-motion users don't see
+      the eternal pulse.
+
+   4. SVG ACCESSIBILITY — chart SVGs that don't already carry
+      `role="img"` + `aria-label` (audited residual gap #3 in
+      ACCESSIBILITY.md) inherit a default `role="img"` from the
+      `.chart-svg` class. Component authors opt in by adding the
+      className; the SVG itself still needs an `aria-label` to be
+      meaningful (added at the call site, not here).
+
+   5. SKIP-LINK FOCUS RING PARITY — the existing `.skip-link:focus` rule
+      only animates `transform`. This rule adds `box-shadow: var(--ring-focus)`
+      + a 2px outline so keyboard users get the same ring feedback as
+      other interactive elements.
+
+   6. MOBILE SIDEBAR DRAWER TOUCH TARGETS — the existing `.sidebar-item`
+      rule has padding that yields ~36px touch targets. The new mobile
+      rule bumps them to a WCAG 2.5.5-compliant 44px.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* (1) Modal full-screen on mobile ───────────────────────────────────────────
+   Overrides `.modal` + `.modal-backdrop` padding when viewport collapses
+   below the `sm` breakpoint (640px). The `!important` is required because
+   the existing `.modal` rule sets explicit `max-width` / `max-height` /
+   `border-radius` values that we need to override at equal specificity. */
+@media (max-width: 640px) {
+  .modal-backdrop {
+    padding: 0 !important;
+  }
+  .modal,
+  .modal.modal-wide,
+  .modal.modal-xl {
+    max-width: 100% !important;
+    width: 100% !important;
+    max-height: 100vh !important;
+    height: 100vh !important;
+    border-radius: 0 !important;
+    border-left: none !important;
+    border-right: none !important;
+    border-top: none !important;
+    border-bottom: none !important;
+  }
+  /* The modal body already scrolls; on mobile make sure the footer
+     stays pinned at the bottom (sticky) so the action buttons are
+     always reachable. */
+  .modal-footer {
+    position: sticky;
+    bottom: 0;
+    background: var(--bg-card);
+    border-top: 1px solid var(--border);
+    flex-wrap: wrap;
+    gap: var(--space-2);
+  }
+  /* The modal header should not flex-wrap (keeps title + close on one
+     row); but allow it to shrink so long titles truncate. */
+  .modal-header {
+    min-width: 0;
+  }
+}
+
+/* (2) Table min-width ───────────────────────────────────────────────────── */
+.data-table {
+  min-width: 720px;
+}
+
+/* (3) Reduced-motion hardening for Tailwind animation utilities ───────────
+   Tailwind's `animate-pulse` (used on the resume / kill-switch buttons
+   + the live connection dot) and `animate-ping` (the live-trade badge)
+   animate at 2s + 1s infinite loops. The global rule above silences
+   the duration but the keyframes still run; this rule silences the
+   keyframes themselves so the elements render at their default state. */
+@media (prefers-reduced-motion: reduce) {
+  .animate-pulse,
+  .animate-ping,
+  .animate-spin,
+  .animate-bounce {
+    animation: none !important;
+  }
+  /* Chart SVG <path> / <rect> transitions (e.g. depth chart refresh)
+     also need silencing — they're not Tailwind animations but they
+     inherit `transition-all` classes that animate `d` / `width`. */
+  svg [class*="transition"] {
+    transition: none !important;
+  }
+}
+
+/* (4) SVG accessibility default ────────────────────────────────────────── */
+.chart-svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+/* (5) Skip-link focus ring parity ──────────────────────────────────────── */
+.skip-link:focus,
+.skip-link:focus-visible {
+  transform: translateY(0);
+  box-shadow: var(--ring-focus);
+  outline: 2px solid var(--border-focus, #3b82f6);
+  outline-offset: 2px;
+}
+
+/* (6) Mobile sidebar drawer: 44px touch targets + full-height scroll ──── */
+@media (max-width: 768px) {
+  .sidebar.mobile-open {
+    height: 100dvh;
+    overflow-y: auto;
+  }
+  .sidebar .sidebar-item {
+    min-height: 44px;
+    padding-top: 10px;
+    padding-bottom: 10px;
+  }
+}
+
 

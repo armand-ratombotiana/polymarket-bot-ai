@@ -1,4 +1,23 @@
 // components/MarketsPanel.tsx — Pro Markets & Live Order Books Desk with Microstructure Gauges
+//
+// W38-4 — market discovery improvements:
+//   • Market-name column widened to min-w-[280px] / max-w-[440px] with
+//     line-clamp-2 so long event titles wrap to two readable lines
+//     instead of destructively truncating mid-word.
+//   • Category badge (icon + label) added next to each row's event title
+//     so a trader can scan categories at a glance without reading the
+//     question.
+//   • Data-freshness column now shows BOTH the relative age (e.g. "3s")
+//     AND the absolute last-updated timestamp (HH:MM:SS UTC) so a
+//     trader can spot a frozen feed even when the relative timer is
+//     misleading (e.g., after a clock skew).
+//   • Stale threshold bumped to >60s amber (was >30s) per W38-4 spec;
+//     >120s marks the row as dead (red).
+//   • Header now shows a connection-status pill (LIVE / STALE / OFFLINE)
+//     derived from the freshest book — so a trader instantly knows
+//     whether the order-book stream is keeping up.
+//   • Spread filter pills (All / <2¢ / 2–5¢ / >5¢) added below the
+//     category bar so traders can isolate tradable markets by spread.
 'use client'
 
 import { useState, useMemo, useRef, memo } from 'react'
@@ -29,6 +48,48 @@ function fmtAgeDisplay(s: number) {
   if (s < 60) return `${s}s`
   if (s < 3600) return `${Math.floor(s / 60)}m`
   return `${Math.floor(s / 3600)}h`
+}
+
+// W38-4 — Format epoch seconds as HH:MM:SS UTC for the "last updated"
+// column. Lets a trader compare the panel's clock to the upstream
+// feed's clock and spot frozen feeds even when relative age is fuzzy.
+function fmtLastUpdatedUTC(ts: number): string {
+  if (!Number.isFinite(ts) || ts <= 0) return '—'
+  return new Date(ts * 1000).toISOString().slice(11, 19)
+}
+
+// W38-4 — Connection-status buckets derived from the freshest book's age.
+//   LIVE   — at least one book updated in the last 60s
+//   STALE  — freshest book is 60–120s old (amber)
+//   OFFLINE — freshest book >120s old OR no books at all (red)
+//   IDLE   — no books yet (panel waiting on first snapshot)
+type ConnStatus = 'LIVE' | 'STALE' | 'OFFLINE' | 'IDLE'
+function deriveConnStatus(books: OrderBook[]): ConnStatus {
+  if (!books || books.length === 0) return 'IDLE'
+  const newest = books.reduce((acc, b) => (b.updated_at > acc ? b.updated_at : acc), 0)
+  const age = ageSec(newest)
+  if (age <= 60) return 'LIVE'
+  if (age <= 120) return 'STALE'
+  return 'OFFLINE'
+}
+
+// W38-4 — Spread bucket thresholds (in cents, 0..1 probability * 100).
+//   TIGHT   < 2¢ — high liquidity, tradable
+//   NORMAL  2–5¢ — typical
+//   WIDE    > 5¢ — illiquid / avoid for size
+type SpreadFilter = 'ALL' | 'TIGHT' | 'NORMAL' | 'WIDE'
+const SPREAD_FILTERS: { key: SpreadFilter; label: string; title: string }[] = [
+  { key: 'ALL', label: 'All', title: 'Show all spreads' },
+  { key: 'TIGHT', label: '<2¢', title: 'Tight spreads (<2¢) — high liquidity' },
+  { key: 'NORMAL', label: '2–5¢', title: 'Normal spreads (2–5¢)' },
+  { key: 'WIDE', label: '>5¢', title: 'Wide spreads (>5¢) — illiquid, avoid for size' },
+]
+function spreadBucket(spread: number | null | undefined): SpreadFilter {
+  if (spread == null || !Number.isFinite(spread)) return 'WIDE'
+  const cents = spread * 100
+  if (cents < 2) return 'TIGHT'
+  if (cents <= 5) return 'NORMAL'
+  return 'WIDE'
 }
 
 function ProbabilityGauge({ mid }: { mid: number | null }) {
@@ -82,6 +143,8 @@ function MarketsPanel({ books, onSelectMarket, priceFlashes, showPriceFlashes = 
   const [sortBy, setSortBy] = useState<'mid' | 'spread' | 'age'>('mid')
   const [sortAsc, setSortAsc] = useState(false)
   const [copiedToken, setCopiedToken] = useState<string | null>(null)
+  // W38-4 — spread-bucket filter (ALL / TIGHT / NORMAL / WIDE).
+  const [spreadFilter, setSpreadFilter] = useState<SpreadFilter>('ALL')
   // W15-1 — internal modal state for the PriceHistoryChart viewer.
   // The "View History" button per row sets this; the modal renders
   // PriceHistoryChart with the row's tokenId. Closed on backdrop click
@@ -117,7 +180,7 @@ function MarketsPanel({ books, onSelectMarket, priceFlashes, showPriceFlashes = 
     setTimeout(() => setCopiedToken(null), 1200)
   }
 
-  // Filter by category & search
+  // Filter by category, search, and spread bucket.
   const filtered = useMemo(() => {
     return books.filter((b) => {
       const matchSearch =
@@ -133,8 +196,11 @@ function MarketsPanel({ books, onSelectMarket, priceFlashes, showPriceFlashes = 
       if (selectedCat === 'SPORTS') return slugU.includes('NBA') || slugU.includes('NFL') || slugU.includes('SOCCER') || slugU.includes('UFC')
       if (selectedCat === 'TECH') return slugU.includes('AI') || slugU.includes('OPENAI') || slugU.includes('GPT') || slugU.includes('TECH')
       return true
+    }).filter((b) => {
+      if (spreadFilter === 'ALL') return true
+      return spreadBucket(b.spread) === spreadFilter
     })
-  }, [books, search, selectedCat])
+  }, [books, search, selectedCat, spreadFilter])
 
   const sorted = useMemo(() => {
     return [...filtered].sort((a, b) => {
@@ -153,6 +219,11 @@ function MarketsPanel({ books, onSelectMarket, priceFlashes, showPriceFlashes = 
     return (valid.reduce((acc, b) => acc + (b.spread || 0), 0) / valid.length) * 100
   }, [books])
 
+  // W38-4 — connection status derived from the freshest book. Rendered
+  // as a pill in the header so a trader instantly knows whether the
+  // order-book stream is keeping up. LIVE / STALE / OFFLINE / IDLE.
+  const connStatus = useMemo(() => deriveConnStatus(books), [books])
+
   return (
     <div className="card h-full flex flex-col bg-[#13161e] border border-[#1f2335] shadow-xl overflow-hidden">
       {/* 1. Header & Live Metrics */}
@@ -160,6 +231,36 @@ function MarketsPanel({ books, onSelectMarket, priceFlashes, showPriceFlashes = 
         <div className="flex items-center gap-2.5">
           <span className="card-title text-xs font-bold text-[#dde1ed] flex items-center gap-1.5">
             ⚡ Active Order Books ({books.length})
+          </span>
+          {/* W38-4 — connection-status pill derived from the freshest book.
+              LIVE / STALE / OFFLINE / IDLE — see deriveConnStatus(). */}
+          <span
+            className={`badge text-[9px] font-bold inline-flex items-center gap-1 border ${
+              connStatus === 'LIVE'
+                ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/40'
+                : connStatus === 'STALE'
+                ? 'bg-amber-500/15 text-amber-300 border-amber-500/40'
+                : connStatus === 'OFFLINE'
+                ? 'bg-red-500/15 text-red-300 border-red-500/40'
+                : 'bg-[#13161e] text-[#7e8aaa] border-[#1f2335]'
+            }`}
+            title={`Feed status: ${connStatus} — derived from the freshest book's age (≤60s LIVE, 60–120s STALE, >120s OFFLINE)`}
+            data-testid="markets-conn-status"
+            data-status={connStatus}
+          >
+            <span
+              className={`inline-block w-1.5 h-1.5 rounded-full ${
+                connStatus === 'LIVE'
+                  ? 'bg-emerald-400 animate-pulse'
+                  : connStatus === 'STALE'
+                  ? 'bg-amber-400'
+                  : connStatus === 'OFFLINE'
+                  ? 'bg-red-400'
+                  : 'bg-[#3e4560]'
+              }`}
+              aria-hidden="true"
+            />
+            {connStatus}
           </span>
           <span className="badge badge-green text-[9px] font-bold">L2 Stream</span>
           <span className="text-[10.5px] text-[#7e8aaa] mono hidden sm:inline-block">
@@ -196,7 +297,7 @@ function MarketsPanel({ books, onSelectMarket, priceFlashes, showPriceFlashes = 
         </div>
       </div>
 
-      {/* 2. Category Filter Pills */}
+      {/* 2. Category Filter Pills + W38-4 Spread Filter Pills */}
       <div className="flex items-center gap-1 px-3 py-1.5 bg-[#0e1015] border-b border-[#1f2335] overflow-x-auto scrollbar-thin">
         {CATEGORIES.map((cat) => (
           <button
@@ -211,6 +312,25 @@ function MarketsPanel({ books, onSelectMarket, priceFlashes, showPriceFlashes = 
             {cat}
           </button>
         ))}
+        {/* W38-4 — visual divider between category + spread filter groups. */}
+        <span className="w-px h-4 bg-[#1f2335] mx-1" aria-hidden="true" />
+        <span className="text-[9.5px] text-[#7e8aaa] uppercase font-bold tracking-wider mr-1" aria-hidden="true">Spread</span>
+        {SPREAD_FILTERS.map((f) => (
+          <button
+            key={f.key}
+            onClick={() => setSpreadFilter(f.key)}
+            title={f.title}
+            aria-pressed={spreadFilter === f.key}
+            className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase transition-all ${
+              spreadFilter === f.key
+                ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 shadow-sm'
+                : 'text-[#7e8aaa] hover:text-[#dde1ed] bg-[#13161e] border border-[#1f2335]'
+            }`}
+            data-testid={`spread-filter-${f.key.toLowerCase()}`}
+          >
+            {f.label}
+          </button>
+        ))}
       </div>
 
       {/* 3. Table */}
@@ -221,14 +341,31 @@ function MarketsPanel({ books, onSelectMarket, priceFlashes, showPriceFlashes = 
             Synchronizing live prediction market order books…
           </div>
         ) : sorted.length === 0 ? (
-          <div className="flex flex-col items-center justify-center h-44 text-[#7e8aaa] text-xs">
-            No active markets matching <strong className="text-white mx-1">"{search}"</strong> in {selectedCat} category.
+          // W38-4 — richer empty state: show which filters are active so
+          // the trader can tell whether they over-constrained the view.
+          <div className="flex flex-col items-center justify-center h-44 text-[#7e8aaa] text-xs gap-1.5 px-6 text-center">
+            <span className="text-2xl mb-1" aria-hidden="true">🔍</span>
+            <div className="text-[#dde1ed] font-semibold">No markets match the current filters</div>
+            <div className="text-[10.5px] mono">
+              {search ? <>search: <strong className="text-white">"{search}"</strong> · </> : null}
+              category: <strong className="text-white">{selectedCat}</strong> · spread: <strong className="text-white">{spreadFilter}</strong>
+            </div>
+            <button
+              onClick={() => { setSearch(''); setSelectedCat('ALL'); setSpreadFilter('ALL') }}
+              className="mt-2 btn btn-ghost btn-xs text-[10px]"
+            >
+              Reset all filters
+            </button>
           </div>
         ) : (
           <table className="data-table text-xs w-full" role="table" aria-label="Polymarket active order books">
             <thead>
               <tr className="border-b border-[#1f2335] text-[#7e8aaa] text-[10.5px]">
-                <th scope="col" className="min-w-[240px] text-left">Event &amp; Contract Question</th>
+                {/* W38-4 — widened from min-w-[240px] → min-w-[280px] and
+                    added max-w-[440px] so long event titles wrap to two
+                    lines (line-clamp-2) instead of destructively
+                    truncating mid-word. */}
+                <th scope="col" className="min-w-[280px] max-w-[440px] text-left">Event &amp; Contract Question</th>
                 {/* W15-1 — PriceTicker replaces the static Bid / Ask / Spread
                     columns with a single animated price cell that shows
                     mid + bid/ask chip + spread chip + change-since-last-tick. */}
@@ -264,7 +401,10 @@ function MarketsPanel({ books, onSelectMarket, priceFlashes, showPriceFlashes = 
               {sorted.map((b) => {
                 const info = formatHierarchicalMarket(b.slug)
                 const age = ageSec(b.updated_at)
-                const isStale = age > 30
+                // W38-4 — stale thresholds updated: amber at >60s, dead at >120s.
+                // (was >30s amber only — bumped per the W38-4 freshness spec.)
+                const isStale = age > 60
+                const isDead = age > 120
                 const isCopied = copiedToken === b.token_id
                 // U12 — Resolve this row's price-flash direction once per render.
                 // Undefined (no flash active) yields no extra class on the cell.
@@ -295,14 +435,34 @@ function MarketsPanel({ books, onSelectMarket, priceFlashes, showPriceFlashes = 
                   <tr
                     key={b.token_id}
                     onClick={() => onSelectMarket && onSelectMarket(b.token_id, b.slug)}
-                    className={`hover:bg-blue-500/10 transition-colors cursor-pointer group ${isStale ? 'row-stale' : ''}`}
+                    className={`hover:bg-blue-500/10 transition-colors cursor-pointer group ${
+                      isDead ? 'row-stale opacity-60' : isStale ? 'row-stale' : ''
+                    }`}
                   >
-                    <td className="py-2.5 max-w-[320px]">
+                    {/* W38-4 — widened max-w from 320px → 440px to match
+                        the header column and allow long event titles
+                        to wrap to two readable lines (line-clamp-2). */}
+                    <td className="py-2.5 max-w-[440px]">
                       <div className="flex flex-col gap-0.5">
                         {/* Category Tag & Token Copy Button */}
-                        <div className="flex items-center gap-1.5">
+                        <div className="flex items-center gap-1.5 flex-wrap">
                           <span className="text-xs" aria-hidden="true">{info.category.icon}</span>
-                          <span className="text-[9.5px] text-cyan-400 font-bold uppercase tracking-wider truncate">
+                          {/* W38-4 — category badge with icon + label so a
+                              trader can scan categories at a glance without
+                              reading the question. */}
+                          <span
+                            className={`text-[9px] font-bold uppercase tracking-wider px-1 py-0.5 rounded border ${info.category.color}`}
+                            title={`Category: ${info.category.label}`}
+                          >
+                            {info.category.label}
+                          </span>
+                          {/* W38-4 — line-clamp-2 (was truncate) so long
+                              event titles wrap to two readable lines
+                              instead of destructively truncating mid-word. */}
+                          <span
+                            className="text-[9.5px] text-cyan-400 font-bold uppercase tracking-wider line-clamp-2 leading-tight"
+                            title={info.fullLabel}
+                          >
                             {info.eventTitle}
                           </span>
                           <button
@@ -355,13 +515,46 @@ function MarketsPanel({ books, onSelectMarket, priceFlashes, showPriceFlashes = 
                       {b.spread != null ? `${(b.spread * 100).toFixed(1)}¢` : '—'}
                     </td>
 
-                    {/* Freshness Badge */}
+                    {/* W38-4 — Freshness cell: now shows BOTH the relative age
+                        AND the absolute last-updated timestamp (HH:MM:SS UTC)
+                        so a trader can spot a frozen feed even when the
+                        relative timer is misleading. Buckets: fresh <10s green,
+                        ok <60s neutral, stale 60–120s amber, dead >120s red. */}
                     <td className="text-center">
-                      <span className={`mono text-[10.5px] px-1.5 py-0.5 rounded ${
-                        isStale ? 'bg-amber-500/15 text-amber-400 font-bold border border-amber-500/30' : 'text-[#7e8aaa]'
-                      }`}>
-                        {fmtAgeDisplay(age)}
-                      </span>
+                      <div
+                        className="flex flex-col items-center gap-0.5"
+                        title={`Last updated: ${fmtLastUpdatedUTC(b.updated_at)} UTC (age ${fmtAgeDisplay(age)})`}
+                        data-testid={`freshness-${b.token_id}`}
+                      >
+                        <span
+                          className={`mono text-[10.5px] px-1.5 py-0.5 rounded inline-flex items-center gap-1 ${
+                            isDead
+                              ? 'bg-red-500/15 text-red-400 font-bold border border-red-500/30'
+                              : isStale
+                              ? 'bg-amber-500/15 text-amber-400 font-bold border border-amber-500/30'
+                              : age < 10
+                              ? 'bg-emerald-500/10 text-emerald-300 font-semibold border border-emerald-500/20'
+                              : 'text-[#7e8aaa]'
+                          }`}
+                        >
+                          <span
+                            className={`inline-block w-1 h-1 rounded-full ${
+                              isDead
+                                ? 'bg-red-400'
+                                : isStale
+                                ? 'bg-amber-400'
+                                : age < 10
+                                ? 'bg-emerald-400 animate-pulse'
+                                : 'bg-[#3e4560]'
+                            }`}
+                            aria-hidden="true"
+                          />
+                          {fmtAgeDisplay(age)}
+                        </span>
+                        <span className="mono text-[9px] text-[#3e4560] tabular-nums">
+                          {fmtLastUpdatedUTC(b.updated_at)}
+                        </span>
+                      </div>
                     </td>
 
                     {/* W15-1 — Action buttons: Depth (opens DepthChartModal which

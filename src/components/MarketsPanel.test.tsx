@@ -97,7 +97,10 @@ describe('MarketsPanel', () => {
       makeBook({ token_id: 'tok_tr1', slug: 'will-trump-win-2028' }),
     ]
     render(<MarketsPanel books={books} />)
-    fireEvent.click(screen.getByText('CRYPTO'))
+    // W38-4 — click the CRYPTO category filter PILL specifically (not the
+    // per-row category badge, which also renders the text "CRYPTO").
+    // Querying by role+name keeps the test resilient to the new badge.
+    fireEvent.click(screen.getByRole('button', { name: 'CRYPTO' }))
     expect(screen.getByText(/\[#tok_b1…\]/)).toBeInTheDocument()
     expect(screen.queryByText(/\[#tok_tr1…\]/)).not.toBeInTheDocument()
   })

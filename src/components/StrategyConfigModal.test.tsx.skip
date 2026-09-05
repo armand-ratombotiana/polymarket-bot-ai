@@ -1,0 +1,192 @@
+// components/StrategyConfigModal.test.tsx — W38-8 component tests.
+//
+// Strategy: mock `apiFetch` so we can drive the modal through its
+// loading → loaded → error states without touching the gateway.
+// The modal is opened via `isOpen` so each test toggles it directly.
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { render, screen, cleanup, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import StrategyConfigModal from './StrategyConfigModal'
+
+// ── Mocks ─────────────────────────────────────────────────────────────────
+//
+// apiFetch wraps fetch + adds an Authorization header (see @/lib/api).
+// We mock the module so each test can drive the response without
+// worrying about token injection or gateway port rewriting.
+const apiFetchMock = vi.fn()
+vi.mock('@/lib/api', () => ({
+  getApiUrl: () => '',
+  apiFetch: (...args: unknown[]) => apiFetchMock(...args),
+}))
+
+const sampleConfig = {
+  mm_spread_bps: 200,
+  mm_quote_size_usdc: 1.5,
+  mm_max_inventory_usdc: 15,
+  arb_min_profit_bps: 50,
+  arb_order_size_usdc: 1.5,
+  signal_min_confidence: 0.52,
+  daily_loss_limit_usdc: 2.0,
+  max_total_exposure_usdc: 100,
+  max_open_orders: 50,
+}
+
+function mockOk(payload: unknown) {
+  return {
+    ok: true,
+    status: 200,
+    json: async () => payload,
+  } as Response
+}
+
+function mockNotOk(status = 500) {
+  return {
+    ok: false,
+    status,
+    json: async () => ({}),
+  } as Response
+}
+
+beforeEach(() => {
+  apiFetchMock.mockReset()
+})
+
+afterEach(() => {
+  cleanup()
+})
+
+describe('StrategyConfigModal', () => {
+  it('renders nothing when isOpen=false', () => {
+    render(<StrategyConfigModal isOpen={false} onClose={vi.fn()} />)
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  })
+
+  it('renders without crashing when opened', async () => {
+    apiFetchMock.mockResolvedValue(mockOk(sampleConfig))
+    render(<StrategyConfigModal isOpen={true} onClose={vi.fn()} />)
+    expect(await screen.findByRole('dialog')).toBeInTheDocument()
+  })
+
+  it('renders the "Strategy & Risk Configuration" title header', async () => {
+    apiFetchMock.mockResolvedValue(mockOk(sampleConfig))
+    render(<StrategyConfigModal isOpen={true} onClose={vi.fn()} />)
+    expect(
+      await screen.findByText(/Strategy & Risk Configuration/),
+    ).toBeInTheDocument()
+  })
+
+  it('renders the Avellaneda-Stoikov section header once config loads', async () => {
+    apiFetchMock.mockResolvedValue(mockOk(sampleConfig))
+    render(<StrategyConfigModal isOpen={true} onClose={vi.fn()} />)
+    expect(
+      await screen.findByText(/Avellaneda-Stoikov Market Maker/),
+    ).toBeInTheDocument()
+  })
+
+  it('shows the loading state before the config fetch resolves', () => {
+    // Never-resolving promise → loading stays true.
+    apiFetchMock.mockImplementation(() => new Promise<Response>(() => {}))
+    render(<StrategyConfigModal isOpen={true} onClose={vi.fn()} />)
+    expect(
+      screen.getByText('Loading current parameters…'),
+    ).toBeInTheDocument()
+  })
+
+  it('shows an error banner when the config fetch returns not-ok', async () => {
+    apiFetchMock.mockResolvedValue(mockNotOk(500))
+    render(<StrategyConfigModal isOpen={true} onClose={vi.fn()} />)
+    await waitFor(() => {
+      expect(
+        screen.getByText(/Failed to load configuration \(HTTP 500\)/),
+      ).toBeInTheDocument()
+    })
+  })
+
+  it('shows an error banner when the config fetch throws', async () => {
+    apiFetchMock.mockRejectedValue(new Error('Network error'))
+    render(<StrategyConfigModal isOpen={true} onClose={vi.fn()} />)
+    await waitFor(() => {
+      expect(
+        screen.getByText('Network error fetching configuration'),
+      ).toBeInTheDocument()
+    })
+  })
+
+  it('calls onClose when the close (✕) button is clicked', async () => {
+    const onClose = vi.fn()
+    const user = userEvent.setup()
+    apiFetchMock.mockResolvedValue(mockOk(sampleConfig))
+    render(<StrategyConfigModal isOpen={true} onClose={onClose} />)
+    await screen.findByText(/Strategy & Risk Configuration/)
+    await user.click(
+      screen.getByRole('button', { name: /close configuration modal/i }),
+    )
+    expect(onClose).toHaveBeenCalledTimes(1)
+  })
+
+  it('calls onClose when Escape is pressed', async () => {
+    const onClose = vi.fn()
+    const user = userEvent.setup()
+    apiFetchMock.mockResolvedValue(mockOk(sampleConfig))
+    render(<StrategyConfigModal isOpen={true} onClose={onClose} />)
+    await screen.findByText(/Strategy & Risk Configuration/)
+    await user.keyboard('{Escape}')
+    expect(onClose).toHaveBeenCalled()
+  })
+
+  it('shows the success banner + closes after a successful save', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      const onClose = vi.fn()
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime })
+      apiFetchMock
+        .mockResolvedValueOnce(mockOk(sampleConfig)) // initial load
+        .mockResolvedValueOnce(mockOk({ ...sampleConfig, mm_spread_bps: 300 })) // PUT
+      render(<StrategyConfigModal isOpen={true} onClose={onClose} />)
+      await screen.findByText(/Strategy & Risk Configuration/)
+      await user.click(screen.getByRole('button', { name: /apply live/i }))
+      // Wait for the success banner, then the 1200ms auto-close.
+      await waitFor(() => {
+        expect(
+          screen.getByText(/Configuration updated live in memory/),
+        ).toBeInTheDocument()
+      })
+      // onClose fires after the 1200ms setTimeout.
+      await vi.advanceTimersByTimeAsync(1300)
+      expect(onClose).toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('shows an error banner when the save PUT returns not-ok', async () => {
+    const onClose = vi.fn()
+    const user = userEvent.setup()
+    apiFetchMock
+      .mockResolvedValueOnce(mockOk(sampleConfig)) // initial load
+      .mockResolvedValueOnce(mockNotOk(400)) // PUT
+    render(<StrategyConfigModal isOpen={true} onClose={onClose} />)
+    await screen.findByText(/Strategy & Risk Configuration/)
+    await user.click(screen.getByRole('button', { name: /apply live/i }))
+    await waitFor(() => {
+      expect(screen.getByText(/Failed to update configuration/)).toBeInTheDocument()
+    })
+    expect(onClose).not.toHaveBeenCalled()
+  })
+
+  it('shows a network error banner when the save PUT throws', async () => {
+    const onClose = vi.fn()
+    const user = userEvent.setup()
+    apiFetchMock
+      .mockResolvedValueOnce(mockOk(sampleConfig)) // initial load
+      .mockRejectedValueOnce(new Error('Network error')) // PUT
+    render(<StrategyConfigModal isOpen={true} onClose={onClose} />)
+    await screen.findByText(/Strategy & Risk Configuration/)
+    await user.click(screen.getByRole('button', { name: /apply live/i }))
+    await waitFor(() => {
+      expect(
+        screen.getByText('Error reaching bot API server'),
+      ).toBeInTheDocument()
+    })
+  })
+})

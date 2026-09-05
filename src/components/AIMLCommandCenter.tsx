@@ -2,7 +2,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { AlertTriangle, X } from 'lucide-react'
+import { AlertTriangle, ShieldAlert, X } from 'lucide-react'
 import { getApiUrl, apiFetch } from '@/lib/api'
 
 interface ReliabilityBin {
@@ -242,6 +242,29 @@ export default function AIMLCommandCenter() {
           </button>
         </div>
       )}
+
+      {/* W38-5 — Permanent "NOT A GUARANTEE" disclaimer banner.
+          Surfaced directly below the error banners so the trader sees it
+          every time the panel mounts — every probability on this panel is
+          a calibrated ensemble estimate, not a forecast. The banner is NOT
+          dismissable (it is a permanent safety label, not a transient
+          error state). */}
+      <div
+        className="banner-warning text-xs px-3 py-2 rounded flex items-start gap-2"
+        role="alert"
+        aria-label="AI prediction disclaimer"
+        data-testid="aiml-not-a-guarantee-banner"
+      >
+        <ShieldAlert className="w-3.5 h-3.5 text-amber-400 shrink-0 mt-0.5" aria-hidden="true" />
+        <span>
+          <strong>NOT A GUARANTEE.</strong> Probabilities on this panel are
+          calibrated estimates from a 4-model ensemble (RF + GB + SGD + LightGBM)
+          — not forecasts. Markets can and do move against the model. Always
+          combine AI signals with independent risk management. See the{' '}
+          <em>Explainable AI / ML Prediction</em> panel for per-prediction
+          SHAP explanations and prediction history.
+        </span>
+      </div>
 
       {/* 4-Member Ensemble Weights Strip */}
       <div className="bg-[#0e1015] border border-[#1f2335] rounded-lg p-3">
