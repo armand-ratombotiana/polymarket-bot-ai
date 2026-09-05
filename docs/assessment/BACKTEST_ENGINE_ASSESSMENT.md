@@ -1,10 +1,258 @@
-# Backtest Engine Assessment
+# Backtest Engine Assessment — W17-6 + W37-1 update
 
-**Task ID:** W17-6
+**Task ID:** W17-6 (original) / W37-1 (update)
 **Agent:** general-purpose
-**Scope:** `mini-services/polymarket-bot/backtesting/{engine,advanced,report}.py` + `paper/simulator.py`
-**Date:** 2026-09-03
+**Scope (W17-6):** `mini-services/polymarket-bot/backtesting/{engine,advanced,report}.py` + `paper/simulator.py`
+**Scope (W37-1 update):** all of the above PLUS
+`backtesting/historical_replay.py` (W20-3),
+`backtesting/experiment_store.py` (W20-3),
+`core/broker.py` (W19-7), `core/execution_interface.py` (W18-5),
+the 9 new API routes
+(`/api/backtest/historical-replay`, `/api/backtest/experiments`,
+`/api/backtest/experiments/{id}`, `/api/backtest/compare`,
+`/api/backtest/walk-forward`, `/api/backtest/monte-carlo`),
+and the W24-2 honest-performance-report surface.
+**Date (W17-6):** 2026-09-03
+**Date (W37-1):** 2026-09-08
 **Assessment framework:** God Mode Master Prompt §30-33, §60 (23-section template)
+
+> **Note on document structure:** Sections §1–§21 below preserve the
+> W17-6 baseline findings verbatim as historical evidence. The W37-1
+> update is consolidated into §0 (Update Summary), §22 (Maturity Score
+> — rewritten), and §23 (Critical Findings — each CF tagged with a
+> W37-1 status marker).
+
+---
+
+## 0. W37-1 Update Summary (current state)
+
+The W17-6 assessment scored the backtest stack **3.5 / 10** and
+concluded the "backtest engine is not a backtest engine" — it was a
+synthetic Monte-Carlo archetype simulator with no historical replay,
+no strategy invocation, no Backtest/Live parity, no experiment
+registry, and walk-forward / Monte-Carlo unreachable from the API.
+Four waves of work (W18-5, W19-7, W20-3, W24-2) have substantially
+closed the largest gaps. **Updated maturity score: 6.7 / 10.**
+
+### 0.1 Historical replay engine — present (W20-3)
+
+`backtesting/historical_replay.py::HistoricalReplayEngine` replays
+actual market data from the SQLite `market_snapshots` (LEFT JOIN
+`orderbook_ticks`) tables. The replay loop:
+
+1. `load_snapshots(token_id, start_time, end_time)` — `SELECT`
+   against `market_snapshots` with a LEFT JOIN on `orderbook_ticks`
+   for `bid_size` / `ask_size`, with a graceful fallback to
+   `market_snapshots`-only if `orderbook_ticks` is absent.
+2. For each `HistoricalSnapshot`, build a `context` dict and call
+   `strategy.generate_signal(context) -> dict | None`.
+3. Act on the returned signal (`action=BUY/SELL`, `size`) — buys at
+   `snap.best_ask`, sells at `snap.best_bid`, mark-to-market at
+   `snap.mid` per step.
+4. Force-close any open position at the last snapshot so
+   `total_return` reflects realised P&L.
+5. Compute total_return / Sharpe / max_drawdown / win_rate /
+   profit_factor in `_compute_metrics` (annualised by `sqrt(252)`
+   — matching the walk-forward convention, not the legacy
+   engine's `sqrt(24*365)`).
+
+**Status:** Engine works against real snapshot data. The default
+`SimpleStrategy` (mean-reversion) ships in the same module;
+production strategies can be plugged in via the `strategy=` kwarg
+on `replay()` (duck-typed — any object exposing
+`generate_signal(context) -> dict | None` works).
+
+**VERIFIED** at `backtesting/historical_replay.py:148-423` (the
+full `HistoricalReplayEngine` class). Wired to the API via
+`POST /api/backtest/historical-replay` at `api/server.py:4482`.
+
+### 0.2 Walk-forward analysis — wired to API (W20-3)
+
+`POST /api/backtest/walk-forward` (`api/server.py:4786`) wraps
+`backtesting/advanced.py::walk_forward_analysis` in
+`asyncio.to_thread`. The function itself was already present in
+W17-6 (W13-8) but unreachable from any HTTP route; the route is now
+landed. The endpoint accepts a JSON payload (features, labels,
+timestamps, train_window, test_window, step) and returns a
+`WalkForwardResult` shape (`windows`, `aggregate`, `equity_curve`,
+`max_drawdown`, `sharpe_ratio`, `sortino_ratio`, `calmar_ratio`).
+**VERIFIED.**
+
+### 0.3 Monte Carlo simulation — wired to API (W20-3)
+
+`POST /api/backtest/monte-carlo` (`api/server.py:4935`) wraps
+`backtesting/advanced.py::monte_carlo_simulation`. The endpoint
+accepts `trade_returns`, `n_simulations`, `initial_capital`,
+`ruin_threshold` and returns a `MonteCarloResult` shape with
+`percentiles` (p5/p25/p50/p75/p95), `probability_of_ruin`,
+`expected_return`, `worst_case`, `best_case`. **VERIFIED.**
+
+### 0.4 Experiment persistence — present (W20-3, §33)
+
+`backtesting/experiment_store.py::ExperimentStore` persists every
+backtest invocation — both the synthetic MC archetype simulator
+(via `POST /api/backtest/run`) AND the historical-replay engine
+(via `POST /api/backtest/historical-replay`) — into a dedicated
+SQLite DB (`EXPERIMENT_DB` env →
+`/app/data/backtest_experiments.db`).
+
+**Schema (single `experiments` table + 3 indexes):**
+
+```
+experiments
+    experiment_id   TEXT PRIMARY KEY
+    strategy        TEXT NOT NULL
+    strategy_version TEXT
+    start_time      REAL
+    end_time        REAL
+    initial_capital REAL
+    final_equity    REAL
+    total_return    REAL
+    sharpe          REAL
+    sortino         REAL
+    calmar          REAL
+    max_drawdown    REAL
+    win_rate        REAL
+    profit_factor   REAL
+    n_trades        INTEGER
+    config          TEXT   (JSON blob, ≤ 10 KB)
+    created_at      REAL
+    equity_curve    TEXT   (JSON blob, ≤ 10 KB)
+    trades          TEXT   (JSON blob, ≤ 10 KB)
+
+idx_exp_strategy  (strategy)
+idx_exp_created    (created_at DESC)
+idx_exp_return     (total_return DESC)
+```
+
+**Public surface:** `BacktestExperiment` dataclass + `ExperimentStore`
+class (`save`, `get`, `list_experiments(strategy=, limit=)`,
+`compare(experiment_ids)`) + module-level singleton
+`experiment_store`.
+
+**API routes (W20-3):**
+- `GET /api/backtest/experiments` — list newest-first, optional
+  strategy filter, limit clamped to [1, 1000].
+- `GET /api/backtest/experiments/{experiment_id}` — fetch one
+  experiment by id (decodes JSON blobs back to native types).
+- `POST /api/backtest/compare` — compare multiple experiments by
+  headline risk metrics (`best_return`, `best_sharpe`,
+  `lowest_drawdown`, summary list).
+
+**VERIFIED** at `backtesting/experiment_store.py:135-381` (the
+`ExperimentStore` class) and `api/server.py:4639, 4685, 4715` (the
+three routes).
+
+### 0.5 Backtest/Live parity — partial (W19-7, §32)
+
+`core/broker.py` introduces the unified `Broker` ABC + three
+concrete implementations:
+
+- `PaperBroker` — delegates to `paper.simulator.paper_sim` for
+  order submission + cancellation; `apply_slippage` delegates to
+  the canonical `PaperSimulator._apply_slippage` static method.
+- `LiveBroker` — delegates to `core.clob_client.clob_client` for
+  signed EIP-712 order submission to the Polymarket CLOB; same
+  canonical slippage estimator.
+- `BacktestBroker` — hermetic local ledger (own `_capital` +
+  `_positions` dict, no shared `store` singleton); fills are
+  immediate; `apply_slippage` uses the same canonical model.
+- `get_broker(mode)` factory: `"paper"` / `"live"` / `"backtest"`.
+
+The single canonical slippage model is `PaperSimulator._apply_slippage`
+(the 3-component crossing + size + queue model). Every `Broker`
+implementation delegates via the shared `Broker._canonical_slippage`
+helper, so a strategy that consumes a `Broker` instance (rather than
+`paper_sim` / `clob_client` directly) gets identical execution
+semantics across backtest, paper, and live.
+
+**Status (W37-1):** The Broker ABC is present and tested.
+`BacktestBroker` is hermetic (no shared `store`). **However**, the
+existing strategies (`signal_trader`, `market_maker`, `arb_scanner`,
+`mean_reversion`, etc.) still call `paper_sim.create_order` /
+`clob_client.create_order` directly via `BaseStrategy.submit_order`
+— they do NOT yet consume the `Broker` ABC. The Broker is therefore
+*available for new strategies* but *not load-bearing* for the
+existing ones. `core/execution_interface.py` (W18-5) uses the
+paper/live branching pattern for exit orders (TP/SL) but does not
+use the `Broker` ABC either.
+
+**Partial parity:** the slippage model is now unified; the
+execution-interface is not. Closing the gap requires migrating
+`BaseStrategy.submit_order` to consume a `Broker` instance.
+
+### 0.6 Bias / leakage detection — partial
+
+The W17-6 assessment documented a 6-rule `_LookAheadDetector`
+(LE_01..LE_06) living in `backtesting/engine.py:403-502`. W37-1
+status:
+
+| Rule | W17-6 | W37-1 |
+|---|---|---|
+| LE_01 FUTURE_OUTCOME_LEAK | present, called per-trade | unchanged |
+| LE_02 ENTRY_PRICE_EXTREMUM | present, called per-trade | unchanged |
+| LE_03 UNREALISTIC_WIN_RATE | present, called end-of-backtest (>0.95 over >30 trades) | unchanged |
+| LE_04 FUTURE_TIMESTAMP_ACCESS | present but unreachable (dead code) | **STILL unreachable** — `_simulate_realistic_trade` still has no `data_ts` parameter |
+| LE_05 STRATEGY_ATTRIBUTE_LEAK | present, called once at start | unchanged |
+| LE_06 PERFECT_CALIBRATION | present, called end-of-backtest | unchanged |
+| LE_07 UNREALISTIC_SHARPE | **MISSING** (W17-6 CF5 recommendation) | **STILL MISSING** — smoke test of `mm` archetype still produces Sharpe=33 |
+
+The legacy `BacktestEngine.run_backtest` (synthetic archetype
+simulator) does not invoke any look-ahead detector. The
+`historical_replay.py` engine does NOT invoke any look-ahead
+detector either — it has no `_LookAheadDetector` instance. The
+walk-forward + Monte Carlo functions in `advanced.py` do not invoke
+any look-ahead detector.
+
+**Bias/leakage status:** detection exists for the synthetic
+realistic engine only; the historical-replay engine has no
+detection; LE_07 is still not implemented; LE_04 is still dead
+code.
+
+### 0.7 PDF report — present and augmented (W16-4 / W20-3)
+
+`backtesting/report.py::report_to_pdf` (unchanged since W16-4)
+produces a multi-section A4 PDF with:
+
+- Title (strategy name + report_id)
+- Summary table (14 headline metrics: total/annualized return,
+  Sharpe, Sortino, Calmar, max DD + duration, volatility,
+  downside deviation, win rate, profit factor, expectancy,
+  VaR/CVaR 95, avg win/loss, avg hold hours, total trades,
+  winning/losing counts).
+- Equity curve chart (matplotlib PNG, embedded via reportlab's
+  `RLImage`; shaded green above baseline, red below).
+- Monthly returns table (computed from per-trade timestamps via
+  `_compute_monthly_returns`).
+- Trade distribution summary (winners / losers / break-even /
+  avg / max / min P&L).
+
+`POST /api/backtest/report/pdf` (`api/server.py:4399`) wraps the
+generator in `asyncio.to_thread`. **VERIFIED.**
+
+The historical-replay engine's `ReplayResult` shape is consumed by
+`generate_report` via the `_normalise_equity` helper, so the same
+PDF renderer works for both engine variants.
+
+### 0.8 Other deltas since W17-6
+
+- **Honest Performance Report (W24-2 / W26-2).** Separates backtest
+  / walk-forward / paper / live metrics into per-category panels
+  with a disclaimer ("Backtest performance does NOT guarantee
+  future results"). Surfaced at
+  `GET /api/performance-report/category/{category}` and the
+  Performance Report UI panel.
+- **Execution interface helper (W18-5).**
+  `core/execution_interface.py::submit_exit_order` /
+  `cancel_exit_order` — branches on `settings.paper_trade` for
+  TP/SL exit orders. Pre-dates the Broker ABC and is a narrower
+  interface (one order at a time, returns `Order | None`).
+- **Wave-5 time-ordered split fix** (verified in W17-6 at
+  `ml/model.py:237-247`) — unchanged, still the canonical
+  look-ahead guard for ML training.
+- **Experiment compare endpoint (W20-3).** `POST /api/backtest/compare`
+  returns `best_return`, `best_sharpe`, `lowest_drawdown` across
+  a set of experiment_ids, plus per-experiment summary dicts.
 
 ---
 
@@ -913,182 +1161,273 @@ spec (VERIFIED / STRONG EVIDENCE / LIKELY / UNVERIFIED / NOT FOUND):
 
 ## 22. Maturity Score (0-10)
 
-| Dimension | Score | Rationale |
-|---|---|---|
-| **Correctness of what's implemented** | 6 / 10 | Realistic MC sim is internally consistent; look-ahead detector is well-designed. But B1 (equity floor), B2 (annualisation mismatch), B3 (fabricated monthly_returns), B7 ($1-bet walk-forward equity), B8 (unseeded MC) are real defects. |
-| **Realism of microstructure model (§31)** | 6 / 10 | Spread + depth + partial fills + exec delay + sqrt market-impact are all present and correct. Missing: separate `fee_bps`, queue position (paper broker has this; realistic engine does not), maker/taker fee distinction, gas / settlement fees. |
-| **Backtest / Live parity (§32)** | 1 / 10 | Zero shared code. Two slippage models. Risk engine bypassed in backtest. Decision ledger bypassed. No `Broker` interface. |
-| **Backtest Lab features (§33)** | 1 / 10 | No experiment persistence. No cross-run comparison. No parameter sweep. No version diff. |
-| **Historical replay capability (§30)** | 0 / 10 | Does not exist. Engine is a synthetic MC simulator. |
-| **Test coverage** | 7 / 10 | 41 tests, all pass. Good unit coverage of public surface. Gaps: no integration test of strategy-backtest-vs-live parity, no property-based test for look-ahead detector, no load test of PDF route. |
-| **Observability** | 1 / 10 | Zero backtest metrics, zero log lines in engine.py, zero decision-ledger integration, zero Prometheus counters. |
-| **API surface completeness** | 4 / 10 | Three backtest routes exist; `walk-forward` / `monte-carlo` routes documented but not implemented. |
-| **Documentation accuracy** | 4 / 10 | Module docstrings are detailed but `advanced.py` lies about API routes. Inline comments are good. |
-| **Production readiness** | 2 / 10 | Not safe to use for capital-allocation decisions. Sharpe ratios of 20+ would mislead any consumer. |
+### W17-6 baseline score: 3.5 / 10
+### W37-1 updated score: **6.7 / 10**
 
-**Composite maturity: 3.5 / 10.**
+### Scoring breakdown (W37-1)
 
-The score is dragged down primarily by §30 (no replay) and §32
-(no parity) — the two capabilities that distinguish a real
-backtest engine from a Monte-Carlo demo. The microstructure
-modelling that does exist is competent; the problem is that it's
-modelling synthetic data, not real market data.
+| Dimension | W17-6 | W37-1 | Rationale for change |
+|---|---:|---:|---|
+| Correctness of what's implemented | 6 / 10 | **6 / 10** | Bugs B1-B8 from W17-6 are all still present (equity floor, annualisation mismatch, fabricated monthly_returns, walk-forward $1-bet simplification, unseeded MC, dead LE_04 rule, etc.). The historical-replay engine is internally consistent but inherits none of the W17-6 bug fixes that weren't landed. |
+| Realism of microstructure model (§31) | 6 / 10 | **7 / 10** | Realistic MC sim retains spread + depth + partial fills + exec delay + sqrt market-impact. NEW: the `BacktestBroker` uses the canonical tick-based paper-sim slippage (3-component crossing + size + queue), so backtest slippage is now consistent with paper/live for callers that consume the `Broker` ABC. |
+| Backtest / Live parity (§32) | 1 / 10 | **5 / 10** | `core/broker.py` (W19-7) introduces the `Broker` ABC + `PaperBroker` / `LiveBroker` / `BacktestBroker` + `get_broker(mode)` factory + shared `_canonical_slippage` helper. Slippage model unified. **However** `BaseStrategy.submit_order` still branches on `settings.paper_trade` directly (does not consume `Broker`), so strategies don't yet get parity for free. |
+| Backtest Lab features (§33) | 1 / 10 | **8 / 10** | `ExperimentStore` (W20-3) persists every run to SQLite with full metrics + JSON blobs + 3 indexes. `GET /api/backtest/experiments` (list, filter by strategy, limit) + `GET /api/backtest/experiments/{id}` (fetch one) + `POST /api/backtest/compare` (cross-run comparison). The §33 persistence requirement is now met; the parameter-sweep runner (batch over `slippage_bps` grid) is still TODO. |
+| Historical replay capability (§30) | 0 / 10 | **6 / 10** | `HistoricalReplayEngine` (W20-3) reads `market_snapshots` (LEFT JOIN `orderbook_ticks`) and replays them through any object exposing `generate_signal(context)`. The default `SimpleStrategy` ships; production strategies can be plugged via the `strategy=` kwarg. Limitations: no look-ahead detection in the replay path; no risk-engine / decision-ledger integration; no per-token portfolio accounting (single-cash accounting only). |
+| Test coverage | 7 / 10 | **7 / 10** | Original 41 tests retained. New tests for `historical_replay` and `experiment_store` are present (`tests/test_experiment_store.py` exists); full integration test of `MarketMakerStrategy` against both engines still missing. |
+| Observability | 1 / 10 | **3 / 10** | `experiment_store.save()` logs each run (INFO); API routes emit standard access logs. Still no `record_metric("backtest", ...)` calls in `engine.py` (it has zero log lines); no Prometheus counter for backtest runs; no decision-ledger integration. |
+| API surface completeness | 4 / 10 | **8 / 10** | Six new routes landed: `/api/backtest/historical-replay`, `/api/backtest/experiments`, `/api/backtest/experiments/{id}`, `/api/backtest/compare`, `/api/backtest/walk-forward`, `/api/backtest/monte-carlo`. The `advanced.py` docstring's claim of `/api/backtest/walk-forward` + `/api/backtest/monte-carlo` is now true. |
+| Documentation accuracy | 4 / 10 | **8 / 10** | The `advanced.py` docstring's API-route claims are now honest. The `historical_replay.py` and `experiment_store.py` module docstrings are detailed and accurate. The legacy `engine.py` docstring is unchanged (still describes itself as a "high-performance" engine without disclaiming its synthetic nature). |
+| Production readiness | 2 / 10 | **6 / 10** | Safe for archetype-level sanity-checking, parameter-tuning demos, and PDF report generation (as in W17-6). NEW: safe for historical-replay backtests of pluggable strategies against real `market_snapshots` data; safe for cross-run experiment comparison. Still NOT safe for capital-allocation decisions on the basis of the synthetic archetype engine's Sharpe ratios. |
+
+**Composite maturity: 6.7 / 10.**
+
+The score moved up by ~3 points because the four "NOT FOUND" /
+"0 / 10" findings (historical replay, backtest/live parity,
+experiment persistence, walk-forward + Monte-Carlo API surface)
+are now substantially closed. The remaining drag is from
+correctness bugs in the synthetic archetype engine (B1-B8 — none
+fixed), the absence of look-ahead detection in the new
+historical-replay path, and the fact that the `Broker` ABC is
+present but not load-bearing for existing strategies.
 
 ---
 
 ## 23. Critical Findings
 
-### CF1 — The "backtest engine" is not a backtest engine.
+> **W37-1 status markers:** Each CF below is tagged with one of
+> `RESOLVED`, `PARTIALLY RESOLVED`, or `STILL OPEN` to indicate the
+> current state.
 
-It is a **synthetic Monte-Carlo archetype simulator**. The §30
-trace (Historical Data → Replay → Strategy → Signal → Risk →
-Execution → Portfolio → Results) is broken at hop 1 (no historical
-data is read), hop 2 (no replay — forward simulation), hop 3
-(strategy object's methods are not invoked — only 5 numeric profile
-attrs are read), hop 4 (signal is `rng.normal` noise around
-`base_p`, not a strategy output), and hop 5 (risk engine is not
-called). Only hops 6-8 (simulated execution, cash accounting,
-results) function as designed. **This is the single most important
-finding.** Any user who interprets `run_realistic_backtest(strategy,
-start_date, end_date, capital)` as "I'm backtesting strategy X
-over the historical period start_date..end_date" is being misled.
+### CF1 — The "backtest engine" is not a backtest engine.
+**W37-1 status:** **PARTIALLY RESOLVED.** The W17-6 verdict applied
+specifically to the legacy `BacktestEngine.run_backtest` /
+`run_realistic_backtest` synthetic MC archetype simulator — both
+still exist with the same defects (B1-B8 from W17-6). What's new
+in W37-1: `backtesting/historical_replay.py::HistoricalReplayEngine`
+(W20-3) IS a real backtest engine — it reads from
+`market_snapshots`, invokes the strategy's
+`generate_signal(context)` method, mark-to-markets at `snap.mid`
+per step, and computes total_return / Sharpe / max_drawdown /
+win_rate / profit_factor from the resulting trade list. The §30
+trace is now intact for the historical-replay engine (Historical
+Data → Replay → Strategy → Signal → Risk (bypassed) → Execution
+(simplified — buys at best_ask, sells at best_bid) → Portfolio
+(single-cash) → Results). The legacy synthetic engine is still
+the default for `/api/backtest/run` (POST →
+`BacktestEngine.run_backtest`); a caller who wants a real
+backtest must hit `/api/backtest/historical-replay` instead.
+**Severity:** ~~Critical~~ → Medium (legacy engine is now one
+of two engines, not the only one; the API route names are
+honest about which is which).
 
 ### CF2 — There is no Backtest/Live execution interface (§32 FAIL).
-
-The task spec's desired architecture
-(`Strategy → Risk → Execution Interface → {BacktestBroker, LiveBroker}`)
-does not exist. The codebase has:
-
-- `BaseStrategy.submit_order` → `risk_manager.check_order` → `paper_sim` (paper) OR `clob_client` (live)
-- `run_realistic_backtest` → `_SyntheticOrderBook.consume` (synthetic, isolated)
-
-These are two separate universes. A strategy that backtests at
-Sharpe 21 cannot be expected to achieve the same in paper or live
-mode, because the slippage / risk / execution-quality paths are
-entirely different. There is no shared `Broker` protocol, no shared
-`SlippageModel`, no shared `OrderBook` interface. Until this is
-fixed, **backtest results are not predictive of live performance**.
+**W37-1 status:** **PARTIALLY RESOLVED.** `core/broker.py` (W19-7)
+introduces the unified `Broker` ABC + three concrete
+implementations (`PaperBroker`, `LiveBroker`, `BacktestBroker`)
+plus a `get_broker(mode)` factory. The single canonical slippage
+model lives on `PaperSimulator._apply_slippage` (the 3-component
+crossing + size + queue model); every `Broker` subclass
+delegates via the shared `Broker._canonical_slippage` helper,
+so slippage is now consistent across backtest, paper, and live.
+**However**, `BaseStrategy.submit_order` still branches on
+`settings.paper_trade` directly (does not consume the `Broker`
+ABC); `core/execution_interface.py` (W18-5) uses paper/live
+branching for TP/SL exits; the legacy
+`backtesting/engine.py::run_realistic_backtest` still uses
+`_SyntheticOrderBook.consume`. The Broker is available for new
+strategies that consume it but is not load-bearing for the
+existing pipeline.
+**Severity:** ~~Critical~~ → Medium (parity is structurally
+available; migration is the remaining work).
 
 ### CF3 — Walk-forward and Monte-Carlo are unreachable from production.
-
-Both `walk_forward_analysis` and `monte_carlo_simulation` exist
-with test coverage, but neither is wired to an API route. The
-`advanced.py` module docstring (lines 27-29) explicitly references
-`/api/backtest/walk-forward` and `/api/backtest/monte-carlo` —
-**the docstring lies**. These are the two most valuable tools in
-the backtest stack (per §31: walk-forward is the canonical
-look-ahead guard; per §33: Monte-Carlo enables distributional
-comparison across configurations) and neither is accessible
-without a Python import + a custom caller.
+**W37-1 status:** **RESOLVED.** `POST /api/backtest/walk-forward`
+(`api/server.py:4786`) and `POST /api/backtest/monte-carlo`
+(`api/server.py:4935`) are both landed. Both wrap their respective
+`backtesting/advanced.py` functions in `asyncio.to_thread`. The
+`advanced.py` module docstring's claim of those routes is now
+honest. **Severity:** ~~Critical~~ → None (gap closed).
 
 ### CF4 — No Backtest Lab (§33 FAIL).
-
-There is no experiment registry, no DB persistence, no
-cross-run comparison tooling. Every `run_realistic_backtest` call
-returns a dict that is discarded by the caller. The task spec's
-§33 requirement ("verify every experiment is persisted") is
-**not even partially met**. Without persistence, parameter sweeps,
-A/B comparisons across strategy versions, and date-range comparisons
-are all impossible without external ad-hoc tooling.
+**W37-1 status:** **RESOLVED** (persistence + cross-run comparison).
+`backtesting/experiment_store.py::ExperimentStore` (W20-3)
+persists every backtest invocation (both legacy MC and
+historical-replay) into a dedicated SQLite DB
+(`/app/data/backtest_experiments.db` by default) with a
+single `experiments` table + 3 indexes (strategy / created_at /
+total_return). Three API routes: `GET /api/backtest/experiments`
+(list, filter by strategy, limit clamped to [1, 1000]),
+`GET /api/backtest/experiments/{experiment_id}` (fetch one,
+JSON-blob decoding), `POST /api/backtest/compare` (cross-run
+headline-metric comparison with `best_return` / `best_sharpe` /
+`lowest_drawdown`). **TODO:** a parameter-sweep batch runner
+(sweep `slippage_bps ∈ [5,10,25,50,100]` and report the
+resulting Sharpe / DD distribution) is still not implemented.
+**Severity:** ~~Critical~~ → Low (parameter sweep only).
 
 ### CF5 — Sharpe ratios of 20-41 are not credible and the look-ahead detector does not catch them.
-
-Direct smoke test:
-
-```
-mm:  trades=267, win_rate=0.6779, sharpe=33.3482, mdd=15.6043, pf=2.5836, LE=0
-arb: trades=138, win_rate=0.9275, sharpe=40.9745, mdd=5.5015,  pf=15.0565, LE=0
-mom: trades=197, win_rate=0.5482, sharpe=20.1566, mdd=25.6916, pf=1.8005, LE=0
-ml:  trades=233, win_rate=0.6481, sharpe=20.8776, mdd=26.8667, pf=2.2065, LE=0
-```
-
-A Sharpe of 33 on a 14-day backtest implies the strategy has
-essentially no risk. Institutional Sharpe ratios above 3 are
-exceptional; above 10 is a red flag for look-ahead bias or
-simulation artifact. The look-ahead detector's LE_03
-(UNREALISTIC_WIN_RATE) does not trigger because win_rate is below
-0.95; **there is no LE_07 UNREALISTIC_SHARPE rule** to catch this.
-A user trusting these metrics would make capital-allocation
-decisions on fabricated data.
+**W37-1 status:** **STILL OPEN.** Smoke-test of the legacy
+`BacktestEngine.run_backtest` against `"mm"` archetype still
+produces Sharpe=33 because `engine.py:806` annualises by
+`sqrt(24 * 365) = sqrt(8760) ≈ 93.6`, and `LE_07
+UNREALISTIC_SHARPE` is still not implemented (only LE_01..LE_06
+exist). The look-ahead detector does flag Sharpe=33 via neither
+LE_03 (UNREALISTIC_WIN_RATE — only triggers if win_rate > 0.95)
+nor LE_06 (PERFECT_CALIBRATION — only triggers if
+`corr(p_model, outcome) > 0.95`). The new historical-replay
+engine uses `sqrt(252)` annualisation, so its Sharpe numbers
+are at the right scale — but the legacy engine remains the
+default route for `/api/backtest/run`.
+**Severity:** ~~Critical~~ → High (legacy route is still the
+default; the misleading Sharpe numbers are still surfaced to
+any caller of `POST /api/backtest/run`).
 
 ### CF6 — The Wave-5 time-ordered split fix IS verified (the one bright spot).
-
-`ml/model.py:237-247` uses sequential `np.arange` indices for the
-80/20 train/calibration split, with an inline comment explicitly
-documenting the look-ahead rationale. The fix is in the ML
-training path, not in the backtest engine (which has no train/test
-split to contaminate, since it doesn't train). **VERIFIED.**
+**W37-1 status:** **UNCHANGED.** `ml/model.py:237-247` still uses
+sequential `np.arange` indices for the 80/20 train/calibration
+split, with the inline comment documenting the look-ahead
+rationale. Still the canonical look-ahead guard for ML training.
 
 ### CF7 — `walk_forward_analysis` correctly prevents temporal leakage.
-
-`advanced.py:100` calls `np.argsort(timestamps)` before partitioning,
-so even if the caller passes shuffled rows, the partition is
-strictly chronological. The `train_end = start + train_window` /
-`test_end = train_end + test_window` arithmetic guarantees that
-the test fold begins at the index immediately after the train fold
-ends — no overlap, no peek-ahead. Tested by
-`test_walk_forward_sorts_by_timestamp`. **VERIFIED.**
+**W37-1 status:** **UNCHANGED.** `advanced.py:100` still calls
+`np.argsort(timestamps)` before partitioning; the partition is
+strictly chronological; train_end = start + train_window and
+test_end = train_end + test_window arithmetic guarantees no
+overlap. Tested by `test_walk_forward_sorts_by_timestamp`.
 
 ### CF8 — The realistic engine's `look_ahead_bias` field is misleading.
+**W37-1 status:** **STILL OPEN.** `run_realistic_backtest` still
+reports `look_ahead_bias.total_violations = 0` as if it were a
+clean bill of health, but the engine still doesn't invoke real
+strategies or read real historical data — there's no look-ahead
+that could exist. LE_04 (FUTURE_TIMESTAMP_ACCESS) is still dead
+code (`_simulate_realistic_trade` has no `data_ts` parameter).
+LE_02 (ENTRY_PRICE_EXTREMUM) still checks against a *synthetic*
+period low/high drawn independently from `decision_mid`. The
+detector is well-designed for a real-replay backtest; in the
+synthetic-MC engine it's still decorative.
+**Severity:** unchanged — Medium.
+**Recommendation:** Port the `_LookAheadDetector` into the new
+`historical_replay.py` engine where it would actually be
+load-bearing, AND add `LE_07 UNREALISTIC_SHARPE` (Sharpe > 5
+over > 30 trades).
 
-Because the engine does not invoke real strategies or read real
-historical data, **there is no look-ahead that could exist**.
-`look_ahead_bias.total_violations = 0` is reported as if it's a
-clean bill of health, but it's a tautology — the detector can
-only flag violations of rules whose inputs are populated. LE_04
-(FUTURE_TIMESTAMP_ACCESS) is dead code (B6). LE_02
-(ENTRY_PRICE_EXTREMUM) checks against a *synthetic* period low/high
-drawn independently from `decision_mid`, so a real look-ahead
-strategy would have to be pathological to trip it. The detector
-is well-designed for a real-replay backtest; in the current
-synthetic-MC engine, it's mostly decorative.
+### CF9 (NEW in W37-1) — Historical-replay engine has no look-ahead detection.
+**Severity:** Medium-High.
+**Evidence:** `backtesting/historical_replay.py` has no
+`_LookAheadDetector` instance and never calls
+`check_p_model_vs_outcome` / `check_entry_extremum` /
+`check_strategy_object` / `check_calibration`. The engine
+*does* invoke the strategy's `generate_signal(context)` method,
+which is exactly the surface where a real look-ahead leak would
+manifest (a strategy that peeks at `context["mid"]` for a
+future snapshot, or that maintains state across snapshots and
+illegitimately uses information from a later step). The
+detector that exists is wired to the wrong engine.
+**Impact:** A buggy or malicious strategy that peeks at future
+snapshots in `generate_signal` will backtest with implausibly
+good results and no `look_ahead_bias.violations` will be
+surfaced. The new §30 replay path is *less* guarded than the
+legacy §31 realistic-MC path.
+**Recommendation:** Instantiate a `_LookAheadDetector` inside
+`HistoricalReplayEngine.replay()`, invoke
+`check_strategy_object(strategy)` once at start, invoke
+`check_p_model_vs_outcome` and `check_entry_extremum` per
+trade, invoke `check_calibration` end-of-replay. Surface
+`look_ahead_bias` on the `ReplayResult`.
+
+### CF10 (NEW in W37-1) — `Broker` ABC present but not load-bearing.
+**Severity:** Medium.
+**Evidence:** `core/broker.py` defines the `Broker` ABC + 3
+concrete implementations + `get_broker(mode)` factory + shared
+`_canonical_slippage` helper. But `BaseStrategy.submit_order`
+(`strategies/base.py:361-820`) still branches on
+`settings.paper_trade` and calls `paper_sim.create_order` or
+`clob_client.create_order` directly. None of the 11
+IMPLEMENTED strategies consume a `Broker` instance.
+`core/execution_interface.py` (W18-5) uses a parallel
+paper/live branching helper for exit orders but also does
+not use the `Broker` ABC.
+**Impact:** The §32 parity contract is structurally available
+but not enforced. A new strategy that consumes a `Broker`
+gets parity for free; an existing strategy that doesn't gets
+none.
+**Recommendation:** Refactor `BaseStrategy.submit_order` to
+accept a `broker: Broker` injected via `__init__` (default
+`get_broker("paper" if settings.paper_trade else "live")`),
+and route all order submission through the broker.
+
+### CF11 (NEW in W37-1) — Synthetic archetype engine's B1-B8 bugs unfixed.
+**Severity:** Medium.
+**Evidence:** `backtesting/engine.py:775` still has the
+`cash = max(1.0, cash + step_pnl)` equity floor. The Sharpe
+annualisation is still `sqrt(24 * 365)` (line 806). The legacy
+`monthly_returns` is still fabricated (`engine.py:244-249`).
+`monte_carlo_simulation` still uses `np.random.choice` without
+a seed (`advanced.py:352`). LE_04 is still dead code.
+**Impact:** Every smoke test of the legacy route produces
+implausible Sharpe ratios (20-41); the metrics are not
+comparable across modules.
+**Recommendation:** Land the W17-6 "Recommended Next Actions"
+items 5, 6, 7, 8 (equity floor, LE_07, seeded MC, real
+monthly returns).
 
 ---
 
-## Recommended Next Actions (priority order)
+## Recommended Next Actions (priority order, W37-1 update)
 
-1. **Decide the scope of the backtest engine.** Either (a) commit
-   to building a real historical-replay engine that consumes
-   `core/data_store` snapshots and invokes real `BaseStrategy`
-   subclasses, or (b) rename `run_realistic_backtest` to
-   `run_synthetic_microstructure_sim` and stop presenting its
-   output as backtest results. The current naming is misleading.
-2. **Extract a `Broker` protocol** with `submit_order` /
-   `cancel_order` / `get_open_positions` methods and three
-   implementations: `BacktestBroker` (wraps `_SyntheticOrderBook`),
-   `PaperBroker` (wraps `paper_sim`), `LiveBroker` (wraps
-   `clob_client`). Refactor `BaseStrategy.submit_order` to dispatch
-   via this protocol.
-3. **Add `POST /api/backtest/walk-forward` and
-   `POST /api/backtest/monte-carlo` routes** that wrap
-   `advanced.walk_forward_analysis` and `advanced.monte_carlo_simulation`
-   in `asyncio.to_thread`. The functions already exist; the wiring
-   is ~20 lines per route.
-4. **Add a SQLite `backtest_runs` table** with columns
-   `(run_id, strategy, start_date, end_date, capital, slippage_bps,
-   fee_bps, metrics_json, equity_curve_json, trades_json, created_at)`.
-   Persist every `run_realistic_backtest` call. Add a
-   `GET /api/backtest/runs?strategy=mm&limit=20` query endpoint.
-5. **Fix B1 (equity floor)** — track cash without truncation, or
+> Items 1, 2, 3, 4 from the W17-6 list are **DONE** (historical
+> replay engine, Broker ABC, walk-forward / Monte-Carlo routes,
+> experiments SQLite table + compare endpoint). Items 5-10 below
+> are the updated priority list:
+
+1. **Port the `_LookAheadDetector` into the historical-replay
+   engine** so the new §30 path is guarded. Add `LE_07
+   UNREALISTIC_SHARPE` (Sharpe > 5 over > 30 trades). (W17-6
+   item 6 + CF9.)
+2. **Migrate `BaseStrategy.submit_order` to consume a `Broker`
+   instance** so the §32 parity contract is load-bearing for
+   the existing 11 strategies. (CF10.)
+3. **Fix B1 (equity floor)** in the legacy
+   `run_realistic_backtest` — track cash without truncation, or
    explicitly model margin-call / liquidation when cash < 0.
-6. **Add `LE_07 UNREALISTIC_SHARPE`** rule to the look-ahead
-   detector: flag Sharpe > 5 over > 30 trades (the threshold for
-   "almost certainly a simulation artifact").
-7. **Fix B8 (unseeded Monte Carlo)** — add `rng: np.random.RandomState
-   | None = None` parameter; default to a fresh `RandomState(42)`.
-8. **Fix B3 (fabricated monthly_returns)** — either compute them
-   from the equity curve per calendar month (as `report.py` already
-   does), or remove the field entirely from `BacktestResult`.
-9. **Add backtest observability** — emit `record_metric("backtest",
-   "duration_ms", ...)` and `record_metric("backtest",
-   "lookahead_violations", ...)` per run.
-10. **Add an integration test** that runs the same `MarketMakerStrategy`
-    against (a) `run_realistic_backtest` and (b) `paper_sim` over
-    the same period and asserts the PnL difference is within a
-    tolerance band. This test will FAIL today; that failure is the
-    forcing function for fixing CF1 and CF2.
+   (W17-6 item 5.)
+4. **Fix B8 (unseeded Monte Carlo)** — add
+   `rng: np.random.RandomState | None = None` parameter to
+   `monte_carlo_simulation`; default to a fresh `RandomState(42)`
+   so two consecutive runs produce identical distributions.
+   (W17-6 item 7.)
+5. **Fix B3 (fabricated `monthly_returns`)** in
+   `BacktestEngine.run_backtest` — compute from the equity curve
+   per calendar month (as `report.py` already does), or remove
+   the field entirely. (W17-6 item 8.)
+6. **Replace the legacy `/api/backtest/run` substring dispatch**
+   (`if "mm" in strategy_id elif "arb" in strategy_id ...`)
+   with a `_IMPLEMENTED_STRATEGY_CLASSES` lookup; refuse to
+   backtest PLANNED ids with a 400. (W17-6 item, restated.)
+7. **Add a parameter-sweep batch runner** — sweep
+   `slippage_bps ∈ [5, 10, 25, 50, 100]` and persist each run
+   as an experiment; surface the resulting Sharpe / DD
+   distribution via `POST /api/backtest/compare`. (CF4 residual.)
+8. **Add backtest observability** — emit
+   `record_metric("backtest", "duration_ms", ...)` and
+   `record_metric("backtest", "lookahead_violations", ...)`
+   per run; add a `polymarket_backtest_runs_total` Prometheus
+   counter. (W17-6 item 9.)
+9. **Add an integration test** that runs the same
+   `MarketMakerStrategy` against (a) `run_realistic_backtest`
+   and (b) `HistoricalReplayEngine.replay()` over the same
+   period and asserts the trade-count / PnL difference is
+   within a tolerance band. (W17-6 item 10, updated.)
+10. **Deprecate `BacktestEngine.run_backtest`** (the legacy
+    synthetic MC archetype simulator) by emitting a
+    `DeprecationWarning` and routing the default
+    `POST /api/backtest/run` to the historical-replay engine
+    when `market_snapshots` data is available. (CF1 / CF5
+    residual.)
 
 ---
 
-*End of assessment. Generated per God Mode Master Prompt §30-33, §60
-(23-section template). All evidence classifications per task spec.*
+*End of assessment — W17-6 + W37-1 update. Generated per God Mode
+Master Prompt §30-33, §60 (23-section template). All evidence
+classifications per task spec.*

@@ -12,6 +12,7 @@ import os
 import time
 import uuid
 from contextlib import asynccontextmanager
+from typing import Any
 
 import numpy as np
 from fastapi import (
@@ -136,6 +137,11 @@ from ml.model_registry import model_registry
 from ml.vector_store import vector_store
 from paper.simulator import paper_sim
 from risk.manager import BANKROLL_CEILING, MAX_DEPLOYABLE_CAPITAL, risk_manager
+from strategies.lifecycle import (
+    InvalidTransitionError,
+    REQUIREMENTS_FOR_LIVE,
+    strategy_lifecycle,
+)
 from strategies.registry import strategy_registry
 
 # ── W12-6 — Structured logging ────────────────────────────────────────────────
@@ -2361,6 +2367,154 @@ async def get_strategy_health():
 async def get_strategy_health_summary():
     """Get strategy health summary (counts by status)."""
     return strategy_health_monitor.get_summary()
+
+
+# ── Strategy Lifecycle Endpoints (W37-2) ─────────────────────────────────────
+# W37-2 — audited lifecycle state machine. ``strategy_lifecycle`` (the
+# ``StrategyLifecycleManager`` singleton from ``strategies.lifecycle``)
+# holds the per-strategy current state + ordered audit trail. These two
+# routes surface the manager over the API so an operator (or the
+# strategy health monitor) can promote / suspend / retire a strategy
+# and inspect the full audit history.
+#
+# The transition route is also the integration point for the W24-8
+# strategy health monitor — ``StrategyHealthMonitor._disable`` can call
+# ``transition(name, "SUSPENDED", reason=..., approver="health-monitor")``
+# to record the suspension in the lifecycle audit trail alongside its
+# existing ``StrategyRegistry.disable`` call.
+
+class StrategyTransitionRequest(BaseModel):
+    """Body for ``POST /api/strategies/{name}/transition``.
+
+    ``target_state`` is the desired next lifecycle state — must be a
+    state in ``strategies.lifecycle.ALL_STATES``. ``reason`` is the
+    operator's free-form justification (logged in the audit trail).
+    ``approver`` defaults to ``"operator"`` for manual API calls; the
+    strategy health monitor passes ``"health-monitor"``; the risk
+    engine passes ``"risk-engine"``. ``requirements`` is the
+    LIVE-prerequisite attestation dict (only consulted when
+    ``target_state == "LIVE"``) — see
+    ``strategies.lifecycle.REQUIREMENTS_FOR_LIVE`` for the keys.
+    """
+
+    target_state: str
+    reason: str = ""
+    approver: str = "operator"
+    requirements: dict[str, Any] | None = None
+
+
+@app.post(
+    "/api/strategies/{name}/transition",
+    tags=["strategies"],
+    summary="Transition a strategy to a new lifecycle state",
+    description=(
+        "W37-2 — Audited lifecycle transition. Validates the transition "
+        "against the state-machine graph in "
+        "``strategies.lifecycle.VALID_TRANSITIONS`` and (for LIVE "
+        "promotions) the prerequisite attestation dict in "
+        "``REQUIREMENTS_FOR_LIVE``. A profitable backtest alone must "
+        "NEVER promote to LIVE — out-of-sample validation, "
+        "walk-forward, paper trading, risk checks, and explicit "
+        "approval are all required. RETIRED is terminal (cannot "
+        "reactivate). Returns 400 on an invalid transition (graph "
+        "violation or missing LIVE requirements), 409 on an attempt "
+        "to transition a retired strategy. Successful transitions are "
+        "recorded in the audit trail with timestamp / approver / "
+        "reason."
+    ),
+)
+async def transition_strategy(name: str, req: StrategyTransitionRequest):
+    """Transition a strategy to a new lifecycle state.
+
+    ``name`` is the URL-path strategy_id. The body carries
+    ``target_state``, ``reason``, ``approver``, and (for LIVE
+    promotions) ``requirements``.
+
+    On success: returns ``{"strategy", "state", "audit"}`` where
+    ``audit`` is the new audit row. On failure: raises an
+    ``HTTPException`` with status 400 (invalid transition / missing
+    requirements) or 409 (terminal state — RETIRED).
+    """
+    try:
+        result = strategy_lifecycle.transition(
+            name,
+            req.target_state,
+            reason=req.reason,
+            approver=req.approver,
+            requirements=req.requirements,
+        )
+    except InvalidTransitionError as exc:
+        # A retired strategy attempting any transition is a 409 Conflict
+        # (the resource is in a terminal state that forbids further
+        # mutations). Every other invalid transition is a 400 (the
+        # request itself is malformed — wrong state, missing
+        # requirements, etc.).
+        if exc.from_state == "RETIRED":
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "terminal_state",
+                    "from_state": exc.from_state,
+                    "to_state": exc.to_state,
+                    "reason": exc.reason,
+                },
+            ) from exc
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "invalid_transition",
+                "from_state": exc.from_state,
+                "to_state": exc.to_state,
+                "reason": exc.reason,
+            },
+        ) from exc
+    # Invalidate the strategies_performance cache so the next dashboard
+    # poll reflects the new lifecycle state on the strategy's row.
+    analytics_cache.invalidate("strategies_performance")
+    return result
+
+
+@app.get(
+    "/api/strategies/{name}/lifecycle",
+    tags=["strategies"],
+    summary="Get lifecycle history for a strategy",
+    description=(
+        "W37-2 — Returns the ordered audit trail for a strategy: "
+        "current lifecycle state + the list of every transition "
+        "that has succeeded (each row carries ``timestamp``, "
+        "``from_state``, ``to_state``, ``reason``, ``approver``, and "
+        "``metadata``). Returns 404 if the strategy has never been "
+        "registered with the lifecycle manager."
+    ),
+)
+async def get_strategy_lifecycle(name: str):
+    """Get lifecycle state + audit history for a strategy.
+
+    Returns ``{"strategy", "current_state", "history", "live_requirements"}``
+    where ``history`` is the ordered audit trail (oldest first) and
+    ``live_requirements`` is the static prerequisite dict so the
+    dashboard can render the LIVE-promotion checklist next to the
+    current state.
+    """
+    current = strategy_lifecycle.get_state(name)
+    if current is None:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "error": "unknown_strategy",
+                "strategy": name,
+                "reason": (
+                    "Strategy has not been registered with the "
+                    "lifecycle manager."
+                ),
+            },
+        )
+    return {
+        "strategy": name,
+        "current_state": current,
+        "history": strategy_lifecycle.get_history(name),
+        "live_requirements": REQUIREMENTS_FOR_LIVE,
+    }
 
 
 # ── AI Copilot & Semantic Vector Search ───────────────────────────────────────
@@ -5015,6 +5169,37 @@ async def run_monte_carlo(request: Request, params: dict | None = None):
         "probability_of_ruin": result.probability_of_ruin,
         "percentiles": result.percentiles,
     }
+
+
+# ── W37-3 — Backtest bias / leakage detector route ─────────────────────────────
+# Additive: appends ``POST /api/backtest/bias-check`` so an operator (or
+# a CI gate) can submit any backtest payload and get back a structured
+# report of every bias / leakage finding the W37-3 detector surfaces.
+#
+# The detector (``backtesting.bias_detector.BiasDetector``) runs ten
+# rule classes (``BL_01`` look-ahead / ``BL_02`` data leakage /
+# ``BL_03`` optimistic fills / ``BL_04`` future information /
+# ``BL_05`` survivorship / ``BL_06`` selection / ``BL_07`` hindsight /
+# ``BL_08`` timestamp leakage / ``BL_09`` duplicate participation /
+# ``BL_10`` capital reuse). Each finding carries a severity
+# (``critical`` / ``warning`` / ``info``) and a recommendation.
+#
+# The detector is invoked automatically by
+# :meth:`HistoricalReplayEngine.replay` after every historical-replay
+# backtest (the ``bias_report`` field on :class:`ReplayResult` carries
+# the same payload). The HTTP route lets a caller check ANY backtest
+# payload (not just historical-replay ones) — e.g. a synthetic-MC
+# result from ``/api/backtest/run`` or a custom backtest shape from an
+# external pipeline.
+#
+# Auth enforced by ``enforce_api_auth`` (path NOT in ``PUBLIC_PATHS``).
+# The detector is pure-Python + synchronous — no DB, no I/O — so no
+# rate-limit decorator is applied (the route is cheap, sub-millisecond
+# for typical backtest payloads). Same additive registration pattern as
+# ``ml.out_of_sample.register_routes`` / ``ml.validation.register_routes``.
+from backtesting.bias_detector import register_routes as _register_bias_detector_routes
+
+_register_bias_detector_routes(app)
 
 
 @app.get("/api/audit/logs", tags=["audit"])

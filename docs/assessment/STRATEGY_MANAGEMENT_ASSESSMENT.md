@@ -1,12 +1,203 @@
-# Strategy Management Assessment — W17-5
+# Strategy Management Assessment — W17-5 + W37-1 update
 
-**Assessment date:** 2026-09-04
+**Original assessment date (W17-5):** 2026-09-04
+**Update date (W37-1):** 2026-09-08
 **Scope:** §25–29 of the God Mode Master Prompt — strategy inventory,
 strategy contract, registry lifecycle, attribution chain, strategy metrics.
-**Code base:** `mini-services/polymarket-bot/strategies/` (4 files, 1,339 LOC)
+**Code base (W17-5):** `mini-services/polymarket-bot/strategies/` (4 files, 1,339 LOC)
 plus the strategy-facing surfaces in `core/attribution.py`,
 `core/decision_ledger.py`, `core/closed_positions.py`, `core/portfolio.py`,
 `backtesting/engine.py`, and `api/server.py`.
+**Code base (W37-1 update):** `mini-services/polymarket-bot/strategies/`
+(14 files now — 11 concrete strategy classes + `base.py` + `registry.py` +
+`__init__.py`) plus `core/strategy_health.py`, `core/broker.py`,
+`core/execution_interface.py`, `core/pre_submission_gate.py`,
+`core/order_state_machine.py`, and the W19-2/W19-6/W22-3/W23-5/W24-8 deltas
+to the modules above.
+
+> **Note on document structure:** Sections §1–§21 below preserve the
+> W17-5 baseline findings verbatim as historical evidence. The W37-1
+> update is consolidated into §0 (Update Summary), §22 (Maturity Score
+> — rewritten), and §23 (Critical Findings — each CF tagged with a
+> W37-1 status marker).
+
+---
+
+## 0. W37-1 Update Summary (current state)
+
+The W17-5 assessment scored the platform **4.5 / 10** with eight
+critical findings dominated by a 47-stub catalog, a missing strategy
+contract, and a half-finished attribution chain. Eight waves of work
+(W19-2 → W24-8 + W34-3) have substantially closed the largest gaps.
+**Updated maturity score: 6.8 / 10.**
+
+### 0.1 Strategy inventory — 11 IMPLEMENTED + 39 PLANNED (was 3 + 47)
+
+`strategies/registry.py::_IMPLEMENTED_STRATEGY_CLASSES` now maps **11
+catalog ids** to concrete `BaseStrategy` subclasses:
+
+| # | Strategy id | Concrete class | File | Wave |
+|---:|---|---|---|---|
+| 1 | `mm_avellaneda_stoikov` | `MarketMakerStrategy` | `strategies/market_maker.py` | Wave 1–8 |
+| 2 | `arb_binary_dutch_book` | `ArbScannerStrategy` | `strategies/arb_scanner.py` | Wave 1–8 |
+| 3 | `ml_random_forest_quant` | `SignalTraderStrategy` | `strategies/signal_trader.py` | Wave 1–8 |
+| 4 | `stat_ornstein_uhlenbeck` | `MeanReversionStrategy` | `strategies/mean_reversion.py` | W19-6 |
+| 5 | `mom_macd_histogram` | `MomentumStrategy` | `strategies/momentum.py` | W19-6 |
+| 6 | `ml_isotonic_calibrated` | `ValueStrategy` | `strategies/value.py` | W19-6 |
+| 7 | `arb_cross_correlation` | `StatisticalArbitrage` | `strategies/stat_arb.py` | W22-3 |
+| 8 | `event_news_sentiment` | `EventDriven` | `strategies/event_driven.py` | W22-3 |
+| 9 | `event_resolution_sniper` | `Convergence` | `strategies/convergence.py` | W22-3 |
+| 10 | `mm_asymmetric_spread` | `SpreadCapture` | `strategies/spread_capture.py` | W22-3 |
+| 11 | `mm_grid_liquidity` | `LiquidityProvision` | `strategies/liquidity.py` | W22-3 |
+
+**VERIFIED** at `strategies/registry.py:129-144` — the
+`_IMPLEMENTED_STRATEGY_CLASSES` dict literal maps all 11 ids. The
+remaining **39 catalog entries** are tagged
+`status=STATUS_PLANNED` (dataclass field added W19-6) and route to
+the `QuantStrategyInstance` no-op wrapper.
+
+### 0.2 Honest status reporting
+
+Every `StrategyMeta` row now carries a `status` field
+(`IMPLEMENTED` / `PLANNED` / `EXPERIMENTAL`)
+(`strategies/registry.py:47`). `GET /api/strategies/catalog` accepts
+`?implemented_only=true` and the catalog dict emits both `status`
+and a derived `implemented` boolean + an `is_disabled` flag (W24-8
+auto-disable). The W17-5 finding that the API "materially
+misrepresents capability" is **resolved** for callers that set
+`implemented_only=true`; the default (unfiltered) view still lists
+all 50 entries but tags each one honestly.
+
+### 0.3 Strategy contract — 9-method `StrategyContract` ABC present
+
+`strategies/base.py` now defines the full 9-method
+`StrategyContract` ABC (`base.py:89-153`) with `@abstractmethod`
+declarations for: `metadata`, `configure`, `validate`,
+`generate_signal`, `estimate_edge`, `size_position`, `entry_logic`,
+`exit_logic`, `diagnostics`. `BaseStrategy` inherits and provides
+default implementations (`base.py:220-333`); concrete subclasses
+override the methods they care about.
+
+**Status:** ABC present and tested; **8 of 11 concrete strategies
+still rely on the default implementations** for most contract
+methods (only `_run` + strategy-specific `evaluate()` /
+`_scan_markets()` / `_act_on_signal()` are overridden). The
+contract is therefore *available for introspection* but *not yet
+load-bearing* for the existing strategies. Closing that gap is the
+remaining §26 work.
+
+### 0.4 Strategy health monitor — present (W24-8)
+
+`core/strategy_health.py::StrategyHealthMonitor` exposes a
+four-state per-strategy lifecycle (`HEALTHY / DEGRADED / DISABLED /
+INACTIVE`) and `check_strategy(name, trades, errors)` sweeps five
+thresholds: min_win_rate (30%), min_expectancy (-$0.05),
+max_drawdown (15%), min_trades_for_eval (10), max_errors_per_hour
+(10), stale_strategy_hours (24). On breach, the monitor calls the
+sync `StrategyRegistry.disable(strategy_id, reason)` path, which
+adds the strategy to `_disabled` and cancels its task without
+awaiting. The registry's `start_strategy` short-circuits a disabled
+strategy until an explicit `enable()` clears the flag.
+`GET /api/strategies/health` and `/api/strategies/health/summary`
+expose the snapshot. **VERIFIED** at `api/server.py:2328, 2350`.
+
+This is the load-bearing primitive for §27's PAPER → LIVE → SUSPENDED
+gates — but it's an operational circuit-breaker, not the full §27
+9-state lifecycle (see §0.6 below).
+
+### 0.5 Attribution chain — partially closed
+
+| §28 link | W17-5 status | W37-1 status |
+|---|---|---|
+| `Trade → Strategy` | present (closed_positions.strategy) | unchanged |
+| `Strategy → Strategy Version` | **MISSING** | **STILL MISSING** — `rg "strategy_version"` against `strategies/, core/` returns matches only in `backtesting/experiment_store.py` (backtest experiment_version, not the live strategy code version) and `core/db/migrations/002_unified_schema.sql` (column defined but not populated by any production writer) |
+| `Strategy → Signal → Prediction` (signal_trader) | present | unchanged |
+| `Strategy → Signal → Prediction` (market_maker, arb_scanner) | **MISSING** | **STILL MISSING** — only `signal_trader` emits `STAGE_PREDICTION` / `STAGE_SIGNAL` |
+| `Prediction → Model Version` | present (`decision_ledger.py:272-273`) | unchanged |
+| `Trade → Feature Snapshot` | MISSING (orphaned table) | **STILL MISSING** — `feature_snapshot_id` referenced only in `core/timescale_db.py` and the migration; no production writer populates it |
+| `Trade → Market Snapshot` | MISSING (orphaned table) | **STILL MISSING** — same; `market_snapshot_id` column exists but no closed-position row populates it |
+
+The decision-ledger chain `PREDICTION → SIGNAL →
+RISK_APPROVED/RISK_REJECTED → ORDER → FILL` is intact for
+`signal_trader`; `BaseStrategy.submit_order` records `GATE_REJECTED`
+(W24-3) and `RISK_APPROVED` / `RISK_REJECTED` for every strategy
+(`base.py:622-711`). The §28 "last two links" (Feature Snapshot,
+Market Snapshot) are the most consequential remaining gap.
+
+### 0.6 Lifecycle state machine — partial (PAPER → LIVE + DISABLED only)
+
+§27 specifies a 9-state machine (RESEARCH → EXPERIMENTAL →
+BACKTESTED → VALIDATED → PAPER → LIVE_CANDIDATE → LIVE → SUSPENDED
+→ RETIRED). What exists in W37-1:
+
+- `STATUS_IMPLEMENTED` / `STATUS_PLANNED` / `STATUS_EXPERIMENTAL`
+  on `StrategyMeta` — coarse, not a state machine.
+- `StrategyHealthStatus` four-state enum
+  (`HEALTHY / DEGRADED / DISABLED / INACTIVE`) in
+  `core/strategy_health.py` — runtime health, not a deployment
+  lifecycle.
+- `core/live_safety_gate.py` PAPER → LIVE gate (24h paper + positive
+  expectancy + MDD < $2) — one lifecycle transition.
+- `risk_manager._strategy_cooldowns` — runtime circuit-breaker.
+- `StrategyRegistry.disable() / enable() / is_disabled()` (W24-8) —
+  SUSPENDED-equivalent operator/monitor path.
+
+**MISSING lifecycle states:** RESEARCH, EXPERIMENTAL (as a state, not
+a status enum value), BACKTESTED, VALIDATED, LIVE_CANDIDATE, RETIRED.
+There is no transition graph, no per-state gating (e.g. "a
+BACKTESTED strategy may not paper-trade until VALIDATED"), and no
+durable record of state transitions on disk.
+
+### 0.7 Metrics — §29 surface now substantially covered
+
+`core/portfolio.py` (W23-5) added the missing per-strategy
+risk-adjusted metrics. The per-strategy roll-up now returns:
+
+- Live Sharpe, Sortino, Calmar (annualised to 252 trading periods)
+  via `_sharpe_ratio`, `_sortino_ratio`, `_calmar_ratio`
+  (`portfolio.py:281-324`).
+- Expectancy (`win_rate * avg_win − (1 − win_rate) * |avg_loss|`)
+  in `strategy_stats` return dict.
+- Win rate, profit_factor, max_drawdown, avg_win, avg_loss
+  (unchanged from W17-5).
+- Turnover is still NOT a computed field on `strategy_stats`
+  (gross buy/sell turnover check lives in `portfolio.py:131`
+  as a *data quality* finding, not a per-strategy metric).
+- Capital efficiency — `profit_per_dollar_exposed` +
+  `profit_per_exposure_day` (unchanged).
+
+The W17-5 finding "no live Sharpe / Sortino / expectancy" is
+**resolved**. The remaining §29 gaps are turnover (per-strategy)
+and slippage joining (still tracked in `core/execution_quality.py`
+but not rolled into `strategy_stats`).
+
+### 0.8 Other deltas since W17-5
+
+- **Pre-submission risk gate (W24-3).**
+  `core/pre_submission_gate.py` runs 14 checks (kill switch /
+  balance / exposure / single-position / open-orders / daily-loss /
+  drawdown / data freshness / spread / liquidity / edge / confidence /
+  idempotency / circuit breaker) BEFORE `risk_manager.check_order`.
+  Rejections are recorded to `core/rejected_opportunities` and the
+  decision ledger as `GATE_REJECTED`.
+- **Order State Machine (W18-1).**
+  `core/order_state_machine.py` persists CREATED → VALIDATED →
+  SUBMITTED → ACKNOWLEDGED → OPEN → FILLED / CANCELLED / REJECTED
+  in SQLite. `BaseStrategy.submit_order` pre-mints the OSM id and
+  stamps every transition with `metadata.exchange_order_id` for
+  live orders so audit trail and in-memory `Order` share identity.
+- **Per-market pause / close (W34-3).**
+  `StrategyRegistry.pause_for_market(token_id)`,
+  `close_positions_for_market(token_id)`, `reset_market_state()`,
+  `is_market_paused()`, `is_market_closed()` — called by the
+  `MarketEventIngester` on MARKET_SUSPENDED / MARKET_RESOLVED events.
+- **Dedup registry (W24-6).**
+  `core/dedup.py` blocks duplicate orders within a 60s TTL by
+  `token_id:side:size:price`.
+- **Latency tracker (W23-2).**
+  `core/latency_tracker.py` records `signal_time → order_time →
+  fill_time` per `decision_id` so signal→order→fill pipeline
+  latency is measurable.
 
 ---
 
@@ -1327,199 +1518,254 @@ Emitted via `core.observability.record_metric(category, name, value)`:
 
 ## 22. Maturity Score
 
-**Score: 4.5 / 10**
+### W17-5 baseline score: 4.5 / 10
+### W37-1 updated score: **6.8 / 10**
 
-### Scoring breakdown
-| Dimension | Score | Rationale |
-|---|---:|---|
-| Strategy inventory completeness (§25) | 3 / 10 | 3 of 50 advertised strategies implemented; catalog materially misrepresents capability |
-| Strategy contract uniformity (§26) | 1 / 10 | §26 contract entirely absent; each strategy inlines its own logic |
-| Registry metadata + lifecycle (§27) | 2 / 10 | 5 of 15 §27 fields present; 0 of 9 lifecycle states implemented |
-| Attribution chain completeness (§28) | 5 / 10 | decision_id → model_version → closed_positions chain works for signal_trader; missing strategy_version, feature_snapshot_id, market_snapshot_id; broken for market_maker/arb_scanner |
-| Strategy metrics coverage (§29) | 6 / 10 | Live: win_rate, profit_factor, max_drawdown, capital efficiency (partial), avg holding, slippage (separate). Missing: live Sharpe, Sortino, expectancy, turnover. Backtest: full Sharpe/Sortino/Calmar/VaR/Brier |
-| Strategy code quality (3 real strategies) | 8 / 10 | Well-engineered, tested, in-source documentation of past bugs and fixes |
-| Decision-ledger + attribution plumbing | 8 / 10 | Sound architecture, W11-9 optimization, tested |
-| Live safety / production hardening | 7 / 10 | Real PAPER → LIVE gate, positive expectancy check, MDD check |
-| Test coverage | 7 / 10 | 2,067 LOC of strategy tests + 729 LOC attribution tests; gaps for stubs, lifecycle, version |
-| Observability | 6 / 10 | Per-strategy metrics emitted, 7-dim attribution endpoint, no per-strategy Prometheus P&L gauge (unverified) |
+### Scoring breakdown (W37-1)
+| Dimension | W17-5 | W37-1 | Rationale for change |
+|---|---:|---:|---|
+| Strategy inventory completeness (§25) | 3 / 10 | **7 / 10** | 11 of 50 advertised strategies implemented (up from 3); catalog still lists 50 but every row is honestly tagged `IMPLEMENTED` / `PLANNED`. The 39 PLANNED entries remain marketing-only, but the API no longer misrepresents them. |
+| Strategy contract uniformity (§26) | 1 / 10 | **5 / 10** | 9-method `StrategyContract` ABC present (`base.py:89-153`) with `BaseStrategy` defaults. But 8 of 11 concrete strategies rely on defaults — contract is available for introspection, not yet load-bearing. |
+| Registry metadata + lifecycle (§27) | 2 / 10 | **4 / 10** | `status` field added (W19-6); `StrategyHealthStatus` 4-state runtime health (W24-8); `disable()` / `enable()` SUSPENDED-equivalent. Still missing: §27's RESEARCH / EXPERIMENTAL / BACKTESTED / VALIDATED / LIVE_CANDIDATE / RETIRED states, transition graph, per-state gating. |
+| Attribution chain completeness (§28) | 5 / 10 | **5 / 10** | No change to the §28 gaps: `strategy_version` not populated; `feature_snapshot_id` / `market_snapshot_id` not linked; MM and arb still skip PREDICTION / SIGNAL stages. The decision-ledger chain is still sound for signal_trader. |
+| Strategy metrics coverage (§29) | 6 / 10 | **8 / 10** | Live Sharpe / Sortino / Calmar / expectancy now computed (`portfolio.py:281-324`, W23-5). Remaining gaps: per-strategy turnover; slippage joined to `execution_quality` but not rolled into `strategy_stats`. |
+| Strategy code quality (3 → 11 real strategies) | 8 / 10 | **7 / 10** | 3 original strategies still well-engineered; 8 newer strategies are competent but slimmer (no diagnostics override, no validation, mostly reuse `BaseStrategy.submit_order`). Test footprint covers the originals; the W19-6 / W22-3 additions have lighter test coverage. |
+| Decision-ledger + attribution plumbing | 8 / 10 | **8 / 10** | Unchanged. W11-9 single-SELECT optimization retained. W24-3 `GATE_REJECTED` stage added; W18-1 OSM audit trail added. |
+| Live safety / production hardening | 7 / 10 | **9 / 10** | PAPER → LIVE gate retained. W24-8 strategy health monitor auto-disables failing strategies. W24-3 pre-submission 14-check gate. W18-1 OSM. W24-6 dedup registry. W23-2 latency tracker. W34-3 per-market pause / close. |
+| Test coverage | 7 / 10 | **7 / 10** | Strategy tests retained. Newer strategies (`mean_reversion`, `momentum`, `value`, `stat_arb`, `event_driven`, `convergence`, `spread_capture`, `liquidity`) have basic test coverage; full §26 contract surface not asserted per-strategy. |
+| Observability | 6 / 10 | **7 / 10** | Per-strategy metrics + 7-dim attribution + W24-8 health endpoint + W23-2 latency tracker. Still no per-strategy Prometheus P&L gauge (unverified) and no structured strategy event log. |
 
-**Weighted average ≈ 4.5 / 10.**
+**Weighted average ≈ 6.8 / 10.**
 
-The platform is **production-usable for the 3 real strategies** but
-**materially misrepresents its capability** through the 47-stub
-catalog. The §26–28 gaps (no contract, no version, no snapshot FKs)
-are the highest-leverage improvements.
+### What changed since W17-5
+- The single largest credibility risk — "50-strategy catalog with 47
+  fake stubs" — is **substantially closed** (11 implemented + 39
+  honestly-tagged PLANNED).
+- The §26 contract gap is **structurally closed** (ABC present) but
+  **functionally still open** (concrete strategies don't override the
+  contract methods).
+- The §27 lifecycle gap is **partially closed** (status field, health
+  monitor, PAPER→LIVE gate, disable/enable), but the 9-state machine
+  is not implemented.
+- The §28 attribution chain is **unchanged** at the gap row —
+  strategy_version + feature/market snapshot FKs are the highest-
+  leverage remaining work.
+- The §29 metrics surface is **substantially closed** (Sharpe, Sortino,
+  Calmar, expectancy now live). Turnover + slippage join remain.
+- Production hardening has progressed substantially (pre-submission
+  gate, OSM, dedup, latency tracker, per-market pause, health
+  monitor + auto-disable).
 
 ---
 
 ## 23. Critical Findings
 
+> **W37-1 status markers:** Each CF below is tagged with one of
+> `RESOLVED`, `PARTIALLY RESOLVED`, or `STILL OPEN` to indicate the
+> current state.
+
 ### CF1 — 47 of 50 advertised strategies are non-functional stubs
-**Severity:** Critical (credibility / operational risk).
-**Evidence:** `strategies/registry.py:117-119` —
-`QuantStrategyInstance._execute_cycle()` is `pass`. `get_catalog()`
-returns `implemented=True` for only 3 ids (`registry.py:134`).
-**Impact:** An operator calling `POST /api/strategy/toggle` with
-`"ml_qlearning_execution"` will receive `{"status": "started",
-"strategy": "ml_qlearning_execution"}` and the strategy will appear
-in `GET /api/strategy/catalog` with `is_running: true`. The
-strategy will never produce a trade. If the operator doesn't notice
-the missing `implemented: false` flag, they may believe they have a
-Q-learning execution agent running.
-**Recommendation:** Delete the 47 stub entries from
-`STRATEGY_CATALOG`, OR filter `get_catalog()` to only return
-`implemented=True` entries, OR raise a 400 error from
-`toggle_strategy` when the requested id is not in the
-`implemented` set.
+**W37-1 status:** **PARTIALLY RESOLVED.** Catalog now lists **11
+IMPLEMENTED** + **39 PLANNED** (was 3 + 47). Every row carries a
+`status` field; `GET /api/strategies/catalog?implemented_only=true`
+filters to the 11 real strategies; the catalog dict emits an
+`is_disabled` flag for the W24-8 auto-disable path. The 39 PLANNED
+entries are still listed in the unfiltered view, but they're
+honestly tagged — no strategy is mis-presented as running when it
+isn't.
+**Severity:** ~~Critical~~ → Low (residual: the unfiltered catalog
+still surfaces PLANNED names that could confuse an operator who
+doesn't read the `status` field).
+**Evidence:** `strategies/registry.py:129-144`
+(`_IMPLEMENTED_STRATEGY_CLASSES` dict, 11 entries) +
+`strategies/registry.py:47` (`status` field on `StrategyMeta`) +
+`strategies/registry.py:222-254` (`get_catalog(implemented_only=...)`
+honors the filter and surfaces `is_disabled`).
 
 ### CF2 — No `strategy_version` field; the §28 attribution chain is broken at "Strategy → Strategy Version"
-**Severity:** High (post-hoc analysis impossible).
-**Evidence:** `rg "strategy_version|strat_version"` against all
-`*.py` files in `mini-services/polymarket-bot/` returns no matches.
-`closed_positions.py:23-37` schema has `model_version` (the ML model
-version) but no `strategy_version` (the strategy code version).
-**Impact:** If `signal_trader`'s Kelly fraction is changed from 0.25
-to 0.20, every closed trade before and after the change is tagged
-with `strategy="signal_trader"` and the same `model_version`. There
-is no way to distinguish pre-change trades from post-change trades,
-so A/B analysis of the parameter change is impossible.
+**W37-1 status:** **STILL OPEN.** `rg "strategy_version"` returns
+matches only in `backtesting/experiment_store.py` (which stores a
+*backtest experiment's* strategy_version string at experiment-write
+time) and `core/db/migrations/002_unified_schema.sql` (where the
+column is defined on the `experiments` table — also for the
+backtest experiment store, not for closed positions). No
+production writer populates `strategy_version` on `closed_positions`
+or `decision_events`.
+**Severity:** High (post-hoc A/B analysis still impossible).
 **Recommendation:** Add a `VERSION` class attribute to
-`BaseStrategy` (e.g., `VERSION = "1.0.0"`), override in each
-subclass, and persist it on every `closed_positions` row and every
-`decision_events` row at PREDICTION/SIGNAL time.
+`BaseStrategy`; override per concrete subclass; persist at every
+`closed_positions.record` + `decision_ledger.record` call.
 
 ### CF3 — `market_maker` and `arb_scanner` do not emit PREDICTION / SIGNAL stages
-**Severity:** Medium-High (§28 chain broken for 2 of 3 strategies).
-**Evidence:** `rg "STAGE_PREDICTION|STAGE_SIGNAL"` against
-`strategies/` returned matches only in `signal_trader.py`.
-`market_maker.submit_order` and `arb_scanner.submit_order` (both
-inherited from `BaseStrategy`) record `RISK_APPROVED` / `FILL` but
-no upstream `PREDICTION` / `SIGNAL`.
-**Impact:** A market-maker fill's decision chain starts at
-`RISK_APPROVED`, not at `PREDICTION`. The §28 chain
-(`Signal → Prediction`) has a hole for 2 of 3 strategies.
-**Recommendation:** Either (a) emit `PREDICTION` / `SIGNAL` stages
-from MM and arb (with appropriate edge/confidence semantics — for
-MM, the reservation-price skew could be the "signal"; for arb, the
-profit-per-share is the "edge"), or (b) document that those
-strategies intentionally skip these stages and adjust the §28
-contract accordingly.
+**W37-1 status:** **STILL OPEN.** Grep for `STAGE_PREDICTION` /
+`STAGE_SIGNAL` callers across `strategies/` confirms only
+`signal_trader.py` emits them. None of the 8 newer concrete
+strategies (`mean_reversion`, `momentum`, `value`, `stat_arb`,
+`event_driven`, `convergence`, `spread_capture`, `liquidity`)
+emit them either.
+**Severity:** Medium-High (§28 chain broken for 10 of 11
+strategies).
+**Recommendation:** Have each strategy emit at least a SIGNAL
+stage with `confidence` + `predicted_edge` fields; the
+PREDICTION stage can be omitted for strategies with no ML model
+behind them (or recorded with `model_version="none"`).
 
 ### CF4 — `feature_snapshot` and `market_snapshots` tables exist but are orphaned
-**Severity:** Medium (the schema is ready, the wiring is missing).
-**Evidence:** Both tables are defined in migrations
-(`001_initial_enterprise_schemas.sql:256`, `001_initial_schema.sql:247`)
-and `core/market_db.py` writes to `market_snapshots`. But
-`closed_positions` has no `feature_snapshot_id` /
-`market_snapshot_id` FK, and `decision_events.data_json` does not
-reference snapshot ids.
-**Impact:** The §28 chain's last two links (`Feature Snapshot`,
-`Market Snapshot`) cannot be reconstructed for any trade. Even
-though the snapshot data may exist on disk, there's no foreign-key
-path from a trade back to its snapshot.
-**Recommendation:** Add `feature_snapshot_id` and
-`market_snapshot_id` columns to `closed_positions`. Have
-`signal_trader._ml_signal` capture the snapshot ids at signal time
-and propagate them through `submit_order` → `paper_sim` →
+**W37-1 status:** **STILL OPEN.** `feature_snapshot_id` is
+referenced in `core/timescale_db.py` and
+`core/db/migrations/001_initial_enterprise_schemas.sql` (schema
+defined) but no production code writes the column on
+`closed_positions` rows. `market_snapshot_id` likewise.
+**Severity:** Medium (schema ready, wiring missing).
+**Recommendation:** Wire `signal_trader._ml_signal` to capture
+both snapshot ids at signal time and propagate them through
+`submit_order` → `paper_sim._execute_fill` →
 `closed_positions.record`.
 
 ### CF5 — No unified strategy contract (§26)
-**Severity:** Medium (architectural debt; future strategies will
-reimplement the same logic with no shared signature).
-**Evidence:** `strategies/base.py:19-148` exposes only `start/stop/
-_run/submit_order/cancel_order`. None of the §26 methods
-(`metadata/configure/validate/generate_signal/estimate_edge/
-size_position/entry_logic/exit_logic/diagnostics`) exist.
-**Impact:** Every new strategy reimplements sizing, entry, exit,
-diagnostics from scratch. There's no generic strategy visualizer,
-no generic A/B comparator, no generic backtest runner that replays
-the live code path.
-**Recommendation:** Define an abstract `StrategyContract` ABC with
-the 9 §26 methods. Refactor the 3 real strategies to implement it.
-Add a test that asserts every concrete strategy class implements
-all 9 methods.
+**W37-1 status:** **PARTIALLY RESOLVED.** The 9-method
+`StrategyContract` ABC is present at `strategies/base.py:89-153`
+with `@abstractmethod` declarations for `metadata`, `configure`,
+`validate`, `generate_signal`, `estimate_edge`, `size_position`,
+`entry_logic`, `exit_logic`, `diagnostics`. `BaseStrategy`
+inherits and provides default implementations (`base.py:220-333`).
+**However**, only the abstract surface is closed — the 8 newer
+concrete strategies still rely on the defaults for most contract
+methods (they override `_run` + strategy-specific `evaluate` /
+`_scan_markets` / `_act_on_signal` instead). The contract is
+introspectable but not yet load-bearing.
+**Severity:** ~~Medium~~ → Low-Medium (residual: subclasses
+haven't refactored to use the contract).
+**Recommendation:** Refactor each concrete strategy to override
+the contract methods it cares about; add a test that asserts
+every IMPLEMENTED strategy class implements all 9 contract
+methods (override-or-inherit).
 
 ### CF6 — Live Sharpe / Sortino / expectancy / turnover not computed
-**Severity:** Medium (operators lack standard risk-adjusted
-performance metrics for live trading).
-**Evidence:** `core/portfolio.py:159-212` returns 14 fields, none
-of which are Sharpe / Sortino / expectancy / turnover. The math
-for all four exists in `backtesting/engine.py` but is not reused
-in live `strategy_stats`.
-**Impact:** The `/api/leaderboard` endpoint ranks strategies by a
-custom `risk_adjusted_score` (net P&L − penalties) that is not
-comparable to industry-standard Sharpe / Sortino. An operator
-familiar with Sharpe-based ranking cannot use the leaderboard
-directly.
-**Recommendation:** Extract the Sharpe / Sortino / expectancy /
-turnover math from `backtesting/engine.py` into a shared
-`core/performance_metrics.py` module, and call it from both
-`strategy_stats` (live) and `BacktestResult` (backtest).
+**W37-1 status:** **PARTIALLY RESOLVED.** Live Sharpe, Sortino,
+Calmar, and expectancy are now computed in
+`core/portfolio.py:281-324` (W23-5) and surfaced through
+`strategy_stats` + `strategy_performance`. Turnover is still not
+a per-strategy computed field (the only turnover-related code is
+a data-quality heuristic at `portfolio.py:131` that flags
+implausible gross buy/sell totals — not a per-strategy
+notional/capital metric). Slippage is still tracked in
+`core/execution_quality.py` but not joined into the per-strategy
+leaderboard.
+**Severity:** ~~Medium~~ → Low (residual: turnover + slippage
+join).
+**Recommendation:** Add `turnover = notional_volume /
+avg_capital_deployed` to `strategy_stats`; join
+`execution_quality.avg_slippage_bps` per strategy.
 
 ### CF7 — Backtest dispatch by substring, not by strategy class
-**Severity:** Medium (backtest results for the 47 stub strategies
-are misleading).
-**Evidence:** `backtesting/engine.py:131-149` —
-`if "mm" in strategy_id: ... elif "arb" in strategy_id: ...
-elif "mom" in strategy_id: ... elif "ml" in strategy_id: ...`.
-**Impact:** A backtest of `ml_qlearning_execution` returns a
-plausible-looking Sharpe / Sortino / MDD that has no relationship
-to any real implementation.
+**W37-1 status:** **STILL OPEN** for the legacy
+`BacktestEngine.run_backtest` (the synthetic archetype simulator
+at `backtesting/engine.py:131-149` still uses substring
+dispatch). **PARTIALLY RESOLVED** for the historical-replay
+engine — `backtesting/historical_replay.py` accepts a
+duck-typed strategy object that exposes `generate_signal(context)
+-> dict | None`, so a real `BaseStrategy` subclass can be passed
+in (the contract method exists). The legacy
+`/api/backtest/run` route still hits the synthetic engine; the
+`/api/backtest/historical-replay` route (W20-3) hits the replay
+engine with a `SimpleStrategy` default.
+**Severity:** ~~Medium~~ → Low-Medium (only matters for callers
+of the legacy `/api/backtest/run` route backtesting PLANNED
+strategies).
 **Recommendation:** Replace the substring dispatch with a
-`strategy_registry.get_strategy_class(strategy_id)` lookup that
-returns `None` for stubs. Refuse to backtest unimplemented
-strategies with a 400 error.
+`_IMPLEMENTED_STRATEGY_CLASSES` lookup; refuse to backtest
+PLANNED ids with a 400.
 
 ### CF8 — No strategy-liveness watchdog
-**Severity:** Medium (a crashed strategy is not restarted).
-**Evidence:** `strategies/base.py:36-39` — `start()` creates an
-`asyncio.create_task` with no supervision. The `watchdog.beat(
-"strategy_registry")` at `api/server.py:423` only confirms
-registry initialization, not per-strategy task liveness.
-**Impact:** If `signal_trader._run()` raises an unhandled
-exception (e.g., `ml_model.predict` raises a TypeError on a
-malformed feature vector), the task dies silently. The strategy
-appears "running" in `get_active_instances()` (because the
-`_instances` dict still has the entry) but is not actually
-executing its loop.
-**Recommendation:** Add a strategy-liveness watchdog that checks
-each strategy task's `done()` state every N seconds and either
-restarts the strategy or alerts the operator.
+**W37-1 status:** **PARTIALLY RESOLVED.** The W24-8
+`core/strategy_health.py::StrategyHealthMonitor` checks every
+strategy's win rate / expectancy / max drawdown / error rate /
+last-trade-time every 5 minutes (caller-scheduled via
+`asyncio.to_thread`) and auto-disables failing strategies via
+`StrategyRegistry.disable()` (sync). The watchdog does NOT,
+however, restart a crashed strategy task — it only flags it
+DEGRADED / DISABLED. A crashed `_run` loop is still a silent
+failure (the task's `done()` state isn't checked by the
+existing monitor).
+**Severity:** ~~Medium~~ → Low-Medium.
+**Recommendation:** Add a per-task `done()` poll to the
+`StrategyHealthMonitor` sweep that either restarts the task
+or surfaces a `STRATEGY_TASK_DEAD` alert.
 
 ### CF9 — Top-3 signals/cycle cap silently drops signals
-**Severity:** Low-Medium (high-conviction signals can be lost).
-**Evidence:** `signal_trader.py:163` (`for sig in signals[:3]`);
-`arb_scanner.py:131` (`for opp in opportunities[:3]`).
-**Impact:** If 10 high-conviction signals arrive in the same 15 s
-scan, 7 are dropped with no `record_rejection` and no observability
-metric. Under sustained high-signal regimes, the strategy
-systematically under-trades.
-**Recommendation:** Either (a) raise the cap to a configurable
-`MAX_SIGNALS_PER_CYCLE` setting, or (b) record a
-`signal_trader.dropped` metric and a `record_rejection(...,
-reason="cycle_cap")` for the dropped signals so the drop is
-auditable.
+**W37-1 status:** **STILL OPEN.** `signal_trader.py:163`
+(`for sig in signals[:3]`) and the 8 newer strategies'
+`MAX_SIGNALS_PER_SCAN = 3` constants still hard-code the cap.
+No `record_rejection` is emitted for the dropped signals.
+**Severity:** Low-Medium.
+**Recommendation:** Either (a) make the cap configurable via
+`settings.MAX_SIGNALS_PER_CYCLE`, or (b) emit a
+`record_rejection(..., reason="cycle_cap")` for the dropped
+signals so the drop is auditable.
 
 ### CF10 — `closed_positions` attribution columns populated only for `signal_trader` trades
-**Severity:** Medium (attribution dimensions are biased).
-**Evidence:** `BaseStrategy.submit_order` does not accept
-`confidence` / `predicted_edge` / `p_yes` / `market_mid` /
-`liquidity` kwargs. Only `signal_trader._ml_signal` →
-`MarketSignal.decision_id` propagates these through to the
-`SIGNAL` ledger stage, and `paper/simulator._execute_fill` is the
-single point that writes to `closed_positions` (it would need to
-join back to the SIGNAL stage's `data_json` to recover these
-fields for MM/arb trades).
-**Impact:** The `by_confidence_bucket`, `by_edge_bucket`,
-`by_probability_band`, `by_liquidity_level` attribution dimensions
-have inflated `unknown` buckets because MM and arb trades have
-NULL `confidence` / `predicted_edge` / `p_yes` / `liquidity` in
+**W37-1 status:** **STILL OPEN.** `BaseStrategy.submit_order`
+still does not accept `confidence` / `predicted_edge` / `p_yes`
+/ `market_mid` / `liquidity` kwargs. The 8 newer strategies
+follow the same pattern — they call `submit_order(args,
+decision_id=sig.decision_id)` with no attribution metadata
+attached. `by_confidence_bucket` / `by_edge_bucket` /
+`by_probability_band` / `by_liquidity_level` attribution
+dimensions are therefore still NULL-inflated for 10 of 11
+strategies.
+**Severity:** Medium (attribution dimensions biased).
+**Recommendation:** Extend `submit_order`'s signature to accept
+`attribution: dict | None = None` and have
+`paper/simulator._execute_fill` persist those fields into
 `closed_positions`.
-**Recommendation:** Either (a) extend `submit_order` to accept
-these kwargs and persist them, or (b) have
-`paper/simulator._execute_fill` join the SIGNAL stage's
-`data_json` to recover them at fill time.
+
+### CF11 (NEW in W37-1) — Strategy contract methods not load-bearing
+**Severity:** Medium.
+**Evidence:** 8 of 11 concrete strategies
+(`mean_reversion`, `momentum`, `value`, `stat_arb`,
+`event_driven`, `convergence`, `spread_capture`, `liquidity`)
+inherit the default `BaseStrategy` implementations of
+`metadata()`, `configure()`, `validate()`,
+`generate_signal()`, `estimate_edge()`, `size_position()`,
+`entry_logic()`, `exit_logic()`, `diagnostics()` — they don't
+override the contract methods. Each strategy instead implements
+its own `evaluate(book, prices_or_features)` /
+`_scan_markets()` / `_act_on_signal()` pattern that bypasses
+the contract entirely. The contract is therefore introspectable
+but not actually used by the strategies themselves.
+**Impact:** A future generic strategy visualizer / A/B
+comparator / backtest runner that consumes the contract
+methods will see neutral defaults for the 8 newer strategies,
+not their real signal-generation logic.
+**Recommendation:** Refactor each concrete strategy's
+`evaluate` / `_act_on_signal` to flow through the contract
+methods (`generate_signal` produces a `Signal`; `estimate_edge`
+reads `signal.edge`; `size_position` reads the strategy's
+sizing rule; `diagnostics` returns the per-strategy stats).
+
+### CF12 (NEW in W37-1) — No §27 lifecycle state machine
+**Severity:** Medium.
+**Evidence:** §27 specifies a 9-state machine
+(RESEARCH → EXPERIMENTAL → BACKTESTED → VALIDATED → PAPER →
+LIVE_CANDIDATE → LIVE → SUSPENDED → RETIRED). What exists in
+W37-1 is a `STATUS_IMPLEMENTED/PLANNED/EXPERIMENTAL` flag on
+`StrategyMeta` (a tag, not a state) plus the W24-8 health
+monitor's `HEALTHY/DEGRADED/DISABLED/INACTIVE` enum (runtime
+health, not deployment lifecycle). There is no transition graph,
+no per-state gating (e.g. "a BACKTESTED strategy may not
+paper-trade until VALIDATED"), and no durable record of state
+transitions.
+**Impact:** An operator can't see, for any given strategy,
+whether it has been validated, paper-tested, or is
+LIVE_CANDIDATE-pending. The state lives in the operator's
+head, not on disk.
+**Recommendation:** Add a `lifecycle_state` field to
+`StrategyMeta`; persist state transitions to a
+`strategy_lifecycle_events` table; gate `start_strategy` on
+the current state (e.g. LIVE_CANDIDATE → LIVE only after the
+safety gate passes).
 
 ---
 
-**End of Strategy Management Assessment — W17-5.**
+**End of Strategy Management Assessment — W17-5 + W37-1 update.**

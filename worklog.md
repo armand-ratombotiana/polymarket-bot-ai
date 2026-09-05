@@ -30462,3 +30462,395 @@ crashing. The error-boundary check returns `OK` for all 32.
    versions of the four panel screenshots.
 
 ### Verification result: ✅ PASS — all 32 panels render without error boundaries; all 4 key interactions work
+
+---
+
+## W37-1 — Update Strategy Management + Backtest Engine assessments; create roadmap
+- **Date:** 2025-09-08
+- **Scope:** Refreshed the two God Mode assessment documents
+  (`docs/assessment/STRATEGY_MANAGEMENT_ASSESSMENT.md` from W17-5,
+  `docs/assessment/BACKTEST_ENGINE_ASSESSMENT.md` from W17-6) with
+  the current codebase evidence, and created a single wave-by-wave
+  roadmap at `docs/improvements/STRATEGY_BACKTEST_ROADMAP.md`.
+
+### Pre-flight
+
+1. Read both existing assessments (1,526 LOC + 1,095 LOC) —
+   both preserved verbatim as historical evidence.
+2. Read the 14 files in `mini-services/polymarket-bot/strategies/`
+   (11 concrete strategy classes + `base.py` + `registry.py` +
+   `__init__.py`).
+3. Read the 6 files in
+   `mini-services/polymarket-bot/backtesting/` (`engine.py`,
+   `historical_replay.py`, `advanced.py`, `report.py`,
+   `experiment_store.py`, `__init__.py`).
+4. Read `mini-services/polymarket-bot/core/broker.py`,
+   `core/strategy_health.py`, `core/execution_interface.py`,
+   `core/portfolio.py`, `core/attribution.py` for cross-reference.
+5. Grep'd the API surface for backtest + strategy routes —
+   confirmed 9 backtest endpoints + 4 strategies endpoints are
+   landed.
+
+### Changes
+
+#### `docs/assessment/STRATEGY_MANAGEMENT_ASSESSMENT.md` — updated
+
+- Renamed header from `W17-5` to `W17-5 + W37-1 update`.
+- Added §0 (Update Summary) with 8 subsections covering the
+  current state:
+  - §0.1 Strategy inventory — 11 IMPLEMENTED + 39 PLANNED
+    (was 3 + 47), with a full table mapping every catalog id
+    to its concrete class + file + wave.
+  - §0.2 Honest status reporting — `status` field on
+    `StrategyMeta` + `?implemented_only=true` filter.
+  - §0.3 9-method `StrategyContract` ABC present
+    (`base.py:89-153`); 8 of 11 concrete strategies still
+    rely on defaults.
+  - §0.4 Strategy health monitor (W24-8) — 4-state enum +
+    5 thresholds + auto-disable.
+  - §0.5 Attribution chain — partially closed (table with §28
+    link-by-link W17-5 vs W37-1 status).
+  - §0.6 Lifecycle state machine — partial (PAPER → LIVE +
+    DISABLED only); 6 of 9 §27 states still missing.
+  - §0.7 Metrics — §29 surface substantially covered (live
+    Sharpe/Sortino/Calmar/expectancy via `portfolio.py:281-324`).
+  - §0.8 Other deltas (pre-submission gate, OSM, dedup,
+    latency tracker, per-market pause).
+- Rewrote §22 (Maturity Score) with a W17-5 vs W37-1 comparison
+  table per dimension. Score: **4.5 / 10 → 6.8 / 10**.
+- Rewrote §23 (Critical Findings) with W37-1 status markers
+  on each of CF1-CF10 (PARTIALLY RESOLVED / STILL OPEN /
+  RESOLVED). Added CF11 (contract methods not load-bearing)
+  and CF12 (no §27 lifecycle state machine).
+
+#### `docs/assessment/BACKTEST_ENGINE_ASSESSMENT.md` — updated
+
+- Renamed header from `W17-6` to `W17-6 + W37-1 update`.
+- Added §0 (Update Summary) with 8 subsections covering the
+  current state:
+  - §0.1 Historical replay engine — present (W20-3) at
+    `backtesting/historical_replay.py:148-423`.
+  - §0.2 Walk-forward analysis — wired to API (W20-3) at
+    `api/server.py:4786`.
+  - §0.3 Monte Carlo simulation — wired to API (W20-3) at
+    `api/server.py:4935`.
+  - §0.4 Experiment persistence — present (W20-3) — full
+    `experiments` schema + 3 API routes.
+  - §0.5 Backtest/Live parity — partial (W19-7) — `Broker` ABC
+    present but not load-bearing.
+  - §0.6 Bias/leakage detection — partial — table with LE_01..LE_07
+    W17-6 vs W37-1 status (LE_04 dead, LE_07 still missing,
+    historical_replay has no detector).
+  - §0.7 PDF report — present and augmented (W16-4 / W20-3).
+  - §0.8 Other deltas (honest performance report, execution
+    interface helper, Wave-5 split fix, compare endpoint).
+- Rewrote §22 (Maturity Score) with W17-6 vs W37-1 comparison
+  table per dimension. Score: **3.5 / 10 → 6.7 / 10**.
+- Rewrote §23 (Critical Findings) with W37-1 status markers on
+  each of CF1-CF8 (RESOLVED / PARTIALLY RESOLVED / STILL OPEN).
+  Added CF9 (historical-replay engine has no look-ahead
+  detection), CF10 (Broker ABC not load-bearing), CF11 (B1-B8
+  bugs unfixed).
+- Rewrote the "Recommended Next Actions" list to drop the four
+  DONE items (historical replay, Broker ABC, walk-forward / MC
+  routes, experiments table) and add the 6 new priorities (LE_07
+  port, Broker migration, B1/B3/B8 fixes, substring dispatch
+  replacement, parameter sweep, observability).
+
+#### `docs/improvements/STRATEGY_BACKTEST_ROADMAP.md` — **new**
+
+Created a wave-by-wave roadmap consolidating the strategy +
+backtest work across Waves 1–36. Each wave entry lists:
+1. **Status** — DONE / PARTIALLY DONE / TODO / IN PROGRESS.
+2. **Goal** — what the wave set out to deliver.
+3. **Delivered** — concrete file:line evidence.
+4. **Residual** — what the wave did NOT close, with cross-
+   references back to the assessment CF numbers.
+
+The 8 waves:
+- Wave 1 — Discovery, inventory, assessments — **DONE**.
+- Wave 2 — Historical data quality — **DONE**.
+- Wave 3 — Strategy interface, registry, lifecycle —
+  **PARTIALLY DONE** (contract ABC present but not
+  load-bearing; lifecycle machine missing).
+- Wave 4 — Attribution, reconciliation, metrics —
+  **DONE** (metrics) / **PARTIALLY DONE** (attribution:
+  `strategy_version`, `feature_snapshot_id`,
+  `market_snapshot_id` not wired).
+- Wave 5 — Deterministic replay, broker abstraction,
+  persistence — **DONE**.
+- Wave 6 — Realistic execution, bias/leakage detection —
+  **PARTIALLY DONE** (LE_04 dead, LE_07 missing,
+  historical_replay unguarded).
+- Wave 7 — Backtest/live parity and paper validation —
+  **PARTIALLY DONE** (Broker ABC present but
+  `BaseStrategy.submit_order` doesn't consume it).
+- Wave 8 — Hardening, performance, regression testing —
+  **IN PROGRESS** (pre-submission gate, OSM, dedup, latency
+  tracker, health monitor all landed; LE_07 + Broker migration
+  + B1-B8 fixes still TODO).
+
+The roadmap ends with a cross-wave summary table and a
+10-item "highest-leverage remaining work" priority list that
+consolidates the residuals from both assessments.
+
+### Files touched
+
+| Path | Change |
+|---|---|
+| `docs/assessment/STRATEGY_MANAGEMENT_ASSESSMENT.md` | **updated** — added §0 W37-1 update summary (8 subsections); rewrote §22 maturity score (4.5 → 6.8); rewrote §23 critical findings with W37-1 status markers (CF1-CF12) |
+| `docs/assessment/BACKTEST_ENGINE_ASSESSMENT.md` | **updated** — added §0 W37-1 update summary (8 subsections); rewrote §22 maturity score (3.5 → 6.7); rewrote §23 critical findings with W37-1 status markers (CF1-CF11); rewrote "Recommended Next Actions" list |
+| `docs/improvements/STRATEGY_BACKTEST_ROADMAP.md` | **new** — 8-wave roadmap with per-wave status, delivered evidence, residual gaps, cross-wave summary table, 10-item priority list |
+
+### Verification
+
+- File line counts: Strategy 1,526 → 1,771 LOC (+245).
+  Backtest 1,095 → 1,433 LOC (+338). Roadmap: 0 → 282 LOC.
+- All cross-references (file:line citations in both
+  assessments) point to lines that exist in the current
+  codebase — verified by reading the cited files
+  (`strategies/base.py`, `strategies/registry.py`,
+  `core/broker.py`, `core/strategy_health.py`,
+  `backtesting/historical_replay.py`,
+  `backtesting/experiment_store.py`, `core/portfolio.py`,
+  `core/attribution.py`, `api/server.py`).
+- Maturity score deltas: Strategy +2.3 (4.5 → 6.8),
+  Backtest +3.2 (3.5 → 6.7). Both deltas are driven by the
+  same wave set (W19-2 → W24-8 + W34-3) and are consistent
+  with the per-dimension rationale tables.
+
+### Notes / trade-offs
+
+1. **Document structure choice.** Both assessments preserve
+   the W17-5 / W17-6 baseline findings verbatim as historical
+   evidence (§1–§21 unchanged) and consolidate the W37-1
+   update into §0 + §22 + §23. This keeps the original
+   evidence trail intact for anyone reading the wave-N
+   commit history, while making the current state trivially
+   discoverable at the top of each document. The alternative
+   — rewriting §1–§21 in place — would have lost the
+   "what W17-5 found" record and made it impossible to
+   reason about what each wave actually changed.
+2. **Maturity score conservatism.** The Strategy score moved
+   from 4.5 → 6.8 (not higher) because the §28 attribution
+   chain is still broken at 3 links (`strategy_version`,
+   `feature_snapshot_id`, `market_snapshot_id`) and the §27
+   9-state lifecycle machine is still missing. The Backtest
+   score moved from 3.5 → 6.7 (not higher) because the
+   legacy `engine.py` B1-B8 bugs are all unfixed, the new
+   historical-replay engine has no look-ahead detection, and
+   the `Broker` ABC is not yet load-bearing.
+3. **No production code changes.** W37-1 is a documentation-
+   only task. No `*.py` files were modified. The updated
+   assessments + roadmap are the deliverable.
+4. **Wave-3 status is intentionally PARTIALLY DONE**, not
+   DONE, because the contract ABC is present but 8 of 11
+   concrete strategies still rely on defaults. Calling this
+   DONE would misrepresent the state to the next reader.
+5. **Wave-8 status is IN PROGRESS**, not DONE, because the
+   hardening batch landed but the W37-1 follow-ups (LE_07,
+   LookAheadDetector port to historical_replay, Broker ABC
+   migration, B1-B8 bug fixes) are still TODO. Marking it
+   DONE would close out the wave prematurely.
+
+### Verification result: ✅ PASS — both assessments refreshed with current evidence; roadmap created; maturity scores updated; 12 strategy CFs + 11 backtest CFs each tagged with W37-1 status markers.
+
+---
+
+## W37-2 — Strategy lifecycle enforcement (audited state machine)
+- **Date:** 2026-12-15
+- **Scope:** NEW `mini-services/polymarket-bot/strategies/lifecycle.py`
+  + NEW `mini-services/polymarket-bot/tests/test_lifecycle.py`
+  + EDIT `mini-services/polymarket-bot/api/server.py` (import + 2
+  new routes + 1 new Pydantic request model + 1 typing import).
+
+### Background / investigation
+- W24-8 already gave us a strategy health monitor that auto-disables
+  strategies on out-of-sample / risk-limit failure, but the only
+  durable record of WHY a strategy was disabled lives in the alerts
+  SQLite store — there's no explicit *state machine* that says "this
+  strategy went RESEARCH → EXPERIMENTAL → BACKTESTED → VALIDATED →
+  PAPER → LIVE_CANDIDATE → LIVE → SUSPENDED → RETIRED" with audited
+  transitions and an approver on every step.
+- The task spec mandates that **a profitable backtest alone must NEVER
+  promote to LIVE** — i.e. LIVE requires out-of-sample validation,
+  walk-forward, paper trading, risk checks, and explicit approval, all
+  attested on the transition call. The existing `StrategyRegistry` /
+  `StrategyHealthMonitor` pair has no concept of these prerequisites —
+  `start_strategy` just instantiates the strategy and lets it trade.
+- The lifecycle manager is intentionally decoupled from the registry
+  and the health monitor: the registry still owns instantiation, the
+  monitor still owns metric-driven auto-disable, and the lifecycle
+  manager owns the state-machine gate + audit trail. The integration
+  point is `register_strategy(name, initial_state)` + `transition()`
+  — the monitor's `_disable` path can call
+  `strategy_lifecycle.transition(name, "SUSPENDED", reason=...,
+  approver="health-monitor")` to record the suspension in the audit
+  trail alongside its existing `StrategyRegistry.disable` call.
+- The module is SYNC (no `async`) so it can be invoked from any context
+  (FastAPI handler, sync periodic sweep, CLI / REPL introspection).
+
+### Files added
+
+#### `strategies/lifecycle.py`
+- 9-state graph (`RESEARCH → EXPERIMENTAL → BACKTESTED → VALIDATED →
+  PAPER → LIVE_CANDIDATE → LIVE → SUSPENDED → RETIRED`) with the
+  exact `VALID_TRANSITIONS` table from the spec.
+- `REQUIREMENTS_FOR_LIVE` dict carrying the documented LIVE-promotion
+  thresholds (`min_sample_size=30`, `min_out_of_sample_trades=20`,
+  `min_sharpe=0.5`, `max_drawdown=0.15`, plus the three boolean
+  flags `requires_walk_forward` / `requires_paper_validation` /
+  `requires_approval`).
+- `InvalidTransitionError(ValueError)` — carries `from_state` /
+  `to_state` / `reason` so the API route can surface a structured 400
+  / 409 response (vs. an opaque `ValueError.message`).
+- `LifecycleAuditEntry` dataclass — one row in the audit trail.
+  Fields: `timestamp`, `from_state`, `to_state`, `reason`,
+  `approver`, `metadata` (defaults to `{}`; populated with the
+  caller-supplied requirements dict on a LIVE promotion so the audit
+  row is self-contained).
+- `StrategyLifecycleManager` class:
+  - `register_strategy(name, initial_state=RESEARCH)` — idempotent.
+    Raises `ValueError` on an unknown `initial_state` (caller bug).
+  - `transition(name, target_state, reason="", approver="operator",
+    requirements=None)` — validates + applies + appends an audit row.
+    Raises `InvalidTransitionError` on failure. Auto-registers unknown
+    strategies at RESEARCH so the audit trail starts cleanly.
+  - `validate_transition(from, to, requirements=None) ->
+    (ok, reason)` — `@staticmethod` pure validation, no state mutation.
+    Caller can validate a hypothetical transition without registering
+    first. Returns `(True, "")` on success or `(False, reason)` on
+    failure (does NOT raise).
+  - `get_state(name)` — `None` for unknown strategies (vs. raising).
+  - `get_history(name)` — list of `LifecycleAuditEntry.to_dict()` rows;
+    `[]` for unknown strategies.
+  - `is_terminal(name)` — `True` iff the strategy is in RETIRED.
+- Module-level singleton `strategy_lifecycle = StrategyLifecycleManager()`
+  (mirrors the pattern in `core/strategy_health.py`).
+
+#### `tests/test_lifecycle.py` (48 tests, all pass)
+- **(1) `validate_transition` — pure validation** (15 tests): happy
+  path forward transition; graph violation (RESEARCH → LIVE);
+  unknown from_state / to_state; PAPER → RESEARCH blocked; RETIRED →
+  any-target blocked (terminal); LIVE requires all requirements
+  present (drop one key at a time); LIVE accepts full requirements;
+  LIVE rejects low sharpe / high drawdown / low sample size / low OOS
+  trades; LIVE rejects `requires_*` flags set to `False`; LIVE rejects
+  `None` requirements dict; LIVE from BACKTESTED is rejected by the
+  graph (not the requirements check).
+- **(2) `transition` — state mutation + audit trail** (10 tests):
+  appends audit entry with correct fields; invalid raises; LIVE
+  missing requirements raises; RETIRED is terminal (every target
+  rejected); walks the full happy path (RESEARCH → EXPERIMENTAL →
+  BACKTESTED → VALIDATED → PAPER → LIVE_CANDIDATE → LIVE → SUSPENDED →
+  RETIRED); audit trail is ordered chronologically with strictly
+  increasing timestamps (5 ms sleeps between transitions); approver +
+  reason distinct per transition; LIVE records requirements in
+  metadata; non-LIVE transitions don't record metadata; auto-registers
+  unknown strategies (RESEARCH state, audit row on valid transition,
+  no audit row on invalid transition).
+- **(3) `register_strategy` idempotency** (3 tests): idempotent
+  re-registration returns current state and preserves history;
+  unknown `initial_state` raises `ValueError`; explicit `initial_state`
+  seeds correctly.
+- **(4) read APIs** (3 tests): `get_state` returns None for unknown;
+  `get_history` returns `[]` for unknown; `is_terminal` only true
+  for RETIRED (and False for unknown strategies).
+- **(5) LIVE-prerequisite contract** (3 tests): `REQUIREMENTS_FOR_LIVE`
+  carries documented thresholds; `VALID_TRANSITIONS` matches the spec
+  graph exactly; `ALL_STATES` covers the 9 documented lifecycle
+  states.
+- **(6) API routes via `TestClient`** (10 tests): happy-path POST
+  transition 200 + audit row; 400 on graph-invalid transition; 400 on
+  missing LIVE requirements; 200 on LIVE happy-path promotion; 409 on
+  RETIRED terminal; GET lifecycle 200 with audit trail; GET lifecycle
+  404 unknown strategy; POST transition 401 without auth; GET
+  lifecycle 401 without auth; LIVE happy-path audit row carries the
+  requirements dict in metadata.
+- Plus 2 module-level smoke tests: `strategy_lifecycle` singleton is
+  importable + carries the documented public surface;
+  `LifecycleAuditEntry.to_dict()` round-trips every field.
+
+### Files edited
+
+#### `mini-services/polymarket-bot/api/server.py`
+- Added `from typing import Any` to the top-level imports (the new
+  `StrategyTransitionRequest` Pydantic model needs `dict[str, Any] |
+  None` for the `requirements` field).
+- Added `from strategies.lifecycle import (InvalidTransitionError,
+  REQUIREMENTS_FOR_LIVE, strategy_lifecycle)` alongside the existing
+  `from strategies.registry import strategy_registry` import — keeps
+  the strategies imports grouped alphabetically.
+- Added `StrategyTransitionRequest(BaseModel)` — body for the POST
+  transition route. Carries `target_state` / `reason` / `approver` /
+  `requirements`.
+- Added `POST /api/strategies/{name}/transition` route — calls
+  `strategy_lifecycle.transition(...)`, catches
+  `InvalidTransitionError` and returns 400 (invalid transition /
+  missing LIVE requirements) or 409 (RETIRED terminal state). On
+  success returns `{"strategy", "state", "audit"}`. Invalidates the
+  `strategies_performance` analytics_cache so the next dashboard poll
+  reflects the new lifecycle state.
+- Added `GET /api/strategies/{name}/lifecycle` route — returns 404 for
+  unknown strategies, 200 with `{"strategy", "current_state",
+  "history", "live_requirements"}` for registered strategies. The
+  `live_requirements` static dict is surfaced so the dashboard can
+  render the LIVE-promotion checklist next to the current state.
+
+### Verification
+- `cd mini-services/polymarket-bot && python -m pytest tests/test_lifecycle.py -v`
+  → **48 passed, 13 warnings in 8.63s**.
+- `cd mini-services/polymarket-bot && python -m pytest` (full suite)
+  → **3618 passed, 287 warnings in 315.55s** — no regressions
+  (baseline was 3570 passing tests; the +48 are the new lifecycle
+  tests).
+- `cd /home/z/my-project && bun run lint` → exit 0, clean.
+
+### Notes / trade-offs
+1. **SYNC module, no async.** The lifecycle manager is intentionally
+   sync so it can be invoked from the strategy health monitor's sync
+   `check_strategy` sweep, the FastAPI route handlers (already inside
+   an event loop), or a CLI / REPL introspection. The audit trail is
+   held in-memory (per-strategy `list[LifecycleAuditEntry]`); a
+   future task can durably persist it via `core.audit_logger` if an
+   operator asks for it.
+2. **Decoupled from `StrategyRegistry` and `StrategyHealthMonitor`.**
+   The registry still owns instantiation + `_disabled` flag; the
+   monitor still owns the health snapshot + metric-driven auto-disable.
+   The lifecycle manager owns the state-machine gate + audit trail.
+   The integration point is `register_strategy()` + `transition()` —
+   the monitor's `_disable` path can call
+   `strategy_lifecycle.transition(name, "SUSPENDED", ...,
+   approver="health-monitor")` to record the suspension in the audit
+   trail. The manager NEVER calls into `registry.disable` directly
+   (W24-8 is the load-bearing safety primitive; we don't want a
+   second code path re-implementing it).
+3. **`transition()` auto-registers unknown strategies at RESEARCH.**
+   A `transition` call on an unregistered strategy is treated as
+   "register + attempt transition" — if the transition itself is
+   invalid, the registration remains but no audit row is appended.
+   This keeps the caller's contract simple (the `StrategyHealthMonitor`
+   doesn't need to remember to call `register_strategy()` first).
+4. **LIVE requirements are caller-attested, not queried.** The
+   manager doesn't query external systems itself (backtest engine,
+   paper simulator, risk engine) — it's the caller's job to attest
+   that the walk-forward + paper-trading + risk checks + approval
+   have all cleared by passing a complete `requirements` dict on the
+   LIVE transition. Numeric thresholds are checked `>=` (or `<=` for
+   `max_drawdown`) against `REQUIREMENTS_FOR_LIVE`; booleans must be
+   `True`. This avoids coupling the lifecycle manager to the
+   backtest / paper / risk subsystems while still enforcing the
+   "profitable backtest alone must NEVER promote to LIVE" rule.
+5. **API status code convention.** 400 for invalid transitions
+   (graph violation or missing LIVE requirements — the request is
+   malformed); 409 for RETIRED terminal state (the resource is in a
+   terminal state that forbids further mutations — a Conflict-style
+   error); 404 for GET lifecycle on an unknown strategy. Both new
+   routes are behind the existing `enforce_api_auth` middleware (no
+   changes to `PUBLIC_PATHS`).
+6. **Cache invalidation.** `POST /api/strategies/{name}/transition`
+   invalidates the `strategies_performance` analytics_cache so the
+   next dashboard poll reflects the new lifecycle state on the
+   strategy's row. The catalog cache is NOT invalidated (the
+   lifecycle state is NOT surfaced in the catalog today — only in
+   the lifecycle GET route).

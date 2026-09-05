@@ -46,11 +46,21 @@ import logging
 import os
 import sqlite3
 from dataclasses import dataclass, field
-from typing import Optional, List
+from typing import Any, Optional, List
 
 import numpy as np
 
 logger = logging.getLogger(__name__)
+
+
+# ── W37-3 — Bias / leakage detector (lazy import) ──────────────────────────
+# ``backtesting.bias_detector`` imports nothing from ``historical_replay`` so
+# the lazy ``from backtesting.bias_detector import bias_detector`` inside
+# :meth:`HistoricalReplayEngine.replay` cannot create a circular import.
+# The detector is invoked after every replay so a critical finding is logged
+# at ``ERROR`` level and surfaced on the ``ReplayResult.bias_report`` field
+# (a JSON-serialisable dict) — the caller decides whether to discard the
+# result. Mirrors the post-backtest hook called out in the W37-3 task spec.
 
 
 # ── Data containers ─────────────────────────────────────────────────────────
@@ -84,6 +94,12 @@ class ReplayResult:
     All numeric fields are Python ``float`` (not ``np.float64``) so the
     dataclass round-trips through ``json.dumps`` without a ``default=``
     serializer.
+
+    W37-3 — the optional ``bias_report`` field carries the
+    :class:`backtesting.bias_detector.BiasReport.to_dict` payload for
+    the post-replay bias / leakage scan. Default ``{}`` (no scan run /
+    no findings) so the field is always JSON-serialisable; the
+    :meth:`HistoricalReplayEngine.replay` method always populates it.
     """
 
     start_time: float
@@ -96,6 +112,11 @@ class ReplayResult:
     max_drawdown: float = 0.0
     win_rate: float = 0.0
     profit_factor: float = 0.0
+    # W37-3 — bias / leakage report. Populated by
+    # :meth:`HistoricalReplayEngine.replay` after every run; carries
+    # ``{findings, summary, has_critical, critical_findings}``. Empty
+    # dict by default (no findings / no scan run).
+    bias_report: dict[str, Any] = field(default_factory=dict)
 
 
 # ── Default strategy ────────────────────────────────────────────────────────
@@ -414,13 +435,91 @@ class HistoricalReplayEngine:
             # the mark-to-market mid, slightly inflating total_return).
             equity_curve[-1] = capital
 
-        return self._compute_metrics(
-            start_time=float(start_time),
-            end_time=float(end_time),
-            n_snapshots=len(snapshots),
+        return self._attach_bias_report(
+            self._compute_metrics(
+                start_time=float(start_time),
+                end_time=float(end_time),
+                n_snapshots=len(snapshots),
+                trades=trades,
+                equity_curve=equity_curve,
+            ),
             trades=trades,
-            equity_curve=equity_curve,
+            snapshots=snapshots,
+            token_id=token_id,
         )
+
+    # ── W37-3 — Post-replay bias / leakage scan ────────────────────────
+
+    @staticmethod
+    def _attach_bias_report(
+        result: "ReplayResult",
+        *,
+        trades: list[dict],
+        snapshots: List["HistoricalSnapshot"],
+        token_id: str,
+    ) -> "ReplayResult":
+        """Run the W37-3 bias / leakage detector against the replay output.
+
+        Called from :meth:`replay` after :meth:`_compute_metrics` returns
+        so every historical-replay backtest automatically surfaces its
+        bias findings (rule ids ``BL_01``..``BL_10``) on the
+        :attr:`ReplayResult.bias_report` field. The detector is
+        imported lazily so a broken ``backtesting.bias_detector`` import
+        (e.g. a missing optional dep) degrades gracefully — the replay
+        still returns its metrics, with ``bias_report = {}``.
+
+        Critical findings (look-ahead / data leakage / hindsight / etc.)
+        are logged at ``ERROR`` level so the operator can correlate
+        via the X-Request-ID response header. The backtest itself is
+        NOT aborted — the caller decides whether to discard the result
+        based on the ``has_critical`` flag in :attr:`bias_report`.
+        """
+        try:
+            from backtesting.bias_detector import bias_detector
+        except Exception as exc:  # noqa: BLE001 — defensive
+            logger.warning(
+                "bias_detector unavailable — ReplayResult.bias_report will "
+                "be empty (import error: %s)", exc,
+            )
+            return result
+
+        # Convert the snapshots list to the dict shape the bias detector
+        # expects (``{timestamp, token_id, best_bid, best_ask}``).
+        order_books: list[dict[str, Any]] = [
+            {
+                "timestamp": float(snap.timestamp),
+                "token_id": str(snap.token_id),
+                "best_bid": float(snap.best_bid),
+                "best_ask": float(snap.best_ask),
+            }
+            for snap in snapshots
+        ]
+
+        backtest_payload: dict[str, Any] = {
+            "token_id": token_id,
+            "trades": trades,
+            "order_books": order_books,
+        }
+
+        try:
+            report = bias_detector.analyze(backtest_payload)
+        except Exception as exc:  # noqa: BLE001 — defensive
+            logger.error(
+                "bias_detector.analyze() raised — ReplayResult.bias_report "
+                "will be empty (error: %s)", exc, exc_info=True,
+            )
+            return result
+
+        if report.has_critical:
+            logger.error(
+                "CRITICAL bias detected in historical replay (token=%s): "
+                "%s — backtest is structurally unreliable",
+                token_id,
+                [f.rule for f in report.critical_findings],
+            )
+
+        result.bias_report = report.to_dict()
+        return result
 
     # ── Risk metrics ───────────────────────────────────────────────────
 
