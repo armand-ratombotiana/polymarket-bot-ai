@@ -81,10 +81,14 @@ afterEach(() => {
 })
 
 describe('ExecutionQualityPanel', () => {
-  it('renders without crashing', () => {
+  it('renders without crashing', async () => {
     apiFetchMock.mockResolvedValue(mockOk(sampleResponse))
     render(<ExecutionQualityPanel />)
-    expect(screen.getByText('⚡ Execution Quality')).toBeInTheDocument()
+    // The panel renders a loading skeleton until the fetch resolves; wait
+    // for the header to appear after the data loads before asserting.
+    await waitFor(() => {
+      expect(screen.getByText('⚡ Execution Quality')).toBeInTheDocument()
+    })
   })
 
   it('renders the "⚡ Execution Quality" header once data loads', async () => {

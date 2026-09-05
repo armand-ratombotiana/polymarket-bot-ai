@@ -31832,3 +31832,334 @@ styles, (7) improve filter chip styles.
    keep `className="kpi-card"` for Command Center hero KPIs.
 9. `.filter-chip.active` now fills solid blue + white text — stronger
    visual emphasis on the selected filter.
+
+---
+
+## W40-3 — Final Visual Verification (all panels via agent-browser)
+
+**Agent:** general-purpose
+**Date:** 2025-09-05
+**Scope:** Visual smoke-test of every sidebar panel + responsive +
+interactions against running dev server at `http://localhost:3000/`.
+
+### Setup
+- `curl http://localhost:3000/` → 200 (dev server already running, no
+  restart needed).
+- `agent-browser open http://localhost:3000/` → title
+  `Polymarket Pro — Algorithmic Trading Workstation`.
+- Baseline screenshot: `/tmp/w40-dashboard.png`.
+
+### Method
+For each sidebar panel:
+1. JS-click the `button.sidebar-item` whose `.sidebar-label` matches the
+   panel name (text selector failed because buttons contain icon +
+   label + sr-only shortcut text in a single string).
+2. `sleep 2` for render settle.
+3. `eval` to check:
+   - `.sidebar-item.active` label matches the panel we just clicked
+     (confirms nav worked).
+   - No `.panel-error-boundary` / `[class*=error-boundary]` mounted.
+   - No `TypeError|ReferenceError|Cannot read prop|throw new Error|`
+     `Runtime Error` substring in `main` text.
+
+### Panel-by-panel results (31 panels)
+
+| # | Panel | Active OK | Error Boundary | Render Errors | Notes |
+|---|---|---|---|---|---|
+| 1 | Command Center | ✅ | none | none | Landing panel |
+| 2 | Live Books | ✅ | none | none | — |
+| 3 | Screener | ✅ | none | none | `HTTP 404` is a *displayed status* for ingestion endpoint, not a render error |
+| 4 | Order Flow | ✅ | none | none | — |
+| 5 | Positions | ✅ | none | none | Empty-state "💼 No positions found" shown — see interactions |
+| 6 | Orders | ✅ | none | none | — |
+| 7 | Trades & Fills | ✅ | none | none | — |
+| 8 | Capital Allocator | ✅ | none | none | `HTTP 404` status badge, not render error |
+| 9 | Strategy Registry | ✅ | none | none | same 404 status |
+| 10 | Arbitrage | ✅ | none | none | same |
+| 11 | Performance | ✅ | none | none | same |
+| 12 | Deep Analysis | ✅ | none | none | "Analysis Engine Offline — Failed to fetch deep analysis (HTTP 404) — Retry" is the panel's own graceful-offline state, not an exception |
+| 13 | AI / ML Engine | ✅ | none | none | — |
+| 14 | nav.explainer | ✅ | none | none | ARIA-labelled explainer nav button renders |
+| 15 | Copilot | ✅ | none | none | 404 status |
+| 16 | Shadow Inference | ✅ | none | none | — |
+| 17 | ML Validation | ✅ | none | none | — |
+| 18 | Performance Report | ✅ | none | none | 404 status |
+| 19 | Backtest Lab | ✅ | none | none | — |
+| 20 | Attribution | ✅ | none | none | 404 status |
+| 21 | Execution Quality | ✅ | none | none | 404 status |
+| 22 | Closed Positions | ✅ | none | none | 404 status |
+| 23 | System Health | ✅ none none | — 404 ingestion-health status badge |
+| 24 | Data Explorer | ✅ | none | none | 404 status |
+| 25 | Database | ✅ | none | none | 404 status |
+| 26 | Observability | ✅ | none | none | 404 status |
+| 27 | Retention | ✅ | none | none | 404 status |
+| 28 | Decision Ledger | ✅ | none | none | 404 status |
+| 29 | Safety Gate | ✅ | none | none | 404 status |
+| 30 | Rate Limits | ✅ | none | none | 404 status |
+| 31 | Audit Log | ✅ | none | none | 404 status |
+| 32 | Data Ingestion | ✅ | none | none | 404 ingestion-health status |
+
+**All 32 sidebar entries navigated & rendered successfully.** Zero
+React error boundaries triggered. The `HTTP 404` and `Failed to fetch`
+substrings that tripped the initial regex are panel-level status
+messages displayed *intentionally* by panels that poll ingestion /
+analysis endpoints which aren't wired in dev — they are **not** JS
+runtime errors and do not crash the panel.
+
+### Responsive test
+- **Mobile 375×812** (`/tmp/w40-mobile2.png`): sidebar correctly
+  collapses (`<aside class="sidebar collapsed">` with `left: -52`),
+  main content fills viewport width 375, "Open navigation" hamburger
+  button visible at (14, 9) w=32. ✅
+  - Minor: topbar theme toggle / alerts / audio / shortcut buttons sit
+    at x=545–748 (overflow the 375 viewport) — they remain reachable
+    via horizontal scroll; not a blocker for nav. Topbar buttons
+    visible at desktop widths.
+- **Desktop 1920×1080** (`/tmp/w40-desktop.png`): sidebar visible
+  width=220, all panels render with full width. ✅
+
+### Interaction tests
+1. **Click Positions → empty state** ✅
+   - "💼 ACTIVE POSITIONS (0)" header, "USD 25 Exposure Cap",
+     Exposure $0.00, Realized +$0.00, Daily PnL +$0.00.
+   - "💼 No positions found" empty-state card with explanatory copy
+     ("Automated strategies …"). Screenshot: `/tmp/w40-positions.png`.
+2. **Cmd+K → cheat sheet opens** ✅
+   - Dialog title "⌨️ Workstation Keyboard Cheat Sheet", category
+     tabs (Navigation / Trading / View / System), "📋 Copy", "🎯
+     Practice" actions visible. Dialog count went 0 → 1 visible
+     modal; body didn't get `overflow-hidden` class but the dialog
+     is correctly visible & dismissible.
+   - `Escape` closes it (dialog count returns to 0).
+   - Screenshot: `/tmp/w40-cheatsheet.png`.
+3. **Theme toggle → theme switches** ✅
+   - Before: `<html class="dark">`, body-bg `rgb(14, 16, 21)`,
+     toggle aria-label `"Switch to light mode"`.
+   - After click: `<html class="light">`, body-bg `rgb(248, 250, 252)`,
+     toggle aria-label flips to `"Switch to dark mode"`.
+   - Switched back to dark to restore default state.
+   - Screenshot: `/tmp/w40-light-theme.png`.
+
+### Screenshots produced
+- `/tmp/w40-dashboard.png` — Command Center baseline (desktop)
+- `/tmp/w40-deep-analysis.png` — Deep Analysis graceful-offline
+- `/tmp/w40-mobile.png` — first mobile screenshot (sidebar auto-collapse)
+- `/tmp/w40-mobile2.png` — mobile, 375×812
+- `/tmp/w40-desktop.png` — desktop, 1920×1080
+- `/tmp/w40-positions.png` — Positions empty state
+- `/tmp/w40-cheatsheet.png` — Cmd+K cheat sheet modal
+- `/tmp/w40-light-theme.png` — light theme
+- `/tmp/w40-final.png` — back-to-dark, Command Center restored
+
+### Caveats / known limitations
+- The initial 404-match regex flagged ~21 panels as "errors"; on
+  inspection every match was a *panel-displayed* HTTP-404 status
+  badge from polling an ingestion / analysis endpoint that has no
+  backend in dev. None of these are JS runtime errors and none
+  trip an error boundary. To suppress false positives in future
+  sweeps, the check should exclude `HTTP \d{3}` substrings inside
+  known-status `<span>` / `[role=status]` containers.
+- Mobile topbar overflows horizontally past 375px — the right-side
+  cluster (theme toggle, alerts, audio, shortcut) sits off-screen
+  without horizontal scroll affordance at very narrow widths. Not a
+  blocker for panel nav (hamburger works), but worth a future
+  polish pass to wrap / collapse those into an overflow menu.
+
+### Verdict
+**W40-3 PASS.** All 32 sidebar panels navigate, render, and respond to
+interaction as expected. No React error boundaries tripped. Mobile
+and desktop responsive layouts verified. Cmd+K cheat sheet and theme
+toggle both functional. Empty-state UI on Positions confirmed.
+
+---
+
+# W40-2 — full-stack-developer — Component test coverage gap-fill
+
+## Task
+Add minimal test files (`*.test.tsx`) for the remaining untested
+frontend components. After verifying which components were genuinely
+untested (vs. previously `.skip` and recently renamed to `.tsx`), the
+actual gap was 7 components (excluding the 3 trivial wrappers that
+render null — ThemeProvider, SWRegister, ErrorReporterInit).
+
+## Scope of changes
+- **NEW** `src/components/KpiCard.test.tsx` (6 tests)
+- **NEW** `src/components/ShortcutHint.test.tsx` (4 tests)
+- **NEW** `src/components/KeyboardCheatSheet.test.tsx` (4 tests)
+- **NEW** `src/components/ai-explainability.test.tsx` (17 tests)
+- **NEW** `src/components/CommandCenterHealthBar.test.tsx` (6 tests)
+- **NEW** `src/components/CommandCenterDashboard.test.tsx` (6 tests)
+- **NEW** `src/components/CommandCenterMetricsStrip.test.tsx` (5 tests)
+
+Total: 7 new files, 48 new tests, all passing.
+
+## Prior work consulted
+- `agent-ctx/W39-2-full-stack-developer.md` — confirmed the W39-3
+  Command Center redesign introduced `KpiCard`, `CommandCenterDashboard`,
+  `CommandCenterHealthBar`, `CommandCenterMetricsStrip`, and the
+  `ai-explainability` primitives without accompanying tests. My W40-2
+  layer closes that gap.
+- `agent-ctx/W38-2-full-stack-developer.md` — design-system foundation
+  the new components render against (no test impact).
+- Existing test patterns sampled:
+  - `src/components/AICopilotPanel.test.tsx` — `vi.mock('@/lib/api', ...)`
+    + `mockOk` / `mockNotOk` helpers for `apiFetch` consumers.
+  - `src/components/ShortcutsModal.test.tsx` — minimal modal render +
+    Escape-key callback contract for the `KeyboardCheatSheet` test.
+  - `src/components/AlertNotificationsPanel.test.tsx` — `vi.mock` of
+    `useAlertNotifications` so the metrics strip test doesn't open a
+    real WebSocket.
+  - `src/components/ThemeToggle.test.tsx` — `useEffect`-mounted
+    component pattern (mirrors `ShortcutHint`'s `mounted` gate).
+- `src/test/setup.ts` — confirms `global.fetch = vi.fn()` and
+  `afterEach(vi.restoreAllMocks)` are already set up globally; tests
+  redeclare `global.fetch = vi.fn()` defensively anyway (cheap + makes
+  intent explicit at the top of each file).
+
+## Approach per component
+
+### 1. KpiCard
+Stateless presentational primitive (4-state machine: loading / error /
+stale / value). Tests cover the four render branches + the
+`data-testid="kpi-{id}"` contract parents rely on. Asserts the
+loading skeleton replaces the value, the error pill is exposed via
+`aria-label="error"`, and the stale pill via `aria-label="stale"`.
+
+### 2. ShortcutHint
+Hydration-gated floating button (`mounted` flag flips in `useEffect`).
+Tests use `act(async () => render(...))` to flush the effect, then
+assert the button's `data-testid`, `aria-label`, and `title`
+attributes. Click test verifies `onOpen` is invoked exactly once.
+
+### 3. KeyboardCheatSheet
+Static catalog modal (no fetch). Tests cover the closed-state
+contract (`isOpen={false}` → no dialog), the open-state render
+(`role="dialog"` + "Workstation Keyboard Cheat Sheet" title), and
+the Escape-key `onClose` callback. Pattern mirrors `ShortcutsModal.test.tsx`.
+
+### 4. ai-explainability
+Five exported primitives (`AIPredictionLabel`, `ConfidenceBadge`,
+`NotAGuaranteeInline`, `ModelStatusStrip`, `WhyExplanation`) plus two
+pure helper functions (`confidenceTone`, `driftLevelFromStatus`).
+Tests cover each primitive's render contract + the documented
+`data-testid`s (`ai-prediction-label`, `confidence-badge`,
+`not-a-guarantee-inline`, `model-status-strip`, `status-version`,
+`status-calibration`) + the helper bucketing logic.
+
+### 5. CommandCenterHealthBar
+Presentational bar driven by `snapshot` + `status` + `wsConnected`
+props. Owns a 5s re-render timer (cleared on unmount — verified
+implicitly by `cleanup()` between tests). Tests cover the render
+contract, the `data-testid="command-center-health-bar"` region, all
+six indicator labels, the `status` → "Online"/"Offline" mapping, and
+the `kill_switch` → "ON" mapping.
+
+### 6. CommandCenterDashboard
+Composed dashboard with internal `usePolled` hook (3s + 8s cadence)
+fetching `/api/status` + `/api/analytics`. Accepts four ReactNode
+panels from the parent. Tests use `vi.mock('@/lib/api', ...)` so
+every fetch resolves to an empty 200 OK payload, immediately flipping
+the dashboard out of its loading state. Assertions cover: render
+without crashing, embedded `CommandCenterHealthBar` (data-testid),
+three hero KPIs (Balance / Available / Exposure), all four supplied
+panel children rendered into the grid, `/api/status` polled on mount,
+and graceful survival of a 500-error response.
+
+### 7. CommandCenterMetricsStrip
+Aggregated 5-cluster strip polling 5 endpoints (status / analytics /
+ml/metrics / ml/drift / ingestion/health) and consuming
+`useAlertNotifications` (which would otherwise open a real WebSocket).
+Tests mock both `apiFetch` (resolves to `{}`) and
+`useAlertNotifications` (returns empty alerts list). Assertions cover:
+render without crashing, `data-testid="command-center-metrics-strip"`
+region, all 5 cluster testids (`cluster-portfolio`, `cluster-trading`,
+`cluster-risk`, `cluster-ai`, `cluster-system`), `/api/status` polled
+on mount, and snapshot-derived portfolio KPIs (Total Value / Available
+Balance / Open Exposure).
+
+## Decisions
+
+1. **Truly untested vs. previously `.skip`** — re-ran `comm -23` to
+   re-derive the untested list. The task description's priority list
+   referenced components that had previously been `.skip`-suffixed
+   (e.g. `AttributionPanel.test.tsx.skip`) and were un-skipped by an
+   earlier agent. Those are NOT in my scope — they have test files.
+   My scope is the 7 genuinely-untested components identified by
+   `comm -23`.
+
+2. **Skip ThemeProvider / SWRegister / ErrorReporterInit** — these
+   render `null` (no DOM output). A "renders without crashing" test
+   would assert `container.firstChild === null` which is information-
+   free. Per the task instructions ("Skip trivial wrappers"), these
+   three are intentionally omitted.
+
+3. **`vi.mock('@/lib/api', ...)` over `global.fetch = vi.fn()`** — the
+   dashboard / metrics strip consume `apiFetch` (not raw `fetch`), so
+   mocking at the module level is the only way to intercept the
+   calls. Pattern borrowed from `AIMLCommandCenter.test.tsx`.
+
+4. **`vi.mock('@/hooks/useAlertNotifications', ...)`** — the metrics
+   strip composes `useAlertNotifications`, which in turn opens a
+   real WebSocket via `useWebSocket`. Without the mock, jsdom attempts
+   a `ws://localhost:8080/ws` connection that errors on every test.
+   Pattern borrowed from `AlertNotificationsPanel.test.tsx`.
+
+5. **Test data factories** — every test defines its own `makeSnapshot()`
+   helper that returns a minimal-but-complete `BotSnapshot`. The
+   factory accepts a `Partial<BotSnapshot>` overrides argument so each
+   test can vary only the fields it cares about (e.g.
+   `makeSnapshot({ kill_switch: true })`).
+
+6. **Minimal-test philosophy** — each test file targets 4–17 tests,
+   enough to cover the render contract + 1–2 interaction paths per
+   component. Full behavioural coverage (every state branch, every
+   error code) is left for future tasks. This matches the W40-2 brief:
+   "minimal test file".
+
+## Verification
+
+- **Lint:** `bun run lint` → EXIT 0 (clean, zero warnings).
+- **New tests:** all 7 new test files pass — 48 tests / 48 passed.
+  ```
+  ✓ src/components/CommandCenterMetricsStrip.test.tsx (5 tests) 157ms
+  ✓ src/components/KeyboardCheatSheet.test.tsx (4 tests) 235ms
+  ✓ src/components/ShortcutHint.test.tsx (4 tests) 196ms
+  ✓ src/components/CommandCenterDashboard.test.tsx (6 tests) 140ms
+  ✓ src/components/ai-explainability.test.tsx (17 tests) 84ms
+  ✓ src/components/CommandCenterHealthBar.test.tsx (6 tests) 64ms
+  ✓ src/components/KpiCard.test.tsx (6 tests) 44ms
+   Test Files 7 passed (7)
+        Tests  48 passed (48)
+  ```
+- **Test file count:** `find src -name "*.test.tsx" -type f | wc -l`
+  → 73 (was 66 → +7 from this task). The task's "60+" target is met.
+- **Top-level src/components/*.test.tsx:** 62 (was 48 → +7 new +
+  7 previously-`.skip` files renamed to `.tsx` by earlier agents).
+
+## Caveats / known limitations
+
+- **Pre-existing failures in un-skipped test files** — 7 test files
+  that were previously `.skip`-suffixed
+  (`AIMLCommandCenter`, `AttributionPanel`, `DepthChartModal`,
+  `ExecutionQualityPanel`, `MarketChartModal`, `ObservabilityPanel`,
+  `StrategyConfigModal`) were un-skipped by an earlier agent and
+  still have 10 failing tests between them. These failures are
+  PRE-EXISTING — my changes only added NEW files, did not modify any
+  existing test file. The failures are typically `waitFor` timeouts
+  on async-UI contract assertions (e.g. "renders the model registry
+  lineage table when versions are present" in AIMLCommandCenter).
+  Investigating / fixing those is a separate task (the original
+  `.skip` rationale).
+- **No playwright / visual regression coverage** — these tests are
+  unit-level render + interaction only. End-to-end visual snapshot
+  coverage would require a separate Playwright/Chromatic suite.
+
+## How a developer uses this
+
+1. Run a single component's tests in isolation:
+   `bun run test -- --run src/components/KpiCard.test.tsx`
+2. Run all 7 new test files together:
+   `bun run test -- --run src/components/{KpiCard,ShortcutHint,KeyboardCheatSheet,ai-explainability,CommandCenterHealthBar,CommandCenterDashboard,CommandCenterMetricsStrip}.test.tsx`
+3. The `makeSnapshot()` factory in each Command Center test file is a
+   reusable pattern — copy it into future tests that need a
+   `BotSnapshot` fixture.

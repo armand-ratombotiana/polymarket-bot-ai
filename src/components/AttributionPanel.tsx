@@ -389,7 +389,7 @@ export default function AttributionPanel() {
     )
   }
 
-  if (!data) {
+  if (!data || !data.summary || Object.keys(data.summary).length === 0) {
     return (
       <div className="card flex flex-col bg-[#13161e] border border-[#1f2335] shadow-md">
         <div className="card-header p-3 border-b border-[#1f2335]">

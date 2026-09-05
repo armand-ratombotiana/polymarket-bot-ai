@@ -130,6 +130,7 @@ describe('ObservabilityPanel', () => {
     apiFetchMock
       .mockRejectedValueOnce(new Error('Network error'))
       .mockResolvedValueOnce(mockOk(sampleReport))
+      .mockResolvedValue(mockOk({ samples: [] })) // per-metric history fetches
     render(<ObservabilityPanel />)
     const retry = await screen.findByRole('button', { name: /retry/i })
     await user.click(retry)
@@ -140,7 +141,11 @@ describe('ObservabilityPanel', () => {
         screen.queryByText('Observability endpoint unavailable'),
       ).not.toBeInTheDocument()
     })
-    expect(apiFetchMock).toHaveBeenCalledTimes(2)
+    // At least 2 calls: the initial mount fetch + the retry fetch. The
+    // panel also fetches per-metric history (one call per metric name)
+    // once the report loads, so the total call count is higher than 2 —
+    // we assert the floor, not the exact count.
+    expect(apiFetchMock.mock.calls.length).toBeGreaterThanOrEqual(2)
   })
 
   it('fetches the /api/observability endpoint on mount', async () => {

@@ -106,8 +106,10 @@ describe('StrategyConfigModal', () => {
     apiFetchMock.mockRejectedValue(new Error('Network error'))
     render(<StrategyConfigModal isOpen={true} onClose={vi.fn()} />)
     await waitFor(() => {
+      // The banner renders with a leading ⚠️ emoji prefix, so use a
+      // regex substring match instead of an exact-text match.
       expect(
-        screen.getByText('Network error fetching configuration'),
+        screen.getByText(/Network error fetching configuration/),
       ).toBeInTheDocument()
     })
   })
@@ -184,8 +186,10 @@ describe('StrategyConfigModal', () => {
     await screen.findByText(/Strategy & Risk Configuration/)
     await user.click(screen.getByRole('button', { name: /apply live/i }))
     await waitFor(() => {
+      // The banner renders with a leading ⚠️ emoji prefix, so use a
+      // regex substring match instead of an exact-text match.
       expect(
-        screen.getByText('Error reaching bot API server'),
+        screen.getByText(/Error reaching bot API server/),
       ).toBeInTheDocument()
     })
   })

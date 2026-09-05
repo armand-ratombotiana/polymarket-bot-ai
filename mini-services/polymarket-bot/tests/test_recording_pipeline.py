@@ -236,14 +236,19 @@ async def test_closing_sell_fill_creates_closed_positions_record(unique_token):
     opened_at_expected = pos.opened_at
 
     # Flip the book to a higher mid so the SELL produces a positive P&L
-    # (entry was 0.51+ slippage; exit is 0.55 minus slippage → profit).
-    await _stage_book(TOKEN, best_bid=0.55, best_ask=0.56)
+    # regardless of the deterministic queue-position hash. The simulator's
+    # slippage model adds/subtracts up to 1 tick (queue) plus a flat 1 tick
+    # (crossing) on each side — a narrow 0.51→0.55 spread can collapse to
+    # pnl=0 when both BUY and SELL happen to draw queue_ticks=1. A 0.10
+    # spread (0.51 entry vs 0.60 exit) absorbs the worst-case 4 ticks of
+    # slippage with margin to spare, keeping the test deterministic.
+    await _stage_book(TOKEN, best_bid=0.60, best_ask=0.61)
 
     sell_order = Order(
         order_id=f"sell-{TOKEN}",
         token_id=TOKEN,
         side=Side.SELL,
-        price=0.55,                     # crosses the bid → fills at best_bid
+        price=0.60,                     # crosses the bid → fills at best_bid
         size=50.0,
         strategy="position_manager_tp",  # exit strategy (different from entry)
         paper=True,

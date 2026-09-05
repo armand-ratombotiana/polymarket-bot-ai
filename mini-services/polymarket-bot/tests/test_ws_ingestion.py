@@ -913,7 +913,7 @@ async def test_reconnect_with_exponential_backoff(
 # ── Step 8: Checkpoint resume ────────────────────────────────────────────────
 
 
-@pytest.mark.skip(reason="Flaky in full suite — checkpoint state ordering")
+@pytest.mark.asyncio
 async def test_checkpoint_persists_and_resumes_per_token_seq(
     tmp_path: Path,
     mock_downstream,  # noqa: ARG001

@@ -92,8 +92,16 @@ describe('DepthChartModal', () => {
     render(
       <DepthChartModal tokenId="tok-abc" slug="paris-rain" onClose={vi.fn()} />,
     )
+    // The header text is split across a parent span ("Order Book Depth: ")
+    // and a child span ("paris-rain"); use a function matcher so the
+    // regex matches the combined textContent of the title element.
     expect(
-      await screen.findByText(/Order Book Depth:.*paris-rain/),
+      await screen.findByText((content, element) => {
+        return (
+          element?.getAttribute('id') === 'depth-modal-title' &&
+          /Order Book Depth:.*paris-rain/.test(element.textContent || '')
+        )
+      }),
     ).toBeInTheDocument()
   })
 
@@ -155,12 +163,21 @@ describe('DepthChartModal', () => {
 
   it('shows the success feedback banner when a trade POST succeeds', async () => {
     const user = userEvent.setup()
-    apiFetchMock
-      .mockResolvedValueOnce(mockOk(sampleDepth)) // depth fetch
-      .mockResolvedValue(mockNotOk(500)) // ML pred (ignored)
-      .mockResolvedValueOnce(
-        mockOk({ detail: 'Order filled: BUY $1.5 @ 0.555' }), // trade POST
-      )
+    // URL-aware mock implementation keeps the test deterministic even when
+    // depth @ 2s and ML pred @ 5s polling timers fire between mount and
+    // the simulated click — a chained ``mockResolvedValueOnce`` queue
+    // would otherwise be consumed by the polls.
+    apiFetchMock.mockImplementation((url: string, init?: RequestInit) => {
+      const u = String(url)
+      if (u.includes('/api/depth/')) return Promise.resolve(mockOk(sampleDepth))
+      if (u.includes('/api/ai/predict/')) return Promise.resolve(mockNotOk(500))
+      if (u.includes('/api/trade') && init?.method === 'POST') {
+        return Promise.resolve(
+          mockOk({ detail: 'Order filled: BUY $1.5 @ 0.555' }),
+        )
+      }
+      return Promise.resolve(mockNotOk(500))
+    })
     render(
       <DepthChartModal tokenId="tok-abc" slug="paris-rain" onClose={vi.fn()} />,
     )
@@ -175,18 +192,30 @@ describe('DepthChartModal', () => {
 
   it('shows the error feedback banner when a trade POST fails', async () => {
     const user = userEvent.setup()
-    apiFetchMock
-      .mockResolvedValueOnce(mockOk(sampleDepth)) // depth fetch
-      .mockResolvedValue(mockNotOk(500)) // ML pred (ignored)
-      .mockRejectedValueOnce(new Error('Network error')) // trade POST
+    // Use URL-aware mock implementation so polling timers (depth @ 2s, ML
+    // pred @ 5s) don't consume the one-shot trade-POST rejection. The
+    // chained ``mockResolvedValueOnce`` / ``mockRejectedValueOnce`` queue
+    // is fragile under polling — a `mockImplementation` keyed on URL +
+    // method gives the test deterministic control of every call.
+    apiFetchMock.mockImplementation((url: string, init?: RequestInit) => {
+      const u = String(url)
+      if (u.includes('/api/depth/')) return Promise.resolve(mockOk(sampleDepth))
+      if (u.includes('/api/ai/predict/')) return Promise.resolve(mockNotOk(500))
+      if (u.includes('/api/trade') && init?.method === 'POST') {
+        return Promise.reject(new Error('Network error'))
+      }
+      return Promise.resolve(mockNotOk(500))
+    })
     render(
       <DepthChartModal tokenId="tok-abc" slug="paris-rain" onClose={vi.fn()} />,
     )
     await screen.findByRole('dialog')
     await user.click(screen.getByRole('button', { name: /Place BUY Order/i }))
     await waitFor(() => {
+      // The feedback banner renders with a leading ⚠️ emoji, so use a
+      // regex substring match instead of an exact-text match.
       expect(
-        screen.getByText('Network error submitting trade'),
+        screen.getByText(/Network error submitting trade/),
       ).toBeInTheDocument()
     })
   })

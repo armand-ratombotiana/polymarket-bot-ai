@@ -274,8 +274,11 @@ describe('AIMLCommandCenter', () => {
         screen.getByText(/Champion\/Challenger Model Lineage/i),
       ).toBeInTheDocument()
     })
-    expect(screen.getByText('v1.4.champion')).toBeInTheDocument()
-    expect(screen.getByText('v1.3.challenger')).toBeInTheDocument()
+    // The version label appears both in the lineage table cell and in the
+    // header badge ("Active: v1.4.champion"). Use ``getAllByText`` to
+    // accept either-or both — the row should be present at least once.
+    expect(screen.getAllByText('v1.4.champion').length).toBeGreaterThanOrEqual(1)
+    expect(screen.getAllByText('v1.3.challenger').length).toBeGreaterThanOrEqual(1)
     // Active version header — "Active: v1.4.champion"
     expect(screen.getByText(/Active: v1\.4\.champion/i)).toBeInTheDocument()
     // Version status badges.

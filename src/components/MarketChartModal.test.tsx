@@ -89,10 +89,10 @@ describe('MarketChartModal', () => {
     apiFetchMock.mockRejectedValue(new Error('Network error'))
     render(<MarketChartModal tokenId="tok-1" slug="paris-rain" onClose={vi.fn()} />)
     await waitFor(() => {
+      // The banner is rendered with a leading ⚠️ emoji, so use a regex
+      // substring match instead of an exact-text match.
       expect(
-        screen.getByText(
-          'Network error loading price history — chart may be stale',
-        ),
+        screen.getByText(/Network error loading price history/),
       ).toBeInTheDocument()
     })
   })
