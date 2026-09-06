@@ -32605,3 +32605,121 @@ proper error / stale / disconnected handling.
    ```tsx
    if (transportDead) return <DisconnectedState onRetry={refetch} />
    ```
+
+---
+
+## W42-2 — full-stack-developer — Minimal tests for 3 last untested components
+
+**Date:** 2026-09-XX (W42-2)
+**Scope:** NEW `src/components/ErrorReporterInit.test.tsx` +
+NEW `src/components/SWRegister.test.tsx` +
+NEW `src/components/ThemeProvider.test.tsx`. Additive only — no
+existing source files or test files edited.
+
+### Background / investigation
+- The three components are the last holdouts in the
+  `src/components/` test-coverage matrix:
+  - `ErrorReporterInit.tsx` — `'use client'` wrapper that returns
+    `null` and calls `installErrorHandlers()` once on mount.
+  - `SWRegister.tsx` — `'use client'` wrapper that returns `null` and
+    calls `registerServiceWorker()` once on mount.
+  - `ThemeProvider.tsx` — `'use client'` wrapper around
+    `next-themes`'s `NextThemesProvider`, forwarding `children`.
+- All three have no visual output to assert against (the first two
+  render `null`; the third renders only what its children render),
+  so the minimal-but-meaningful contract is "renders without crashing
+  in jsdom" — i.e. the `useEffect` / provider wiring does not throw
+  during mount/unmount.
+- Deeper behaviour coverage already lives elsewhere:
+  - `lib/errorReporter.test.ts` covers the listener-install
+    contract for `ErrorReporterInit`.
+  - `lib/registerSW.test.ts` covers the SW-registration contract for
+    `SWRegister`.
+  - `ThemeToggle.test.tsx` exercises theme-toggling through a real
+    `NextThemesProvider`, indirectly covering the provider config
+    that `ThemeProvider` hard-codes.
+
+### Files added
+
+#### `src/components/ErrorReporterInit.test.tsx` (1 test)
+- Renders `<ErrorReporterInit />` and asserts
+  `container.firstChild === null`.
+- Does NOT mock `@/lib/errorReporter` — the real
+  `installErrorHandlers` is import-safe in jsdom (only registers
+  window listeners, no network).
+
+#### `src/components/SWRegister.test.tsx` (1 test)
+- Renders `<SWRegister />` and asserts
+  `container.firstChild === null`.
+- Does NOT mock `@/lib/registerSW` — the real
+  `registerServiceWorker` is import-safe in jsdom (bails early when
+  `'serviceWorker' in navigator` is false, which is the case in
+  jsdom).
+
+#### `src/components/ThemeProvider.test.tsx` (1 test)
+- Renders `<ThemeProvider><div>Test Child</div></ThemeProvider>` and
+  asserts the child text appears via `screen.getByText`.
+- Verifies the wrapper forwards children and that
+  `NextThemesProvider` mounts cleanly under jsdom (relies on the
+  `matchMedia` polyfill already in `src/test/setup.ts`).
+
+### Approach
+1. Read all three source files to confirm the contract under test.
+2. Read `ThemeToggle.test.tsx` for the next-themes provider
+   configuration pattern; mirrored its provider props.
+3. Read `ErrorBoundary.test.tsx` for the side-effect-only component
+   test pattern.
+4. Wrote each test using the exact code from the task spec, adding
+   only a header comment explaining WHY the test is minimal and
+   WHERE the deeper behaviour coverage already lives.
+5. Verified `installErrorHandlers` / `registerServiceWorker` imports
+   are jsdom-safe so no module mocks were needed (which would have
+   become a maintenance liability).
+
+### Verification
+- **Targeted run** —
+  `TMPDIR=/dev/shm/vitest-tmp bun run test -- --run src/components/ErrorReporterInit.test.tsx src/components/SWRegister.test.tsx src/components/ThemeProvider.test.tsx`
+  → 3 files / 3 tests pass (2.87s).
+- **Full suite** —
+  `TMPDIR=/dev/shm/vitest-tmp bun run test` → **93 files / 1518 tests
+  pass**. One uncaught `TypeError` reported from
+  `AIPredictionExplainerPanel.test.tsx` teardown
+  (`explanation.explanation.top_features` undefined). This is
+  PRE-EXISTING — explicitly called out by W41-2 and W41-3 worklogs as
+  out of scope and unrelated to this task. No test fails; vitest
+  surfaces it as `Errors 1` after the suite finishes, identical to
+  the pre-task baseline modulo the +3 new tests.
+- **Lint** — `bun run lint` → EXIT 0, clean.
+- **Untested-components count** —
+  `comm -23 <(ls src/components/*.tsx | grep -v ".test." | grep -v ".skip" | grep -v ".stories" | sed 's|.*/||;s|\.tsx||' | sort) <(ls src/components/*.test.tsx 2>/dev/null | sed 's|.*/||;s|\.test\.tsx||' | sort) | wc -l`
+  → **0**. Every top-level `.tsx` component in `src/components/` now
+  has a sibling `.test.tsx`.
+
+### Test-count delta
+- Before: 90 files / 1515 tests (per W41-2 baseline).
+- After: 93 files / 1518 tests (+3 files / +3 tests), matching the 3
+  new files added by this task.
+
+### Caveats
+- **The 3 new tests are deliberately "renders without crashing"-only.**
+  A more ambitious test would assert that
+  `installErrorHandlers` / `registerServiceWorker` were actually
+  invoked via `vi.spyOn`, but those call-site assertions are already
+  covered by the lib unit tests, and coupling the component test to
+  the lib's internal call shape adds maintenance liability with no
+  additional defect-detection power. The chosen contract ("mount
+  does not throw, render output is `null`/children") is the minimum
+  that catches the only realistic regression in these wrappers: a
+  typo in the import path or a broken `useEffect` dependency array.
+- **`AIPredictionExplainerPanel` uncaught error is pre-existing.**
+  Not in scope; W41-2 explicitly noted it as pre-existing. The full
+  vitest suite reports
+  `Test Files 93 passed (93) / Tests 1518 passed (1518) / Errors 1`,
+  matching the W41-3 baseline modulo the +3 new tests.
+
+### Files touched
+- `src/components/ErrorReporterInit.test.tsx` (NEW — 1 test)
+- `src/components/SWRegister.test.tsx` (NEW — 1 test)
+- `src/components/ThemeProvider.test.tsx` (NEW — 1 test)
+- `agent-ctx/W42-2-full-stack-developer.md` (work record)
+- `worklog.md` (this appended entry)

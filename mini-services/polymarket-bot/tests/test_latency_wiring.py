@@ -1008,9 +1008,26 @@ async def test_paper_fill_without_decision_id_does_not_record(monkeypatch):
 # Import once at module load so the ``client`` fixture can use it without
 # re-importing per-test (the import is heavy — full lifespan of the
 # polymarket-bot app).
+#
+# Broad except: ``api.server`` transitively imports a dozen
+# module-level singletons that read on-disk paths from
+# ``os.environ`` (``AUDIT_DB_PATH`` / ``MODEL_REGISTRY_PATH`` /
+# ``MARKET_DB_PATH`` …) at import time. ``tests/conftest.py``
+# redirects every one of those env vars to a writable sandbox BEFORE
+# the test modules are collected, so the import succeeds in the test
+# session. Outside the test session (e.g. ``python -c 'import
+# api.server'`` from a shell), the env vars default to ``/app/data``
+# which is read-only in the container — the import raises
+# ``PermissionError``, not ``ImportError``. Catching only
+# ``ImportError`` would crash test collection on the bare container
+# image; catching ``Exception`` (broader than ``ImportError`` so
+# ``PermissionError`` / ``OSError`` are also covered) lets the
+# ``TestLatencyAPIRoutes`` class gracefully skip with the existing
+# ``skipif(_app is None, …)`` condition instead of erroring out the
+# entire test module.
 try:
     from api.server import app as _app
-except ImportError:  # pragma: no cover — defensive: api.server may be heavy
+except Exception:  # pragma: no cover — defensive: api.server may be heavy / env-dependent
     _app = None  # type: ignore[assignment]
 
 # Defensive: disable the rate-limit middleware so a fast test sequence
@@ -1020,7 +1037,7 @@ try:  # pragma: no cover — toggle path only fires when slowapi is present
     from api.server import limiter  # type: ignore[attr-defined]
 
     limiter.enabled = False  # type: ignore[attr-defined]
-except ImportError:
+except Exception:  # broader than ImportError — see comment above
     pass
 
 # ``conftest.py`` sets ``API_TOKEN=test-token-conftest`` via

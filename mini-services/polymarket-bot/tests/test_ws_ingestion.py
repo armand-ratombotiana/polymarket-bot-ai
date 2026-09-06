@@ -914,7 +914,6 @@ async def test_reconnect_with_exponential_backoff(
 
 
 @pytest.mark.asyncio
-@pytest.mark.skip(reason="Flaky in full suite — checkpoint state ordering")
 async def test_checkpoint_persists_and_resumes_per_token_seq(
     tmp_path: Path,
     mock_downstream,  # noqa: ARG001
@@ -929,6 +928,21 @@ async def test_checkpoint_persists_and_resumes_per_token_seq(
          ``_last_seq["T1"] == 42`` (loaded synchronously in __init__).
       4. Manager B's FIRST message at seq_no=43 does NOT trigger a gap
          (it's the expected next seq_no).
+
+    Dedup-state note: ``_ws_book_msg`` defaults to the current
+    millisecond timestamp, so two messages built in the same millisecond
+    share the same upstream ``timestamp`` → same data_validator hash →
+    the second message is flagged as a duplicate (``is_valid=False``,
+    ``is_duplicate=True``) and dropped by ``_route_book_snapshot``
+    BEFORE the routed dict is returned. In the full suite, where CPU
+    scheduling can compress the two ``_ws_book_msg`` calls into the
+    same millisecond, this surfaces as a flaky ``result is None``.
+    Belt-and-braces fix: clear ``data_validator``'s dedup deque between
+    mgr_a's processing and mgr_b's processing so mgr_b's first message
+    is always routed (this test is about the checkpoint resume contract,
+    not about the dedup contract — the latter is exercised by the
+    W31-2 ``test_process_message_deduplicates_by_event_data_hash`` test
+    below).
     """
     cp_path = tmp_path / "ws_cp.json"
 
@@ -939,6 +953,19 @@ async def test_checkpoint_persists_and_resumes_per_token_seq(
     await mgr_a.process_message(_ws_book_msg("T1", seq_no=42))
     await mgr_a.checkpoint()
     assert cp_path.exists()
+
+    # Clear the process-global data_validator dedup deque so mgr_b's
+    # first message (built milliseconds after mgr_a's, but possibly in
+    # the same millisecond) is not flagged as a duplicate of mgr_a's
+    # message (both share the same token_id / best_bid / best_ask +
+    # possibly the same upstream timestamp). Without this clear, the
+    # ``result is not None`` assertion below is flaky in the full
+    # suite.
+    try:
+        from core.data_validator import data_validator as _dv
+        _dv._seen_hashes.clear()
+    except (ImportError, AttributeError):  # pragma: no cover — defensive
+        pass
 
     # Manager B loads the checkpoint in __init__.
     mgr_b = WSIngestionManager(
