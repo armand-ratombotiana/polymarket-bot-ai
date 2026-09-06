@@ -72,13 +72,16 @@ def test_get_catalog_returns_one_entry_per_strategy(registry):
 
 # ── 2. get_catalog flags implemented set correctly ───────────────────────────
 def test_get_catalog_flags_implemented_set_correctly(registry):
-    """``implemented=True`` only for the eleven concrete-strategy catalog
+    """``implemented=True`` only for the sixteen concrete-strategy catalog
     entries — the three original concrete strategies
     (mm_avellaneda_stoikov, arb_binary_dutch_book, ml_random_forest_quant)
     plus the three W19-6 additions (stat_ornstein_uhlenbeck,
     mom_macd_histogram, ml_isotonic_calibrated) plus the five W22-3
     additions (arb_cross_correlation, event_news_sentiment,
-    event_resolution_sniper, mm_asymmetric_spread, mm_grid_liquidity)."""
+    event_resolution_sniper, mm_asymmetric_spread, mm_grid_liquidity)
+    plus the five W44-1 additions (arb_temporal_expiry,
+    ml_fractional_kelly, event_poll_discrepancy, event_social_volume,
+    arb_cluster_dislocation)."""
     catalog = registry.get_catalog()
     implemented = [row for row in catalog if row["implemented"]]
     implemented_ids = {row["strategy_id"] for row in implemented}
@@ -97,15 +100,21 @@ def test_get_catalog_flags_implemented_set_correctly(registry):
         "event_resolution_sniper",
         "mm_asymmetric_spread",
         "mm_grid_liquidity",
+        # W44-1 additions — promoted from PLANNED to IMPLEMENTED.
+        "arb_temporal_expiry",
+        "ml_fractional_kelly",
+        "event_poll_discrepancy",
+        "event_social_volume",
+        "arb_cluster_dislocation",
     }
-    assert len(implemented) == 11
+    assert len(implemented) == 16
 
 
 # ── 2b. get_catalog flags implemented_only filter ───────────────────────────
-def test_get_catalog_implemented_only_filter_returns_eleven(registry):
-    """``implemented_only=True`` returns only the eleven IMPLEMENTED rows."""
+def test_get_catalog_implemented_only_filter_returns_sixteen(registry):
+    """``implemented_only=True`` returns only the sixteen IMPLEMENTED rows."""
     catalog = registry.get_catalog(implemented_only=True)
-    assert len(catalog) == 11
+    assert len(catalog) == 16
     for row in catalog:
         assert row["status"] == "IMPLEMENTED"
         assert row["implemented"] is True

@@ -32876,3 +32876,98 @@ trading remains gated behind the operator safety-gate approval.
 - `docs/FINAL_PRODUCTION_SIGN_OFF.md` (rewritten)
 - `CHANGELOG.md` (Wave 43 entry inserted under `## [Unreleased]`)
 - `worklog.md` (this appended entry)
+
+---
+
+## W44-2 · Final E2E Visual Verification (agent-browser)
+
+**Agent:** general-purpose
+**Wave:** W44-2
+**Date:** 2025-09-06
+**Scope:** End-to-end visual verification of the Polymarket Pro dashboard
+via the agent-browser CLI, covering all 8 key panels, responsive layouts,
+and core interactions.
+
+### Environment
+- App: `http://localhost:3000/` (Next.js 16.1.3, Turbopack dev server)
+- Title: `Polymarket Pro — Algorithmic Trading Workstation`
+- Mode: PAPER TRADING (backend /api routes return 404 — expected; no
+  Python bot process running in this sandbox)
+- Browser: agent-browser (Chromium 152.0.7977.64, headless)
+
+### Step 1 — Dashboard load
+- `agent-browser open http://localhost:3000/` → title resolved correctly
+- Initial screenshot captured: `/tmp/w44-dashboard.png`
+- `document.querySelector('.panel-error-boundary')` → **null** (no
+  React error boundary tripped on initial mount)
+
+### Step 2 — 8-panel verification
+Each panel was navigated to via sidebar button click; the
+`panel-error-boundary` selector was checked after every navigation.
+All panels returned null (no React crash).
+
+| # | Panel | Screenshot | Boundary null? | Verification | Result |
+|---|-------|------------|----------------|--------------|--------|
+| 1 | Command Center | `/tmp/w44-panel-1-command.png` | ✅ null | 44 KPI elements + 16 stat cards rendered; system status, balance, P&L, exposure, win-rate, drawdown all visible; "💼 ACTIVE POSITIONS (0)" present | ✅ |
+| 2 | Positions | `/tmp/w44-panel-2-positions.png` | ✅ null | Empty-state renders: "💼 No positions found — Automated strategies (Market Maker, Arbitrage, Signal Trader) will populate live positions here." | ✅ |
+| 3 | AI / ML Engine | `/tmp/w44-panel-3-aiml.png` | ✅ null | Model info rendered: "AI / ML Quantitative Telemetry & Gated Model Registry", "38-FEATURE PIPELINE", "Calibrated 4-Member Ensemble (RF + GB + SGD + LightGBM) · Isotonic Regression · Continuous Drift Supervision", "ACTIVE: V1.CHAMPION", "NOT A GUARANTEE" disclaimer | ✅ |
+| 4 | Data Ingestion | `/tmp/w44-panel-4-data.png` | ✅ null | Health-check error-state rendered gracefully: "Ingestion health endpoint unavailable — HTTP 404 — Retry" (expected; no backend running in sandbox) | ✅ |
+| 5 | Performance Report | `/tmp/w44-panel-5-perf.png` | ✅ null | Disclaimer rendered: "⚠ Performance Metrics Disclaimer — ⚠ Backtest performance does NOT guarantee future results. Only paper/live metrics reflect actual system behavior. Win rate target (95%) is aspirational." | ✅ |
+| 6 | Database Status | `/tmp/w44-panel-6-db.png` | ✅ null | Error-state rendered: "Database status endpoint unavailable — GET /api/system/db-status → 404 Not Found — Retry" (graceful, no boundary) | ✅ |
+| 7 | Safety Gate | `/tmp/w44-panel-7-safety.png` | ✅ null | "LIVE SAFETY GATE · §82 — UNAVAILABLE — Safety-gate endpoint unavailable. The bot may be starting up, or the /api/live/readiness route is not responding." Retry button present | ✅ |
+| 8 | Strategy Registry | `/tmp/w44-panel-8-strategy.png` | ✅ null | Strategy list renders: "⚡ QUANTITATIVE STRATEGY MATRIX — 0 OF 3 IMPLEMENTED ACTIVE — 47 STUBS / RESEARCH", categories (Market Making, Arbitrage, Stat Arb, Momentum, Event Driven, AI/ML), "🏆 STRATEGY LEADERBOARD" | ✅ |
+
+**All 8 panels passed.** No `.panel-error-boundary` element was present
+anywhere in the DOM during any navigation. Panels that depend on a
+backend (Data Ingestion, Database, Safety Gate, Strategy Registry
+catalog) all render graceful `error-state` containers with HTTP-404
+descriptions and Retry buttons rather than throwing React errors.
+
+### Step 3 — Responsive layout
+- Mobile viewport (375 × 812): `/tmp/w44-mobile.png`
+  - `window.innerWidth === 375` ✓
+  - `panel-error-boundary` count = 0 ✓
+  - `scrollWidth > innerWidth` = false ✓ (no horizontal overflow)
+- Desktop viewport (1920 × 1080): `/tmp/w44-desktop.png`
+  - `window.innerWidth === 1920` ✓
+  - `panel-error-boundary` count = 0 ✓
+  - `scrollWidth > innerWidth` = false ✓ (no horizontal overflow)
+
+### Step 4 — Interactions
+| Interaction | Result | Evidence |
+|-------------|--------|----------|
+| Click "Positions" | ✅ | Empty state rendered: "💼 No positions found … Automated strategies will populate live positions here." Screenshot: `/tmp/w44-interaction-positions.png` |
+| Press `Ctrl+K` (Cmd+K analog) | ✅ | Cheat-sheet dialog opened (`role="dialog"` present). Body text contains "⌨️ Workstation Keyboard Cheat Sheet" with Navigation / Trading / View / Settings categories. Screenshot: `/tmp/w44-interaction-cheatsheet.png` |
+| Click theme toggle (☀️) | ✅ | `documentElement.className` switched `dark → light`; `body` background switched `rgb(14,16,21) → rgb(248,250,252)`; toggle `aria-label` switched `Switch to light mode → Switch to dark mode`. Screenshot: `/tmp/w44-interaction-light.png` |
+
+### Step 5 — Summary
+- **8 / 8 panels verified.** ✅
+- **0 React error boundaries triggered** across any navigation,
+  viewport change, or interaction. ✅
+- **2 / 2 responsive viewports** render cleanly with no overflow. ✅
+- **3 / 3 interactions** function as designed. ✅
+- All screenshots saved under `/tmp/w44-*.png` (14 files, ~1.8 MB total).
+
+### Notes / caveats
+- The Python bot backend is **not running in this sandbox**, so
+  panels that hit `/api/*` (Data Ingestion, Database, Safety Gate,
+  Strategy catalog, Performance AI metrics) returned HTTP 404. This
+  is **expected behaviour** and not a regression — each panel
+  renders a deliberate `error-state` block with a Retry button rather
+  than crashing the React tree.
+- The "kpi-error-pill" elements visible on the Command Center (13
+  occurrences with text `err`) are pre-existing UI status pills that
+  surface when metrics are unavailable (e.g. `Realized P&L`, `Win
+  Rate`, `Drawdown`). They are rendered by design and are **not** the
+  same as `panel-error-boundary` (React crash fallback).
+- Initial dev-server start required `setsid bash -c 'exec npx next
+  dev …'` to detach properly from the bash subshell; the standard
+  `nohup bun run dev &` pattern was unreliable because the parent
+  `bun` process kept exiting on the first curl. Server stability
+  recovered and the dashboard stayed responsive for the full
+  verification pass.
+
+### Files touched
+- `/home/z/my-project/worklog.md` (this appended entry; no source
+  code modified — verification-only wave)
+

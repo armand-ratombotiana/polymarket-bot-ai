@@ -49,13 +49,23 @@ class StrategyMeta:
 
 # ── 50 Strategy Metadata Catalog ──────────────────────────────────────────────
 # Status legend: IMPLEMENTED = real trading loop; PLANNED = no-op stub.
-# Six IMPLEMENTED strategies (3 original + 3 W19-6 additions):
+# Sixteen IMPLEMENTED strategies (3 original + 3 W19-6 + 5 W22-3 + 5 W44-1):
 #   • mm_avellaneda_stoikov       → MarketMakerStrategy
 #   • arb_binary_dutch_book       → ArbScannerStrategy
 #   • ml_random_forest_quant      → SignalTraderStrategy
 #   • stat_ornstein_uhlenbeck     → MeanReversionStrategy (W19-6)
 #   • mom_macd_histogram          → MomentumStrategy      (W19-6)
 #   • ml_isotonic_calibrated      → ValueStrategy         (W19-6)
+#   • arb_cross_correlation       → StatisticalArbitrage  (W22-3)
+#   • event_news_sentiment        → EventDriven           (W22-3)
+#   • event_resolution_sniper      → Convergence           (W22-3)
+#   • mm_asymmetric_spread         → SpreadCapture         (W22-3)
+#   • mm_grid_liquidity            → LiquidityProvision    (W22-3)
+#   • arb_temporal_expiry          → LateResolution        (W44-1)
+#   • ml_fractional_kelly          → Ensemble              (W44-1)
+#   • event_poll_discrepancy       → NewsTrader            (W44-1)
+#   • event_social_volume          → SentimentAggregator   (W44-1)
+#   • arb_cluster_dislocation      → CrossMarket           (W44-1)
 
 STRATEGY_CATALOG: list[StrategyMeta] = [
     # ── Group A: Market Making & Liquidity Provision (8) ──
@@ -73,9 +83,9 @@ STRATEGY_CATALOG: list[StrategyMeta] = [
     StrategyMeta("arb_multi_negative_risk", "Negative Risk Multi-Arb", "arbitrage", "Combinatorial arbitrage across N-outcome mutually exclusive events", "Low", False),
     StrategyMeta("arb_gamma_clob_parity", "Gamma-CLOB Parity Arb", "arbitrage", "Exploits pricing dislocations between Gamma AMM and CLOB books", "Low", False),
     StrategyMeta("arb_synthetic_straddle", "Synthetic Straddle Arb", "arbitrage", "Exploits implied volatility mispricing on paired event outcomes", "Medium", False),
-    StrategyMeta("arb_temporal_expiry", "Temporal Expiry Curve", "arbitrage", "Relative value across same-underlying contracts with differing expiries", "Low", False),
+    StrategyMeta("arb_temporal_expiry", "Late Resolution (Decay Curve)", "arbitrage", "W44-1: trades late-resolution decay — BUY when the observed mid is below the modeled logistic-decay fair value (market under-pricing near-certain outcome), SELL when above (over-pricing); uses a logistic decay curve with a 6h half-life and 0.5 steepness", "Low", False, status=STATUS_IMPLEMENTED),
     StrategyMeta("arb_cross_correlation", "Cross-Category Arb", "arbitrage", "Pairs trading on economically correlated event groups (crypto/macro)", "Medium", False, status=STATUS_IMPLEMENTED),
-    StrategyMeta("arb_cluster_dislocation", "Cluster Dislocation Arb", "arbitrage", "Divergence capture in clustered multi-market question groups", "Low", False),
+    StrategyMeta("arb_cluster_dislocation", "Cross-Market Cluster Dislocation", "arbitrage", "W44-1: trades cluster dislocations — BUY the most-dislocated under-priced cluster member and SELL the over-priced one when the member's z-score against the cluster mean exceeds 1.5σ with cluster correlation ≥ 0.55 and ≥ 3 members", "Low", False, status=STATUS_IMPLEMENTED),
     StrategyMeta("arb_cyclic_triangle", "Cyclic Triangle Arb", "arbitrage", "Triangle arbitrage across multi-condition chained prediction markets", "Low", False),
 
     # ── Group C: Statistical Arbitrage & Mean Reversion (8) ──
@@ -100,8 +110,8 @@ STRATEGY_CATALOG: list[StrategyMeta] = [
 
     # ── Group E: Event-Driven, Sentiment & Intelligence (8) ──
     StrategyMeta("event_news_sentiment", "News Sentiment Breakout", "event_driven", "NLP sentiment scoring on breaking news feeds to trade probability shifts", "Medium", False, status=STATUS_IMPLEMENTED),
-    StrategyMeta("event_social_volume", "Social Volume Spike", "event_driven", "Detects sudden surges in social mention velocity to trade news early", "High", False),
-    StrategyMeta("event_poll_discrepancy", "Polling Gap Exploiter", "event_driven", "Exploits statistical gaps between real-world polling and market prices", "Medium", False),
+    StrategyMeta("event_social_volume", "Sentiment (Social Aggregator)", "event_driven", "W44-1: trades aggregated social sentiment — BUY when the current aggregated sentiment z-score against a rolling 50-cycle baseline exceeds +2σ (bullish shift), SELL when below -2σ (bearish shift); weights by source-diversity across ≥ 2 platforms and ≥ 100 mentions", "Medium", False, status=STATUS_IMPLEMENTED),
+    StrategyMeta("event_poll_discrepancy", "News (Polling Gap)", "event_driven", "W44-1: trades polling-vs-price discrepancies — BUY when poll_probability - mid exceeds the polling margin of error + 2.5% buffer (market under-prices YES outcome), SELL in the symmetric case; skips polls with < 500 respondents or > 72h staleness", "Medium", False, status=STATUS_IMPLEMENTED),
     StrategyMeta("event_oracle_dispute", "Oracle Dispute Sniper", "event_driven", "Positions ahead of UMA resolution disputes and bond challenges", "High", False),
     StrategyMeta("event_election_momentum", "Election Momentum Tracker", "event_driven", "Tracks polling momentum shifts in political & election markets", "Medium", False),
     StrategyMeta("event_macro_straddle", "Macro Announcement Straddle", "event_driven", "Pre-positions ahead of CPI/FOMC/jobs reports using straddle execution", "Medium", False),
@@ -113,7 +123,7 @@ STRATEGY_CATALOG: list[StrategyMeta] = [
     StrategyMeta("ml_xgboost_directional", "XGBoost Directional", "machine_learning", "Regularized gradient boosting model on order flow & volume dynamics", "Medium", False),
     StrategyMeta("ml_random_forest_quant", "Random Forest Quant Model", "machine_learning", "Multi-factor bagging ensemble of 100 decision trees", "Low", True, status=STATUS_IMPLEMENTED),
     StrategyMeta("ml_online_sgd_learner", "Online SGD Momentum", "machine_learning", "Real-time passive-aggressive incremental learner updating from every fill", "Medium", False),
-    StrategyMeta("ml_fractional_kelly", "Fractional Kelly Sizing", "machine_learning", "Quant strategy sizing all trades with dynamic Kelly Criterion f*", "Low", False),
+    StrategyMeta("ml_fractional_kelly", "Ensemble (Fractional Kelly)", "machine_learning", "W44-1: ensemble meta-strategy — aggregates BUY/SELL signals from N upstream strategies via weighted-vote (min_confidence ≥ 0.40, vote margin ≥ 10%), computes the aggregated edge as the weighted-mean of the concurring signals' edges, and sizes the consensus position via quarter-Kelly (kelly_fraction = 0.25)", "Low", False, status=STATUS_IMPLEMENTED),
     StrategyMeta("ml_isotonic_calibrated", "Value (ML Fair Value)", "machine_learning", "W19-6: trades mispriced markets — BUY when ML model p_yes >> market mid, SELL when model p_yes << market mid; uses the ensemble model for fair-value estimation with a 5% minimum edge gate", "Low", False, status=STATUS_IMPLEMENTED),
     StrategyMeta("ml_gmm_regime_switch", "GMM Regime Switching", "machine_learning", "Gaussian Mixture Model identifying high-vol vs low-vol market regimes", "Medium", False),
     StrategyMeta("ml_svm_hyperplane", "SVM Hyperplane Classifier", "machine_learning", "Non-linear RBF kernel hyperplane separator for market state classification", "Medium", False),
@@ -141,6 +151,12 @@ _IMPLEMENTED_STRATEGY_CLASSES: dict[str, str] = {
     "event_resolution_sniper": "strategies.convergence.Convergence",
     "mm_asymmetric_spread": "strategies.spread_capture.SpreadCapture",
     "mm_grid_liquidity": "strategies.liquidity.LiquidityProvision",
+    # The five W44-1 additions — promoted from PLANNED to IMPLEMENTED.
+    "arb_temporal_expiry": "strategies.late_resolution.LateResolution",
+    "ml_fractional_kelly": "strategies.ensemble.Ensemble",
+    "event_poll_discrepancy": "strategies.news.NewsTrader",
+    "event_social_volume": "strategies.sentiment.SentimentAggregator",
+    "arb_cluster_dislocation": "strategies.cross_market.CrossMarket",
 }
 
 # Legacy aliases — the registry accepts these alternative ids for backward
