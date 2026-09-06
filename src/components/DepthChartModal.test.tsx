@@ -96,7 +96,7 @@ describe('DepthChartModal', () => {
     // and a child span ("paris-rain"); use a function matcher so the
     // regex matches the combined textContent of the title element.
     expect(
-      await screen.findByText((content, element) => {
+      await screen.findByText((_content, element) => {
         return (
           element?.getAttribute('id') === 'depth-modal-title' &&
           /Order Book Depth:.*paris-rain/.test(element.textContent || '')

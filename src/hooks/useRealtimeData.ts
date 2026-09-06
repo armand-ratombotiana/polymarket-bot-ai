@@ -30,7 +30,7 @@
 // - When the tab is hidden: zero traffic of any kind.
 'use client'
 
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { useWebSocket } from './useWebSocket'
 import { apiFetch } from '@/lib/api'
 
@@ -59,6 +59,19 @@ export interface UseRealtimeDataResult<T> {
   error: string | null
   /** true when the WS is live and pushing updates; false when polling. */
   isRealtime: boolean
+  /**
+   * W41-3 — Epoch milliseconds of the last successful data update
+   * (initial REST fetch, WS push, or polling fallback). `null` until
+   * the first successful update. Panels use this to compute staleness
+   * (e.g. show a "stale" pill when data is older than 30s).
+   */
+  lastUpdated: number | null
+  /**
+   * W41-3 — Imperatively re-run the initial REST fetch. Used by panel
+   * error-state retry buttons. Calling this clears the error state and
+   * flips `isLoading` back to true until the fetch resolves.
+   */
+  refetch: () => void
 }
 
 export function useRealtimeData<T>(
@@ -71,12 +84,21 @@ export function useRealtimeData<T>(
   )
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  // W41-3 — lastUpdated tracks when data was last refreshed. Surfaces
+  // to panels so they can render a StaleIndicator when data ages past
+  // the freshness threshold.
+  const [lastUpdated, setLastUpdated] = useState<number | null>(null)
+  // W41-3 — retryToken is bumped by `refetch()` to force the initial-
+  // fetch effect to re-run. The effect's deps include retryToken so a
+  // retry triggers a fresh REST fetch + clears the error state.
+  const [retryToken, setRetryToken] = useState(0)
   const wsConnectedRef = useRef(false)
 
   // Initial REST fetch — runs once on mount (and again if `endpoint`
-  // changes, which is rare). The `cancelled` flag guards setState after
-  // unmount so we never trigger a React "setState on unmounted component"
-  // warning.
+  // changes, which is rare). Also re-runs when `retryToken` changes so
+  // the panel's retry button can trigger a fresh fetch. The `cancelled`
+  // flag guards setState after unmount so we never trigger a React
+  // "setState on unmounted component" warning.
   useEffect(() => {
     let cancelled = false
     const fetchData = async () => {
@@ -87,6 +109,7 @@ export function useRealtimeData<T>(
         if (!cancelled) {
           setData(json as T)
           setError(null)
+          setLastUpdated(Date.now())
         }
       } catch (e) {
         if (!cancelled) setError(e instanceof Error ? e.message : String(e))
@@ -98,7 +121,16 @@ export function useRealtimeData<T>(
     return () => {
       cancelled = true
     }
-  }, [endpoint])
+  }, [endpoint, retryToken])
+
+  // W41-3 — imperative retry. Bumps retryToken so the initial-fetch
+  // effect re-runs. Re-enables the loading gate so panels can show
+  // their loading state while the retry is in-flight.
+  const refetch = useCallback(() => {
+    setIsLoading(true)
+    setError(null)
+    setRetryToken((t) => t + 1)
+  }, [])
 
   // WebSocket for real-time updates. The useWebSocket hook owns the
   // connection lifecycle (connect / reconnect / pause-on-hidden); we
@@ -109,6 +141,7 @@ export function useRealtimeData<T>(
   // payload type doesn't 1:1 mirror the REST response (e.g. the
   // `metrics` channel pushes BotSnapshot, but AnalyticsPanel fetched
   // /api/analytics whose body is the Analytics object).
+  // W41-3 — also stamps `lastUpdated` so panels can compute staleness.
   const { isConnected } = useWebSocket({
     onMessage: (raw) => {
       // The backend pushes JSON objects with `{ channel, data }`. The
@@ -120,6 +153,7 @@ export function useRealtimeData<T>(
         if (validate && !validate(msg.data)) return
         setData(msg.data as T)
         setError(null)
+        setLastUpdated(Date.now())
       }
     },
     onConnect: () => {
@@ -150,6 +184,7 @@ export function useRealtimeData<T>(
           const json = await res.json()
           setData(json as T)
           setError(null)
+          setLastUpdated(Date.now())
         }
       } catch {
         // Silent fail on background poll — the next tick will retry,
@@ -161,5 +196,5 @@ export function useRealtimeData<T>(
     return () => clearInterval(interval)
   }, [endpoint, isConnected, pollInterval])
 
-  return { data, isLoading, error, isRealtime: isConnected }
+  return { data, isLoading, error, isRealtime: isConnected, lastUpdated, refetch }
 }

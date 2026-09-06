@@ -32163,3 +32163,445 @@ Balance / Open Exposure).
 3. The `makeSnapshot()` factory in each Command Center test file is a
    reusable pattern — copy it into future tests that need a
    `BotSnapshot` fixture.
+
+---
+
+## W41-1 — full-stack-developer
+
+**Task:** Restore 2 `.skip` test files and fix 5 TypeScript errors
+(4 distinct errors; TS2322 spans 2 output lines).
+
+### Summary
+
+- **2 `.skip` files restored** (no source/test code edits needed):
+  - `mini-services/polymarket-bot/tests/test_w30_4_coverage_gaps.py` —
+    all 40 tests pass on first run, including the two tests named in
+    the brief (`test_check_db_writable_returns_failed_check_on_exception`,
+    `test_circuit_breaker_check_fails_closed_on_exception`). Their
+    "failing" state did not reproduce in the current environment.
+  - `src/components/EquityCurve.test.tsx` — all 18 tests pass,
+    including `W22-1: dismisses the error banner when the Dismiss
+    button is clicked`.
+
+- **4 TS errors fixed** across 3 frontend test files:
+  - `CommandCenterDashboard.test.tsx` — `status="error" as ConnectionStatus`
+    was parsed as a JSX attribute `as` (not a TS cast), producing both
+    TS6196 (`ConnectionStatus` unused) and TS2322 (`as` not a prop).
+    Fixed by wrapping in braces: `status={"error" as ConnectionStatus}`.
+  - `DepthChartModal.test.tsx` — `findByText((content, element) => ...)`
+    had unused `content`. Renamed to `_content`.
+  - `KeyboardCheatSheet.test.tsx` — `afterEach` was called but never
+    imported. Added `afterEach` to the `vitest` named-import list.
+
+### Verification
+
+- `find . -name "*.skip" -not -path "*/node_modules/*" -not -path "*/.git/*" | wc -l` → **0**
+- `bunx tsc --noEmit --skipLibCheck 2>&1 | wc -l` → **0**
+- `bunx tsc --noEmit --skipLibCheck 2>&1 | grep -c "error TS"` → **0**
+- Backend tests: `40 passed, 15 warnings` (pre-existing deprecation
+  warnings, unrelated).
+- Frontend tests (touched files): `4 files / 37 tests` all pass.
+- Frontend tests (full suite): `87 files / 1464 tests` all pass.
+  One pre-existing post-test `Error` in `AIPredictionExplainerPanel`
+  teardown (untouched by this task) does not affect test outcomes.
+- `bun run lint` → exit 0, clean.
+
+### Files touched
+
+- `mini-services/polymarket-bot/tests/test_w30_4_coverage_gaps.py` (renamed from `.skip`)
+- `src/components/EquityCurve.test.tsx` (renamed from `.skip`)
+- `src/components/CommandCenterDashboard.test.tsx` (1-line edit)
+- `src/components/DepthChartModal.test.tsx` (1-line edit)
+- `src/components/KeyboardCheatSheet.test.tsx` (1-line edit)
+- `agent-ctx/W41-1-full-stack-developer.md` (work record)
+
+---
+
+# W41-2 — full-stack-developer — Frontend performance optimization
+
+## Task
+Five-step performance pass across the Polymarket Pro workstation:
+1. Audit re-render frequency in PositionsPanel / MarketsPanel /
+   TradesPanel / AnalyticsPanel.
+2. Optimize polling cadence + verify visibility-aware polling + WS use.
+3. Optimize the initial JS bundle (dynamic imports for non-initial
+   panels).
+4. Audit CSS for expensive properties (`backdrop-filter`, `box-shadow`,
+   `will-change`) and layout thrashing.
+5. Add a simple performance monitoring hook (initial render time,
+   re-render count, API call count).
+
+## Prior work consulted
+- `agent-ctx/W41-3-*.md` (useStaleAge + useRealtimeData lastUpdated /
+  refetch additions) — confirmed the WS layer is the primary transport
+  and REST is heartbeat / fallback. Justified the 2s → 5s default bump.
+- `agent-ctx/W40-2-*.md` — confirmed the existing test contract
+  (73 *.test.tsx files) so my changes to preferences.test.ts +
+  usePreferences.test.ts don't regress.
+- `agent-ctx/W39-3-*.md` — Command Center redesign (already in the
+  initial command view, so its panels stay static imports).
+- Existing patterns sampled:
+  - `useRealtimeData` already pauses polling on `document.hidden` and
+    uses `useWebSocket` which itself closes the socket on hide.
+  - `useBot` already batches the 6 composite fallback endpoints via
+    `Promise.all`.
+  - Existing `lazyPanel()` wrapper in `page.tsx` is the canonical
+    pattern for dynamic + ssr:false + loading skeleton.
+
+## Scope of changes
+
+### EDIT `src/app/page.tsx`
+- Converted 11 conditionally-rendered panel imports from static
+  `import X from '@/components/X'` to `const X = lazyPanel(() =>
+  import('@/components/X'), 'Loading …')`. Affected:
+  MarketScreener, OrdersPanel, StrategyMatrix, ArbitrageMatrixView,
+  DeepAnalysisView, AIMLCommandCenter, AICopilotPanel,
+  LeaderboardPanel, BacktestLabView, SystemHealthView,
+  DatabaseExplorerView. Each is only mounted under its own sidebar
+  section (e.g. `system-health`, `analytics-backtest`) so they
+  contribute nothing to the initial command-center view.
+- Extracted 14 inline-lambda callbacks to stable `useCallback`
+  references so they no longer bypass `React.memo` on memoised
+  children:
+  - `handleSelectMarketForChartFromObject(market)`
+  - `handleSelectMarketForQuickTrade(tokenId, slug)`
+  - `handleMobileNavClose()` / `handleMobileNavOpen()`
+  - `handleKillSwitchDialog()` / `handleCancelKill()`
+  - `handleOpenShortcuts()` / `handleCloseShortcuts()`
+  - `handleOpenConfig()` / `handleCloseConfig()`
+  - `handleCloseChartMarket()` / `handleCloseSelectedMarket()`
+  - `handleOrderPlacedAudio()` (deps on `audio`)
+  - `handleCancelCancelAll()`
+- The previously stable `handleSelectMarketForChart`,
+  `handleSelectPositionForChart`, `handleOpenCancelAllDialog`,
+  `handleKillSwitch`, `handleResumeSwitch`, `handleCancelAll` are
+  untouched (already `useCallback`-wrapped).
+
+### EDIT `src/components/AnalyticsPanel.tsx`
+- Wrapped the inline `n`, `isSmallSample`, `winRatePct`,
+  `ciExcludes50`, `winRatePValue`, `isWinRateSignificant`, `ciMid`,
+  `trendArrow`, `trendColor` computations in a single `useMemo`
+  (deps: `[data]`). Skips the binomial-test + CI arithmetic on every
+  parent-driven re-render (e.g. when useBot snapshots tick the
+  page.tsx parent and AnalyticsPanel re-renders as a Command Center
+  grid child).
+- Wrapped `data.active_strategies ?? []` in `useMemo` (deps:
+  `[data?.active_strategies]`) so the array identity stays stable
+  across renders (avoids re-rendering the strategy-strip child
+  element on every parent tick).
+- Hoisted both `useMemo` calls BEFORE the `isLoading` / `!data` early
+  returns so the rules-of-hooks are satisfied (hooks must run in the
+  same order on every render). The memo returns `null` when `data`
+  is absent; the early-return branch then renders the loading /
+  error states without touching the stats.
+
+### EDIT `src/lib/preferences.ts`
+- Bumped `DEFAULTS.refreshIntervalMs` from `2000` → `5000`. The hybrid
+  REST+WS data layer (`useRealtimeData`) already serves panels over
+  the WebSocket by default, so the useBot REST fallback poll is no
+  longer the primary cadence. 5s is the right tradeoff for
+  non-critical data (positions / order books / trades are pushed live
+  via WS; the REST poll is only a heartbeat / fallback). Traders who
+  want snappier fallback updates can dial it back down in Settings.
+
+### EDIT `src/hooks/useBot.ts`
+- Bumped the hook's fallback default from `2000` → `5000` to mirror
+  the preferences default. Callers that pass `refreshIntervalMs`
+  (e.g. page.tsx via usePreferences) override this default — the
+  fallback default only matters when `useBot` is called without
+  options (rare; primarily some test setups).
+
+### EDIT `src/lib/preferences.test.ts` + `src/hooks/usePreferences.test.ts`
+- Updated `EXPECTED_DEFAULTS.refreshIntervalMs` and the persistence
+  assertion to reflect the new 5000ms default. The other
+  `refreshIntervalMs: 5000` occurrences in `preferences.test.ts`
+  were already 5000 (they test the partial-merge path with an
+  explicit override).
+
+### EDIT `src/app/globals.css`
+- Added a W41-2 audit-trail comment block at the end of the file
+  (no CSS rules added or removed). Documents the verification of
+  `backdrop-filter` / `will-change` / `box-shadow` usage and the
+  absence of layout thrashing.
+
+### NEW `src/hooks/usePerformance.ts` + `src/hooks/usePerformance.test.ts`
+- Opt-in performance monitor. Reads
+  `localStorage.polymarket_perf_monitor === '1'` so production builds
+  pay zero cost.
+- Returns `{ initialRenderMs, renderCount, apiCallCount, log }`.
+- Per-name counters in a module-level Map (cumulative across
+  remounts — a panel mounted/unmounted twice keeps incrementing
+  rather than resetting).
+- API call counter wraps `window.fetch` idempotently (multiple
+  `usePerformance` callers share the same counter).
+- Publishes a `window.__perf__` snapshot on every render so the
+  trader can inspect aggregated numbers from the dev console.
+- 7 tests cover the hook contract: returns a result object even
+  when disabled; renderCount increments on every render; the
+  initialRenderMs is recorded once (first paint only); fetch calls
+  are counted; counters persist across remounts; log() degrades
+  gracefully when no entry exists; the `__perf__` global is
+  published.
+
+## Decisions
+
+1. **Don't lazy-load the command-center panels** — EquityCurve,
+   AnalyticsPanel, MLPanel, PositionsPanel, MarketsPanel, TradesPanel,
+   CommandCenterDashboard are all rendered on the initial command
+   view. Converting them to dynamic imports would flash a loading
+   skeleton on first paint — the trader would see "Loading…" where
+   their portfolio summary should be. Keeping them static is the
+   right UX tradeoff.
+
+2. **Don't memoise MarketsPanel's `handleSort` / `handleCopy`** —
+   these are called from inline arrow functions on per-row `<button>`
+   DOM elements (`onClick={() => handleSort('mid')}`). Making the
+   outer function stable doesn't help: the JSX `onClick` lambda is
+   still a new function per render, and DOM elements don't memoise.
+   The expensive work (filter + sort) is already memoised via the
+   existing `useMemo` blocks.
+
+3. **5s polling default, not 10s** — the task asks for "5s for
+   non-critical data". 10s would be too laggy for a trader who's
+   watching positions / open orders in the UI when the WS is down.
+   5s matches the existing `useRealtimeData` default poll interval
+   (the WS drops to polling every 10s, but the trader's mental model
+   of "5s = snappy, 30s = laggy" is preserved). 2s was the old
+   default before the WS layer existed — it was burning backend quota
+   on tabs nobody was looking at.
+
+4. **`usePerformance` is opt-in via localStorage, not env var** —
+   the trader (or an e2e test) flips the flag without a rebuild.
+   The hook returns a result object even when disabled so the
+   caller's destructure never crashes. Zero cost in production.
+
+5. **Cumulative render-count across remounts** — when a panel is
+   unmounted and remounted (e.g. trader navigates away and back),
+   the Map entry persists. This is intentional: we want to know
+   the TOTAL render load, not per-instance. The tradeoff is that
+   "renderCount" doesn't reset on remount — but that's the right
+   semantic for a performance monitor (you're counting work done,
+   not current state).
+
+## Verification
+
+- **Lint:** `bun run lint` → EXIT 0 (clean, zero warnings).
+- **Targeted tests:** ran 7 test files covering every changed area
+  (PositionsPanel, MarketsPanel, TradesPanel, AnalyticsPanel,
+  preferences, usePreferences, usePerformance) — 131 tests passed,
+  0 failures.
+- **Full test suite:** `TMPDIR=/dev/shm/vitest-tmp bun run test -- --run`
+  → 90 test files passed (1515 tests passed). The single unhandled-error
+  message in `AIPredictionExplainerPanel.test.tsx` is PRE-EXISTING
+  (present in the baseline before this task — `explanation.explanation
+  .top_features` TypeError when the test mock omits the nested
+  `explanation` prop). Not in scope for this task.
+- **Dev server:** `dev.log` shows `✓ Compiled in X ms` (most recent:
+  5s + 6.3s for the page.tsx + AnalyticsPanel.tsx recompiles) with no
+  errors after the edits.
+
+## Caveats / known limitations
+
+- **`usePerformance` does not measure paint latency directly** —
+  the `initialRenderMs` is `performance.now()` at mount vs at the
+  first `useEffect` flush. React effects run after the browser
+  commits the DOM but before the next paint frame, so this is a
+  good approximation of "render time" but not strictly "first
+  contentful paint". A future refinement could use the
+  `PerformanceObserver` API for actual FCP. Sufficient for the
+  dashboard's "is this panel slow?" use case.
+- **API call counter is global, not per-panel** — `window.fetch`
+  is a single global function, so the counter aggregates every
+  fetch in the tab. A future refinement could scope per-panel by
+  inspecting the URL (e.g. `/api/positions` → PositionsPanel).
+- **`AIPredictionExplainerPanel` unhandled error** — pre-existing,
+  not introduced by this task. The test file mocks omit the
+  nested `explanation.explanation` object, causing a TypeError
+  during render. Investigating / fixing is a separate task.
+
+## How a developer uses this
+
+1. Enable the performance monitor:
+   ```ts
+   localStorage.setItem('polymarket_perf_monitor', '1')
+   location.reload()
+   ```
+2. Inspect aggregated numbers:
+   ```ts
+   (window as any).__perf__
+   // → { panels: { PositionsPanel: { initialRenderMs, renderCount, … }, … },
+   //     apiCallCount, timestamp }
+   ```
+3. Per-panel log:
+   ```ts
+   const perf = usePerformance('MyPanel')
+   perf.log()  // → console.info('[perf] MyPanel:', { … })
+   ```
+4. Run the perf-hook tests:
+   `bun run test -- --run src/hooks/usePerformance.test.ts`
+5. Verify the polling default:
+   `localStorage.getItem('polymarket_preferences')` → `refreshIntervalMs: 5000`.
+
+---
+
+## W41-3 — full-stack-developer
+
+**Task:** Add missing loading / empty / error / stale / disconnected
+states to all dashboard panels. Audit ~50 panels, create a reusable
+state-component module, and apply the new states to panels that lack
+proper error / stale / disconnected handling.
+
+### Summary
+
+- **NEW `src/components/ui/states.tsx`** — five reusable state
+  primitives, each with a stable `data-testid`:
+  - `PanelSkeleton` — N shimmering lines (clamped 1..12), `role=status`.
+  - `EmptyState` — icon + title + message + optional action. Uses the
+    project's existing `.empty-state` CSS classes.
+  - `ErrorState` — red-tinted message + optional detail line + optional
+    Retry button (shadcn Button). Uses `.error-state` CSS classes.
+  - `StaleIndicator` — inline amber pill (30s–120s) / red pill (>120s).
+    Hidden when data is fresh (<30s). Rendered in panel headers.
+  - `DisconnectedState` — banner for "backend unreachable" (distinct
+    from HTTP errors). Includes optional Retry button.
+
+- **NEW `src/hooks/useStaleAge.ts`** — tracks the current age (in
+  seconds) of a data snapshot. Returns `null` when `lastUpdated` is
+  null. Uses a 5s interval (cheaper than 1s, well below the 30s / 120s
+  thresholds the indicator cares about). Tears down on unmount.
+
+- **MODIFIED `src/hooks/useRealtimeData.ts`** — additive (non-breaking):
+  - Returns `lastUpdated: number | null` — epoch ms of the last
+    successful data update (REST fetch, WS push, or polling fallback).
+    Set whenever `setData` is called.
+  - Returns `refetch: () => void` — imperative retry that bumps an
+    internal `retryToken` to force the initial-fetch effect to re-run.
+    Clears the error state + flips `isLoading` back to true.
+
+- **MODIFIED panels** — added ErrorState (with retry) + StaleIndicator
+  in headers:
+  - `PositionsPanel.tsx` — added ErrorState when fetch fails AND no
+    override; added StaleIndicator next to the Live/Polling badge.
+  - `OrdersPanel.tsx` — same treatment.
+  - `TradesPanel.tsx` — same treatment.
+  - `AnalyticsPanel.tsx` — restructured the bare "Analytics data
+    unavailable" message into ErrorState when `error` is set (text
+    preserved so existing tests pass); added StaleIndicator in header.
+  - `MLPanel.tsx` — restructured the bare "Connecting to ML API…"
+    message into ErrorState with Retry button (text preserved); added
+    `errorDetail` so the underlying fetch error surfaces as a second
+    line; extracted `fetchML` into a `useCallback` so the retry handler
+    can re-invoke it via a `retryToken` state bump.
+
+- **MarketsPanel.tsx** — left untouched. Audit confirmed it already
+  has all 5 states: loading (spinner + "Synchronizing live prediction
+  market order books…"), empty ("No markets match the current
+  filters"), stale (per-row age column + LIVE/STALE/OFFLINE/IDLE
+  header pill + absolute UTC timestamp), disconnected (OFFLINE pill),
+  and a structured `deriveConnStatus` machine that buckets by age.
+
+### Verification
+
+- `bun run lint` → exit 0, clean.
+- `bun run test --run src/components/PositionsPanel.test.tsx src/components/OrdersPanel.test.tsx src/components/TradesPanel.test.tsx src/components/AnalyticsPanel.test.tsx src/components/MLPanel.test.tsx src/components/MarketsPanel.test.tsx src/components/ui/states.test.tsx src/hooks/useRealtimeData.test.ts src/hooks/useStaleAge.test.ts` → 9 files / 174 tests, all pass.
+- Full suite `TMPDIR=/dev/shm/vitest-tmp bun run test` → 90 files / 1515 tests pass. One pre-existing uncaught `Error` in `AIPredictionExplainerPanel` teardown (untouched by this task; called out by W41-1 as pre-existing) does not affect test outcomes.
+
+### Files touched
+
+- `src/components/ui/states.tsx` (NEW)
+- `src/components/ui/states.test.tsx` (NEW — 34 tests)
+- `src/hooks/useStaleAge.ts` (NEW)
+- `src/hooks/useStaleAge.test.ts` (NEW — 5 tests)
+- `src/hooks/useRealtimeData.ts` (additive — `lastUpdated` + `refetch`)
+- `src/hooks/useRealtimeData.test.ts` (additive — 5 new tests)
+- `src/components/PositionsPanel.tsx` (ErrorState + StaleIndicator)
+- `src/components/OrdersPanel.tsx` (ErrorState + StaleIndicator)
+- `src/components/TradesPanel.tsx` (ErrorState + StaleIndicator)
+- `src/components/AnalyticsPanel.tsx` (ErrorState with retry + StaleIndicator)
+- `src/components/MLPanel.tsx` (ErrorState with retry; preserves "Connecting to ML API…" text)
+- `agent-ctx/W41-3-full-stack-developer.md` (work record)
+
+### Approach
+
+1. **Audit first** — read each of the 6 panels the task named
+   (Positions / Markets / Orders / Trades / Analytics / ML) to
+   confirm what was already there. Most had loading + empty states
+   but no error retry, no stale indicator, no disconnected state.
+   MarketsPanel already had all 5 via its `deriveConnStatus` pill.
+
+2. **Build the reusable module first** — `states.tsx` exports 5
+   primitives that all use the project's existing CSS classes
+   (`.empty-state`, `.error-state`, `Skeleton`). Each renders a stable
+   `data-testid` so future tests can target state without relying on
+   text matching.
+
+3. **Wire the hook additively** — `useRealtimeData` already exposed
+   `error`; panels just weren't destructuring it. Added `lastUpdated`
+   + `refetch` to the return type without changing existing fields.
+   The hook tests are additive (5 new tests; the original 11 still
+   pass unchanged).
+
+4. **Apply per-panel** — each panel that lacked error handling now
+   renders `ErrorState` when `error && !data`. Each panel that has
+   a data timestamp now renders `StaleIndicator` in the header. The
+   `useStaleAge` hook computes the current age from `lastUpdated` and
+   re-renders every 5s.
+
+5. **Preserve test contracts** — the existing tests assert on the
+   exact text of loading / empty states ("Loading positions…", "No
+   positions found", "Analytics data unavailable", "Connecting to ML
+   API…"). My ErrorState component renders its `message` prop as the
+   title text, so all those assertions still match.
+
+### Caveats
+
+- **`StaleIndicator` only renders for self-fetched data** — when a
+  panel is passed an override prop (e.g. `positions={samplePositions}`
+  in the tests), the hook still runs but `age` is forced to null so
+  the indicator doesn't surface a misleading "stale" pill. The parent's
+  own snapshot freshness is the parent's concern.
+
+- **`error` is set only by the initial REST fetch** — the
+  `useRealtimeData` hook does NOT flip `error` back to a string on
+  polling-fallback failures (it silently retries). This means a panel
+  that successfully loaded once and then loses its backend won't show
+  an ErrorState — only a StaleIndicator (once 30s pass). This is
+  intentional: silent retry is better UX than flickering error
+  banners on transient blips.
+
+- **`AIPredictionExplainerPanel` pre-existing uncaught error** — the
+  test runner reports 1 uncaught `TypeError: Cannot read properties of
+  undefined (reading 'top_features')` from
+  `src/components/AIPredictionExplainerPanel.tsx:740`. W41-1's worklog
+  explicitly notes this is pre-existing and unrelated. My changes do
+  not touch that file.
+
+### How a developer uses this
+
+1. Render the loading state when `isLoading && !data`:
+   ```tsx
+   if (isLoading && !data) return <PanelSkeleton lines={4} />
+   ```
+
+2. Render the error state when `error && !data`:
+   ```tsx
+   if (error && !data) return <ErrorState message="X unavailable" detail={error} onRetry={refetch} />
+   ```
+
+3. Render the empty state when `data.length === 0`:
+   ```tsx
+   if (data.length === 0) return <EmptyState icon="📭" title="No items" message="Try refreshing." />
+   ```
+
+4. Render the StaleIndicator in the header next to the Live/Polling badge:
+   ```tsx
+   const age = useStaleAge(lastUpdated)
+   {age !== null && <StaleIndicator age={age} />}
+   ```
+
+5. Render the DisconnectedState when the backend is unreachable (rare;
+   typically only used when the panel knows the WS has permanently
+   failed AND polling is also failing):
+   ```tsx
+   if (transportDead) return <DisconnectedState onRetry={refetch} />
+   ```

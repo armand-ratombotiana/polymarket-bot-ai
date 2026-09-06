@@ -36,7 +36,9 @@ import { Trade } from '@/hooks/useBot'
 import { formatHierarchicalMarket } from '@/lib/formatters'
 import { fmtAge, fmtPrice, fmtPnl, fmtUsd, fmtTimeAbs } from '@/lib/design-tokens'
 import { useRealtimeData } from '@/hooks/useRealtimeData'
+import { useStaleAge } from '@/hooks/useStaleAge'
 import { Badge } from '@/components/ui/badge'
+import { ErrorState, StaleIndicator } from '@/components/ui/states'
 
 interface TradesApiResponse {
   trades?: Trade[]
@@ -61,6 +63,9 @@ function TradesPanel({ trades: tradesOverride, isRealtime: isRealtimeOverride, o
     data: fetched,
     isLoading,
     isRealtime: wsIsRealtime,
+    error,
+    lastUpdated,
+    refetch,
   } = useRealtimeData<TradesApiResponse>('/api/trades?limit=100', {
     wsChannel: 'trades',
     pollInterval: 10000,
@@ -68,6 +73,11 @@ function TradesPanel({ trades: tradesOverride, isRealtime: isRealtimeOverride, o
 
   const trades = tradesOverride ?? fetched?.trades ?? []
   const isRealtime = isRealtimeOverride ?? wsIsRealtime
+
+  // W41-3 — compute the data's age so we can surface a StaleIndicator
+  // in the header when the snapshot is older than 30s. Skipped when
+  // the caller provides a trades override (no timestamp surfaced).
+  const age = useStaleAge(tradesOverride == null ? lastUpdated : null)
 
   const [filterQuery, setFilterQuery] = useState('')
   const [sideFilter, setSideFilter] = useState<'ALL' | 'BUY' | 'SELL'>('ALL')
@@ -165,6 +175,11 @@ function TradesPanel({ trades: tradesOverride, isRealtime: isRealtimeOverride, o
           ) : (
             <Badge variant="warning" className="text-[9.5px] py-0.5">⟳ Polling</Badge>
           )}
+          {/* W41-3 — StaleIndicator renders as an inline amber/red pill
+              when the fetched snapshot is older than 30s. Hidden while
+              fresh (<30s) so the header doesn't accumulate noise. Skipped
+              when the caller provides a trades override. */}
+          {age !== null && <StaleIndicator age={age} />}
         </div>
 
         <div className="flex items-center gap-2 text-xs">
@@ -252,6 +267,16 @@ function TradesPanel({ trades: tradesOverride, isRealtime: isRealtimeOverride, o
             <span className="spinner mr-2" aria-hidden="true" />
             Loading recent executions…
           </div>
+        ) : error && tradesOverride == null && trades.length === 0 ? (
+          // W41-3 — Error state. Rendered only when the initial REST fetch
+          // failed AND no override was supplied. Includes a Retry button
+          // that calls the hook's refetch().
+          <ErrorState
+            message="Recent executions unavailable"
+            detail={error}
+            onRetry={refetch}
+            retryLabel="Retry"
+          />
         ) : filteredTrades.length === 0 ? (
           <div className="empty-state py-6">
             <span className="empty-state-icon text-2xl" aria-hidden="true">⚡</span>

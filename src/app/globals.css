@@ -3447,4 +3447,50 @@ svg[tabindex="0"]:focus-visible,
    END W39-2 — COMPREHENSIVE DESIGN SYSTEM REDESIGN
    ═══════════════════════════════════════════════════════════════════════════ */
 
+/* ═══════════════════════════════════════════════════════════════════════════
+   W41-2 — Performance audit notes (no rules added — verification only)
+   ═══════════════════════════════════════════════════════════════════════════
+
+   Audited as part of the W41-2 frontend performance pass:
+   • `backdrop-filter` usage — confirmed sparse:
+       - `.topbar` via the JSX `backdrop-blur-md` Tailwind utility
+         (TopStatusBar.tsx). Single sticky element; intentional UX so
+         the trader can see content scrolling underneath the bar.
+       - `.modal` + `.modal-backdrop` (modal surfaces only mount when
+         a modal is open — no continuous GPU layer cost on the main
+         dashboard).
+       - Sonner toaster `[data-sonner-toast]` (only mounts when a
+         toast is in flight).
+     The expensive `.data-table th` translucent + blur combo was
+     already replaced with a solid surface by the W39-2 redesign (see
+     the comment block at line ~3270). No further changes required.
+
+   • `will-change` usage — confirmed sparing:
+       - `.card-hover` declares `will-change: transform` (line ~2285).
+         That class is currently NOT referenced by any component
+         (verified via `grep -rn 'card-hover' src/`). It's dead CSS
+         kept as a utility for future KPI-card hover effects; the
+         `will-change` hint costs nothing when the class is unused.
+
+   • `box-shadow` usage — confirmed contained:
+       - Used for elevation on cards / KPI tiles / modals / focus rings.
+       - No large-shadow rules on per-row elements (the data-table rows
+         use a 2px left border for hover affordance instead of a shadow
+         — see line ~3276).
+       - The `--shadow-{xs,sm,md,lg,xl,card,popover}` token scale is
+         applied via the `.shadow-*` utility classes (line ~1831); each
+         shadow is a single 1–3 layer declaration, not a multi-layer
+         composite.
+
+   • Layout thrashing — confirmed absent:
+       - Panel components mutate refs (e.g. MarketsPanel's `prevMidsRef`)
+         on render — that's a plain JS object mutation, NOT a layout
+         query. No `getBoundingClientRect` / `offsetWidth` / `scrollTop`
+         reads happen mid-render that would force a synchronous layout
+         reflow.
+
+   No CSS rules added or removed by W41-2 — this block is purely the
+   audit trail so a future reviewer can see what was checked.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
 

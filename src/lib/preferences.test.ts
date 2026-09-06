@@ -38,7 +38,7 @@ const EXPECTED_DEFAULTS: UserPreferences = {
   theme: 'dark',
   locale: 'en',
   defaultPanel: 'command',
-  refreshIntervalMs: 2000,
+  refreshIntervalMs: 5000,
   autoRefresh: true,
   reducedMotion: false,
   showUnrealizedPnl: true,

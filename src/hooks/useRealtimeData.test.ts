@@ -325,4 +325,109 @@ describe('useRealtimeData', () => {
     act(() => MockWebSocket.instances[0].triggerOpen())
     expect(result.current.isRealtime).toBe(true)
   })
+
+  // ─────────────────────────────────────────────────────────────────────
+  // W41-3 — `lastUpdated` + `refetch` additions (additive — non-breaking).
+  // ─────────────────────────────────────────────────────────────────────
+
+  it('exposes lastUpdated=null before the first successful fetch resolves', () => {
+    vi.mocked(fetch).mockImplementation(() => new Promise<Response>(() => {}))
+    const { result } = renderHook(() =>
+      useRealtimeData('/api/positions', { wsChannel: 'positions' }),
+    )
+    expect(result.current.lastUpdated).toBeNull()
+  })
+
+  it('stamps lastUpdated with the current epoch ms after a successful REST fetch', async () => {
+    vi.mocked(fetch).mockResolvedValue(jsonOk({ positions: [] }))
+    const before = Date.now()
+    const { result } = renderHook(() =>
+      useRealtimeData('/api/positions', { wsChannel: 'positions' }),
+    )
+    await waitFor(() => {
+      expect(result.current.lastUpdated).not.toBeNull()
+    })
+    expect(result.current.lastUpdated!).toBeGreaterThanOrEqual(before)
+  })
+
+  it('exposes lastUpdated as a function of WS pushes (updates on each message)', async () => {
+    vi.mocked(fetch).mockResolvedValue(jsonOk({ positions: [] }))
+    const { result } = renderHook(() =>
+      useRealtimeData<{ positions: unknown[] }>('/api/positions', {
+        wsChannel: 'positions',
+      }),
+    )
+    await waitFor(() => {
+      expect(result.current.lastUpdated).not.toBeNull()
+    })
+    const restStamp = result.current.lastUpdated
+
+    act(() => MockWebSocket.instances[0].triggerOpen())
+    // Yield a tick so the restStamp value is in the past relative to the
+    // WS push below.
+    await new Promise((r) => setTimeout(r, 5))
+    act(() =>
+      MockWebSocket.instances[0].triggerMessage({
+        channel: 'positions',
+        data: { positions: [{ token_id: 'ws' }] },
+      }),
+    )
+    expect(result.current.lastUpdated).not.toBeNull()
+    expect(result.current.lastUpdated!).toBeGreaterThan(restStamp!)
+  })
+
+  it('exposes a refetch() function that re-runs the initial REST fetch', async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(jsonOk({ positions: [{ token_id: 'first' }] }))
+      .mockResolvedValueOnce(jsonOk({ positions: [{ token_id: 'second' }] }))
+
+    const { result } = renderHook(() =>
+      useRealtimeData<{ positions: unknown[] }>('/api/positions', {
+        wsChannel: 'positions',
+      }),
+    )
+
+    await waitFor(() => {
+      expect(result.current.data?.positions).toEqual([{ token_id: 'first' }])
+    })
+
+    act(() => result.current.refetch())
+
+    // refetch flips isLoading back to true immediately.
+    expect(result.current.isLoading).toBe(true)
+    // Then the second mocked response resolves and replaces the data.
+    await waitFor(() => {
+      expect(result.current.data?.positions).toEqual([{ token_id: 'second' }])
+    })
+    expect(result.current.isLoading).toBe(false)
+  })
+
+  it('refetch() clears a previously-set error so the panel can show its loading state', async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(new Response('boom', { status: 500 }))
+      .mockResolvedValueOnce(jsonOk({ positions: [{ token_id: 'ok' }] }))
+
+    const { result } = renderHook(() =>
+      useRealtimeData<{ positions: unknown[] }>('/api/positions', {
+        wsChannel: 'positions',
+      }),
+    )
+
+    await waitFor(() => {
+      expect(result.current.error).toContain('500')
+    })
+    expect(result.current.error).not.toBeNull()
+
+    act(() => result.current.refetch())
+
+    // refetch clears the error immediately.
+    expect(result.current.error).toBeNull()
+    expect(result.current.isLoading).toBe(true)
+
+    // Then the second mocked response resolves successfully.
+    await waitFor(() => {
+      expect(result.current.data?.positions).toEqual([{ token_id: 'ok' }])
+    })
+    expect(result.current.error).toBeNull()
+  })
 })

@@ -165,7 +165,7 @@ describe('CommandCenterDashboard', () => {
     const { container } = render(
       <CommandCenterDashboard
         snapshot={makeSnapshot({ kill_switch: true })}
-        status="error" as ConnectionStatus
+        status={"error" as ConnectionStatus}
         wsConnected={false}
         positions={<div />}
         orderBooks={<div />}

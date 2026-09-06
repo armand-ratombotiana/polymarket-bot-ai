@@ -138,7 +138,9 @@ export type ConnectionStatus = 'connecting' | 'connected' | 'disconnected' | 'er
 // polling interval. Both fields default to the prior hardcoded
 // values so existing call sites are unaffected.
 export interface UseBotOptions {
-  /** REST fallback polling interval, ms. Defaults to 2000. The
+  /** REST fallback polling interval, ms. Defaults to 5000 (W41-2 —
+   *  was 2000; relaxed because the WebSocket pushes real-time updates
+   *  and the REST poll is only a heartbeat / fallback). The
    *  WebSocket connection is unaffected — this only gates the
    *  setInterval fallback that fires when the WS is down or has
    *  not yet connected. */
@@ -146,10 +148,12 @@ export interface UseBotOptions {
 }
 
 export function useBot(opts?: UseBotOptions) {
-  // W15-2 — preferences-driven polling cadence. Defaults to 2s so
-  // every existing call site (and existing tests that don't pass
-  // options) keeps the historical behaviour.
-  const refreshIntervalMs = opts?.refreshIntervalMs ?? 2000
+  // W15-2 — preferences-driven polling cadence. W41-2 — default
+  // bumped from 2s → 5s; the WS layer is the primary transport now
+  // and the REST poll is only a heartbeat / fallback. Callers that
+  // pass `refreshIntervalMs` (e.g. page.tsx via usePreferences)
+  // override this default.
+  const refreshIntervalMs = opts?.refreshIntervalMs ?? 5000
   // W15-5 — heartbeat cadence when the WS is healthy. The WS pushes
   // every state change, but a silent socket death (NAT timeout, server
   // restart without a clean close frame) would leave us stuck without

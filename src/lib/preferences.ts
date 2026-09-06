@@ -120,7 +120,14 @@ const DEFAULTS: UserPreferences = {
   theme: 'dark',
   locale: 'en',
   defaultPanel: 'command',
-  refreshIntervalMs: 2000,
+  // W41-2 — bumped from 2000 → 5000ms. The hybrid REST+WS data layer
+  // (useRealtimeData) already serves panels over the WebSocket by
+  // default, so the useBot REST fallback poll is no longer the
+  // primary cadence. 5s is the right tradeoff for non-critical data
+  // (positions / order books / trades are pushed live via WS; the
+  // REST poll is only a heartbeat / fallback). Traders who want
+  // snappier fallback updates can dial it back down in Settings.
+  refreshIntervalMs: 5000,
   autoRefresh: true,
   reducedMotion: false,
   showUnrealizedPnl: true,

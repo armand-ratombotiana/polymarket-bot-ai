@@ -51,7 +51,11 @@ import CommandCenterDashboard from '@/components/CommandCenterDashboard'
 
 // Markets
 import MarketsPanel from '@/components/MarketsPanel'
-import MarketScreener from '@/components/MarketScreener'
+// W41-2 — lazy-loaded: only shown when the trader navigates to the
+// markets-screener sidebar section. Pulling it out of the initial
+// bundle keeps the first-paint JS lean (the screener is ~960 LOC
+// + pulls in its own filters / formatting helpers).
+const MarketScreener = lazyPanel(() => import('@/components/MarketScreener'), 'Loading Market Screener…')
 
 // W17-2 — Order Flow workstation (lazy: combines Recharts + framer-motion
 // + per-tick render path; the dynamic chunk keeps the initial bundle lean).
@@ -59,12 +63,20 @@ const OrderFlowPanel = lazyPanel(() => import('@/components/OrderFlowPanel'), 'L
 
 // Portfolio
 import PositionsPanel from '@/components/PositionsPanel'
-import OrdersPanel from '@/components/OrdersPanel'
+// W41-2 — lazy-loaded: only shown under the `portfolio-orders` sidebar
+// section. Loaded dynamically so the open-orders table code stays
+// out of the initial bundle (the command center uses TradesPanel +
+// PositionsPanel + MarketsPanel, not OrdersPanel).
+const OrdersPanel = lazyPanel(() => import('@/components/OrdersPanel'), 'Loading Open Orders…')
 import TradesPanel from '@/components/TradesPanel'
 
 // Strategies
-import StrategyMatrix from '@/components/StrategyMatrix'
-import ArbitrageMatrixView from '@/components/ArbitrageMatrixView'
+// W41-2 — lazy-loaded: only shown under `strategies-registry` +
+// `analytics-performance`. Loaded dynamically so the strategy
+// registry table + leaderboard chunks stay out of the initial
+// bundle (the command center doesn't render either of these).
+const StrategyMatrix = lazyPanel(() => import('@/components/StrategyMatrix'), 'Loading Strategy Registry…')
+const ArbitrageMatrixView = lazyPanel(() => import('@/components/ArbitrageMatrixView'), 'Loading Arbitrage Matrix…')
 // W23-5 — Strategy Performance dashboard (per-strategy P&L, risk-adjusted
 // ranking, equity overlay, sortable comparison table). Loaded with
 // `next/dynamic` + `ssr: false` so the Recharts multi-line + bar chart
@@ -72,17 +84,29 @@ import ArbitrageMatrixView from '@/components/ArbitrageMatrixView'
 const StrategyPerformancePanel = lazyPanel(() => import('@/components/StrategyPerformancePanel'), 'Loading Strategy Performance…')
 
 // Intelligence
-import DeepAnalysisView from '@/components/DeepAnalysisView'
-import AIMLCommandCenter from '@/components/AIMLCommandCenter'
-import AICopilotPanel from '@/components/AICopilotPanel'
+// W41-2 — lazy-loaded: each intelligence panel is ~500–750 LOC and
+// only mounts when its sidebar section is active. Loaded dynamically
+// so the per-feature intelligence chunks (Deep Analysis, AI/ML Engine,
+// Copilot) stay out of the initial bundle.
+const DeepAnalysisView = lazyPanel(() => import('@/components/DeepAnalysisView'), 'Loading Deep Analysis…')
+const AIMLCommandCenter = lazyPanel(() => import('@/components/AIMLCommandCenter'), 'Loading AI / ML Engine…')
+const AICopilotPanel = lazyPanel(() => import('@/components/AICopilotPanel'), 'Loading AI Copilot…')
 
 // Analytics
-import LeaderboardPanel from '@/components/LeaderboardPanel'
-import BacktestLabView from '@/components/BacktestLabView'
+// W41-2 — lazy-loaded: only shown under `analytics-performance`,
+// `analytics-backtest`, and `strategies-registry`. Loaded dynamically
+// so the leaderboard + backtest lab chunks stay out of the initial
+// bundle (the command center doesn't render either of these).
+const LeaderboardPanel = lazyPanel(() => import('@/components/LeaderboardPanel'), 'Loading Leaderboard…')
+const BacktestLabView = lazyPanel(() => import('@/components/BacktestLabView'), 'Loading Backtest Lab…')
 
 // System
-import SystemHealthView from '@/components/SystemHealthView'
-import DatabaseExplorerView from '@/components/DatabaseExplorerView'
+// W41-2 — lazy-loaded: only shown under `system-health` +
+// `system-database`. Loaded dynamically so the system-inspection
+// chunks (which include introspection tables, health probes, etc.)
+// stay out of the initial bundle.
+const SystemHealthView = lazyPanel(() => import('@/components/SystemHealthView'), 'Loading System Health…')
+const DatabaseExplorerView = lazyPanel(() => import('@/components/DatabaseExplorerView'), 'Loading Database Explorer…')
 
 // W8-10 — Wave-8 intelligence / analytics / system / capital panels.
 // Loaded with `next/dynamic` + `ssr: false` so the client-only panels
@@ -578,6 +602,69 @@ export default function Dashboard() {
     setConfirmCancelAll(true)
   }, [])
 
+  // W41-2 — stable callbacks for panels whose handlers were previously
+  // inline lambdas (`onSelectMarket={(m) => setChartMarket(m)}` etc.).
+  // Inline lambdas would be new function references on every parent
+  // render — bypassing React.memo on any memoised child that receives
+  // them. The same pattern as handleSelectMarketForChart above, applied
+  // to ArbitrageMatrixView, DeepAnalysisView, AICopilotPanel, and the
+  // mobile-nav close handler.
+  const handleSelectMarketForChartFromObject = useCallback((market: { tokenId: string; slug: string }) => {
+    setChartMarket(market)
+  }, [])
+
+  const handleSelectMarketForQuickTrade = useCallback((tokenId: string, slug: string) => {
+    setSelectedMarket({ tokenId, slug })
+  }, [])
+
+  const handleMobileNavClose = useCallback(() => {
+    setMobileNavOpen(false)
+  }, [])
+
+  const handleKillSwitchDialog = useCallback(() => {
+    setConfirmKill(true)
+  }, [])
+
+  const handleOpenShortcuts = useCallback(() => {
+    setShortcutsOpen(true)
+  }, [])
+
+  const handleOpenConfig = useCallback(() => {
+    setConfigOpen(true)
+  }, [])
+
+  const handleMobileNavOpen = useCallback(() => {
+    setMobileNavOpen(true)
+  }, [])
+
+  const handleCloseChartMarket = useCallback(() => {
+    setChartMarket(null)
+  }, [])
+
+  const handleCloseSelectedMarket = useCallback(() => {
+    setSelectedMarket(null)
+  }, [])
+
+  const handleOrderPlacedAudio = useCallback(() => {
+    audio.playOrderPlaced()
+  }, [audio])
+
+  const handleCloseConfig = useCallback(() => {
+    setConfigOpen(false)
+  }, [])
+
+  const handleCloseShortcuts = useCallback(() => {
+    setShortcutsOpen(false)
+  }, [])
+
+  const handleCancelKill = useCallback(() => {
+    setConfirmKill(false)
+  }, [])
+
+  const handleCancelCancelAll = useCallback(() => {
+    setConfirmCancelAll(false)
+  }, [])
+
   const isKilled = snapshot.kill_switch
   const isObserving = snapshot.observation_only
   const openOrderCount = snapshot.open_orders?.length ?? 0
@@ -632,7 +719,7 @@ export default function Dashboard() {
           active={activeSection}
           onChange={setActiveSection}
           mobileOpen={mobileNavOpen}
-          onMobileClose={() => setMobileNavOpen(false)}
+          onMobileClose={handleMobileNavClose}
         />
 
         <main id="main" className="main-content" role="main">
@@ -641,14 +728,14 @@ export default function Dashboard() {
             snapshot={snapshot}
             status={status}
             uptime={uptime}
-            onKillSwitch={() => setConfirmKill(true)}
+            onKillSwitch={handleKillSwitchDialog}
             onResumeSwitch={handleResumeSwitch}
-            onCancelAll={() => setConfirmCancelAll(true)}
-            onOpenShortcuts={() => setShortcutsOpen(true)}
+            onCancelAll={handleOpenCancelAllDialog}
+            onOpenShortcuts={handleOpenShortcuts}
             onToggleMute={audio.toggleMute}
             muted={audio.muted}
-            onOpenConfig={() => setConfigOpen(true)}
-            onMobileNav={() => setMobileNavOpen(true)}
+            onOpenConfig={handleOpenConfig}
+            onMobileNav={handleMobileNavOpen}
           />
 
           {/* ── Page content ─────────────────────────────────────────── */}
@@ -687,7 +774,7 @@ export default function Dashboard() {
                   snapshot={snapshot}
                   status={status}
                   wsConnected={wsConnected}
-                  onKillSwitch={() => setConfirmKill(true)}
+                  onKillSwitch={handleKillSwitchDialog}
                   positions={
                     <PositionsPanel
                       positions={snapshot.positions}
@@ -740,7 +827,7 @@ export default function Dashboard() {
               <div style={{ height: '100%', overflow: 'hidden' }}>
                 <MarketScreener
                   onSelectMarket={handleSelectMarketForChart}
-                  onQuickTrade={(tokenId, slug) => setSelectedMarket({ tokenId, slug })}
+                  onQuickTrade={handleSelectMarketForQuickTrade}
                 />
               </div>
               </PanelErrorBoundary>
@@ -824,7 +911,7 @@ export default function Dashboard() {
             {activeSection === 'strategies-arbitrage' && (
               <PanelErrorBoundary label="Arbitrage Matrix">
               <div style={{ height: '100%', overflow: 'hidden' }}>
-                <ArbitrageMatrixView onSelectMarket={(m) => setChartMarket(m)} />
+                <ArbitrageMatrixView onSelectMarket={handleSelectMarketForChartFromObject} />
               </div>
               </PanelErrorBoundary>
             )}
@@ -846,8 +933,8 @@ export default function Dashboard() {
                     mounts the DepthChartModal (depth book + trade ticket) for that
                     market. Mirrors the MarketsPanel onSelectMarket wiring pattern. */}
                 <DeepAnalysisView
-                  onOpenChart={(m) => setChartMarket(m)}
-                  onSelectMarket={(tokenId, slug) => setSelectedMarket({ tokenId, slug })}
+                  onOpenChart={handleSelectMarketForChartFromObject}
+                  onSelectMarket={handleSelectMarketForQuickTrade}
                 />
               </div>
               </PanelErrorBoundary>
@@ -876,7 +963,7 @@ export default function Dashboard() {
               <PanelErrorBoundary label="AI Copilot">
               <div className="workstation-split-layout">
                 <div style={{ overflow: 'hidden' }}>
-                  <AICopilotPanel onSelectMarket={(m) => setChartMarket(m)} />
+                  <AICopilotPanel onSelectMarket={handleSelectMarketForChartFromObject} />
                 </div>
                 <div style={{ overflow: 'auto', display: 'flex', flexDirection: 'column', gap: '10px' }} className="scrollbar-thin">
                   <EquityCurve />
@@ -1073,30 +1160,30 @@ export default function Dashboard() {
         <MarketChartModal
           tokenId={chartMarket.tokenId}
           slug={chartMarket.slug}
-          onClose={() => setChartMarket(null)}
-          onOrderPlaced={() => audio.playOrderPlaced()}
+          onClose={handleCloseChartMarket}
+          onOrderPlaced={handleOrderPlacedAudio}
         />
       )}
       {selectedMarket && (
         <DepthChartModal
           tokenId={selectedMarket.tokenId}
           slug={selectedMarket.slug}
-          onClose={() => setSelectedMarket(null)}
-          onOrderPlaced={() => audio.playOrderPlaced()}
+          onClose={handleCloseSelectedMarket}
+          onOrderPlaced={handleOrderPlacedAudio}
         />
       )}
-      <StrategyConfigModal isOpen={configOpen} onClose={() => setConfigOpen(false)} />
+      <StrategyConfigModal isOpen={configOpen} onClose={handleCloseConfig} />
       {/* W17-6 — New full-screen KeyboardCheatSheet (search + practice
           mode + JSON export). The legacy ShortcutsModal is no longer
           rendered — KeyboardCheatSheet is a strict superset. */}
       <KeyboardCheatSheet
         isOpen={shortcutsOpen}
-        onClose={() => setShortcutsOpen(false)}
+        onClose={handleCloseShortcuts}
       />
       {/* W17-6 — Floating "?" hint button. Sits in the bottom-right
           corner so the trader can always reach the cheat sheet even
           when the TopStatusBar is scrolled out of view. */}
-      <ShortcutHint onOpen={() => setShortcutsOpen(true)} />
+      <ShortcutHint onOpen={handleOpenShortcuts} />
 
       {/* ── Confirmation dialogs ─────────────────────────────────────────── */}
       <ConfirmationDialog
@@ -1108,7 +1195,7 @@ export default function Dashboard() {
         confirmLabel="🛑 Halt All Trading"
         cancelLabel="Cancel"
         onConfirm={handleKillSwitch}
-        onCancel={() => setConfirmKill(false)}
+        onCancel={handleCancelKill}
         loading={actionLoading}
       />
       <ConfirmationDialog
@@ -1122,7 +1209,7 @@ export default function Dashboard() {
         confirmLabel={`Cancel ${openOrderCount} Order${openOrderCount !== 1 ? 's' : ''}`}
         cancelLabel="Go Back"
         onConfirm={handleCancelAll}
-        onCancel={() => setConfirmCancelAll(false)}
+        onCancel={handleCancelCancelAll}
         loading={actionLoading}
       />
 

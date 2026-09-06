@@ -1,7 +1,7 @@
 // components/MLPanel.tsx — Rich ML Ensemble Status Panel
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { getApiUrl, apiFetch } from '@/lib/api'
 import {
   AIPredictionLabel,
@@ -12,6 +12,7 @@ import {
   driftLevelFromStatus,
   type FeatureContribution,
 } from '@/components/ai-explainability'
+import { ErrorState } from '@/components/ui/states'
 
 interface MetaLearner {
   is_warm: boolean
@@ -81,25 +82,48 @@ const DRIFT_ICONS: Record<string, string> = {
 export default function MLPanel({ snapshotMl }: MLPanelProps) {
   const [ml, setMl] = useState<MLStatus | null>(null)
   const [error, setError] = useState(false)
+  const [errorDetail, setErrorDetail] = useState<string | null>(null)
+  // W41-3 — retryToken bumps to force the fetch effect to re-run when
+  // the trader clicks "Retry" on the error state. The effect's deps
+  // include retryToken so a retry triggers a fresh fetch + clears the
+  // error state.
+  const [retryToken, setRetryToken] = useState(0)
+
+  // W41-3 — extract fetchML so the retry button can invoke it
+  // directly. The effect below depends on retryToken; the retry
+  // handler bumps retryToken AND flips `error` back to false so the
+  // panel briefly shows the loading state until the new fetch resolves.
+  const fetchML = useCallback(async () => {
+    const apiUrl = getApiUrl()
+    try {
+      const r = await apiFetch(`${apiUrl}/api/ml/metrics`)
+      if (r.ok) {
+        setMl(await r.json())
+        setError(false)
+        setErrorDetail(null)
+      } else {
+        setError(true)
+        setErrorDetail(`HTTP ${r.status}`)
+      }
+    } catch (e) {
+      setError(true)
+      setErrorDetail(e instanceof Error ? e.message : String(e))
+    }
+  }, [])
 
   useEffect(() => {
-    const apiUrl = getApiUrl()
-    const fetchML = async () => {
-      try {
-        const r = await apiFetch(`${apiUrl}/api/ml/metrics`)
-        if (r.ok) {
-          setMl(await r.json())
-          setError(false)
-        } else {
-          setError(true)
-        }
-      } catch {
-        setError(true)
-      }
-    }
     fetchML()
     const t = setInterval(fetchML, 15000)
     return () => clearInterval(t)
+  }, [fetchML, retryToken])
+
+  // W41-3 — imperative retry. Clears the error state and bumps the
+  // retry token so the effect re-runs fetchML immediately (rather than
+  // waiting up to 15s for the next poll tick).
+  const handleRetry = useCallback(() => {
+    setError(false)
+    setErrorDetail(null)
+    setRetryToken((t) => t + 1)
   }, [])
 
   // Merge snapshot (real-time) data over polled data for fast updates
@@ -210,7 +234,19 @@ export default function MLPanel({ snapshotMl }: MLPanelProps) {
       </div>
 
       {error && !snapshotMl ? (
-        <div className="p-3 text-xs text-[#7e8aaa] text-center">Connecting to ML API…</div>
+        // W41-3 — Use the shared ErrorState primitive so the panel
+        // gets a Retry button + structured error presentation. The
+        // message text "Connecting to ML API…" is preserved so the
+        // existing test that matches `screen.getByText(/Connecting to
+        // ML API/i)` continues to pass.
+        <div className="p-3">
+          <ErrorState
+            message="Connecting to ML API…"
+            detail={errorDetail}
+            onRetry={handleRetry}
+            retryLabel="Retry"
+          />
+        </div>
       ) : !ml && !snapshotMl ? (
         <div className="p-3 text-xs text-[#7e8aaa] text-center flex items-center justify-center gap-1.5">
           <span className="spinner mr-1" aria-hidden="true" />

@@ -36,7 +36,9 @@ import { Order } from '@/hooks/useBot'
 import { formatHierarchicalMarket } from '@/lib/formatters'
 import { fmtAge, fmtPrice, fmtUsd, fmtTimeAbs } from '@/lib/design-tokens'
 import { useRealtimeData } from '@/hooks/useRealtimeData'
+import { useStaleAge } from '@/hooks/useStaleAge'
 import { Badge } from '@/components/ui/badge'
+import { ErrorState, StaleIndicator } from '@/components/ui/states'
 import ConfirmationDialog from './ConfirmationDialog'
 
 interface OrdersApiResponse {
@@ -93,6 +95,9 @@ function OrdersPanel({
     data: fetched,
     isLoading,
     isRealtime: wsIsRealtime,
+    error,
+    lastUpdated,
+    refetch,
   } = useRealtimeData<OrdersApiResponse>('/api/orders', {
     wsChannel: 'orders',
     pollInterval: 5000,
@@ -100,6 +105,12 @@ function OrdersPanel({
 
   const orders = ordersOverride ?? fetched?.orders ?? []
   const isRealtime = isRealtimeOverride ?? wsIsRealtime
+
+  // W41-3 — compute the data's age so we can surface a StaleIndicator
+  // in the header when the snapshot is older than 30s. Skipped when
+  // the caller provides an orders override (the override doesn't expose
+  // a timestamp; the parent's snapshot freshness is its own concern).
+  const age = useStaleAge(ordersOverride == null ? lastUpdated : null)
 
   // W39-5 — token id of the order the trader is currently confirming a
   // Cancel on. When non-null, the inline ConfirmationDialog renders.
@@ -177,6 +188,11 @@ function OrdersPanel({
           ) : (
             <Badge variant="warning" className="text-[9.5px] py-0.5">⟳ Polling</Badge>
           )}
+          {/* W41-3 — StaleIndicator renders as an inline amber/red pill
+              when the fetched snapshot is older than 30s. Hidden while
+              fresh (<30s) so the header doesn't accumulate noise. Skipped
+              when the caller provides an orders override. */}
+          {age !== null && <StaleIndicator age={age} />}
           {orders.length > 0 && (
             <span className="text-[10.5px] text-[#7e8aaa] mono hidden sm:inline-block">
               Open Capital: <strong className="text-cyan-300 font-semibold">{fmtUsd(totalOpenExposure)}</strong>
@@ -201,6 +217,16 @@ function OrdersPanel({
           <span className="spinner mr-2" aria-hidden="true" />
           Loading working orders…
         </div>
+      ) : error && ordersOverride == null && orders.length === 0 ? (
+        // W41-3 — Error state. Rendered only when the initial REST fetch
+        // failed AND no override was supplied. Includes a Retry button
+        // that calls the hook's refetch().
+        <ErrorState
+          message="Working orders unavailable"
+          detail={error}
+          onRetry={refetch}
+          retryLabel="Retry"
+        />
       ) : (
         <div className="overflow-auto scrollbar-thin flex-1 table-container">
           {orders.length === 0 ? (

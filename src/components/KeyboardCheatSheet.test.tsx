@@ -5,7 +5,7 @@
 //   1. Renders nothing when `isOpen` is false.
 //   2. Renders the dialog + title when `isOpen` is true.
 //   3. Calls `onClose` when the Escape key is pressed.
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect, vi, afterEach } from 'vitest'
 import { render, screen, cleanup } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import KeyboardCheatSheet from './KeyboardCheatSheet'

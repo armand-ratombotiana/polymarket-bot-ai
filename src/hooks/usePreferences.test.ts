@@ -100,7 +100,7 @@ describe('usePreferences', () => {
     expect(stored.theme).toBe('light')
     // Every other field is still DEFAULTS.
     expect(stored.locale).toBe('en')
-    expect(stored.refreshIntervalMs).toBe(2000)
+    expect(stored.refreshIntervalMs).toBe(5000)
   })
 
   it('update dispatches a preferences-changed event so other instances re-render', async () => {

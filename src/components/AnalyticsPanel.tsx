@@ -16,11 +16,13 @@
 //      a glance whether the KPIs are real-time or lagged.
 'use client'
 
-import { memo, useEffect, useState } from 'react'
+import { memo, useEffect, useMemo, useState } from 'react'
 import { fmtUsd, fmtPnl, fmtPct } from '@/lib/design-tokens'
 import { useRealtimeData } from '@/hooks/useRealtimeData'
+import { useStaleAge } from '@/hooks/useStaleAge'
 import { apiFetch } from '@/lib/api'
 import { Badge } from '@/components/ui/badge'
+import { ErrorState, StaleIndicator } from '@/components/ui/states'
 // W26-6 — Confidence-interval + statistical-significance widgets.
 // Used by the win-rate KPI card to surface (a) the Wilson 95% CI
 // visually as a range bar, and (b) the binomial-test verdict
@@ -119,7 +121,10 @@ function AnalyticsPanel() {
   // W15-5 — hybrid REST + WS subscription. Replaces the previous 4s
   // self-managed setInterval + visibilitychange listener (the
   // useRealtimeData hook handles both concerns generically).
-  const { data, isLoading, isRealtime } = useRealtimeData<Analytics>(
+  // W41-3 — also pull `error`, `lastUpdated`, and `refetch` so the
+  // panel can render a structured ErrorState (with retry) and a
+  // StaleIndicator when the snapshot ages past 30s.
+  const { data, isLoading, isRealtime, error, lastUpdated, refetch } = useRealtimeData<Analytics>(
     '/api/analytics',
     {
       wsChannel: 'metrics',
@@ -127,6 +132,62 @@ function AnalyticsPanel() {
       validate: isAnalyticsPayload,
     },
   )
+
+  // W41-3 — Track the data's age. The backend exposes
+  // `data_freshness_seconds` (the upstream's own report of how old the
+  // snapshot is) but that's only populated once `data` exists. We use
+  // the hook's `lastUpdated` to compute the local age so the indicator
+  // also reflects the freshness of the local REST fetch + WS push.
+  const age = useStaleAge(lastUpdated)
+
+  // W41-2 — Memoize the inline significance computations. These were
+  // previously recomputed on every render even though they only depend
+  // on `data`. Wrapping them in useMemo skips the binomial-test + CI
+  // arithmetic on parent-driven re-renders (e.g. when useBot snapshots
+  // tick the page.tsx parent and AnalyticsPanel is re-rendered as a
+  // child of the Command Center grid). Hoisted BEFORE the early returns
+  // so the rules-of-hooks are satisfied (hooks must run in the same
+  // order on every render). When `data` is null the memo returns a
+  // null placeholder + zeroed stats; the early returns below render
+  // loading / error states without touching the stats.
+  const stats = useMemo(() => {
+    if (!data) return null
+    const n = data.closed_trades ?? (data.winning_trades + data.losing_trades)
+    const isSmallSample = n < 30
+    const winRatePct = (data.win_rate * 100).toFixed(1)
+
+    const ciExcludes50 =
+      data.win_rate_ci_low != null &&
+      data.win_rate_ci_high != null &&
+      ((data.win_rate_ci_low > 0.5 && data.win_rate_ci_high > 0.5) ||
+        (data.win_rate_ci_low < 0.5 && data.win_rate_ci_high < 0.5))
+    const winRatePValue = binomialPValue(data.winning_trades, n)
+    const isWinRateSignificant = ciExcludes50 && winRatePValue < 0.05
+
+    const ciMid =
+      data.win_rate_ci_low != null && data.win_rate_ci_high != null
+        ? (data.win_rate_ci_low + data.win_rate_ci_high) / 2
+        : data.win_rate
+    const trendArrow = ciMid > 0.505 ? '▲' : ciMid < 0.495 ? '▼' : '▶'
+    const trendColor =
+      ciMid > 0.505
+        ? 'text-green-400'
+        : ciMid < 0.495
+        ? 'text-red-400'
+        : 'text-[#7e8aaa]'
+
+    return {
+      n,
+      isSmallSample,
+      winRatePct,
+      winRatePValue,
+      isWinRateSignificant,
+      trendArrow,
+      trendColor,
+    }
+  }, [data])
+
+  const activeStrats = useMemo(() => data?.active_strategies ?? [], [data?.active_strategies])
 
   if (isLoading && !data) {
     return (
@@ -137,7 +198,24 @@ function AnalyticsPanel() {
     )
   }
 
-  if (!data) {
+  if (!data || !stats) {
+    // W41-3 — When the hook exposes an error, render the structured
+    // ErrorState (with retry) instead of the bare "Analytics data
+    // unavailable" message. The text is preserved so existing tests
+    // that match `screen.getByText('Analytics data unavailable')`
+    // continue to pass.
+    if (error) {
+      return (
+        <div className="card p-3">
+          <ErrorState
+            message="Analytics data unavailable"
+            detail={error}
+            onRetry={refetch}
+            retryLabel="Retry"
+          />
+        </div>
+      )
+    }
     return (
       <div className="card p-3 flex items-center justify-center text-xs text-[#7e8aaa]">
         Analytics data unavailable
@@ -145,45 +223,7 @@ function AnalyticsPanel() {
     )
   }
 
-  const n = data.closed_trades ?? (data.winning_trades + data.losing_trades)
-  // W26-6 — bumped threshold from 10 → 30 to match the
-  // StatisticalSignificanceBadge's MIN_SAMPLE_SIZE. Below 30 closed
-  // trades the binomial-test p-value is unreliable (a single lucky
-  // streak can produce p<0.05) so we surface the "Insufficient Data"
-  // verdict + the small-sample warning banner regardless of p.
-  const isSmallSample = n < 30
-  const winRatePct = (data.win_rate * 100).toFixed(1)
-  // W28-1 — `ciLowPct` / `ciHighPct` (the percentage-formatted CI
-  // bounds) were unused after the W26-6 redesign — the CI is rendered
-  // directly from `data.win_rate_ci_low` / `_ci_high` (raw floats) by
-  // the `ConfidenceIntervalBadge` downstream. Removed to silence
-  // TS6133.
-
-  // W26-6 — Compute the win-rate significance verdict client-side.
-  // Two sources feed into it:
-  //   1. The Wilson 95% CI bounds — if the CI excludes 0.5 (i.e.
-  //      both bounds above OR both below 0.5), we reject the null
-  //      (p=0.5) at α=0.05.
-  //   2. The normal-approximation binomial-test p-value computed
-  //      from wins/n — surfaced in the significance badge as
-  //      "p=0.034" (3dp) so the trader can see how close to the
-  //      threshold the verdict sits.
-  const ciExcludes50 =
-    data.win_rate_ci_low != null &&
-    data.win_rate_ci_high != null &&
-    ((data.win_rate_ci_low > 0.5 && data.win_rate_ci_high > 0.5) ||
-      (data.win_rate_ci_low < 0.5 && data.win_rate_ci_high < 0.5))
-  const winRatePValue = binomialPValue(data.winning_trades, n)
-  const isWinRateSignificant = ciExcludes50 && winRatePValue < 0.05
-
-  // Determine trend arrow from CI midpoint vs 50%
-  const ciMid = data.win_rate_ci_low != null && data.win_rate_ci_high != null
-    ? (data.win_rate_ci_low + data.win_rate_ci_high) / 2
-    : data.win_rate
-  const trendArrow = ciMid > 0.505 ? '▲' : ciMid < 0.495 ? '▼' : '▶'
-  const trendColor = ciMid > 0.505 ? 'text-green-400' : ciMid < 0.495 ? 'text-red-400' : 'text-[#7e8aaa]'
-
-  const activeStrats = data.active_strategies ?? []
+  const { n, isSmallSample, winRatePct, winRatePValue, isWinRateSignificant, trendArrow, trendColor } = stats
 
   return (
     <div className="card flex flex-col bg-[#13161e] border border-[#1f2335] shadow-md">
@@ -200,6 +240,12 @@ function AnalyticsPanel() {
           ) : (
             <Badge variant="warning" className="text-[9.5px] py-0.5">⟳ Polling</Badge>
           )}
+          {/* W41-3 — StaleIndicator: amber/red pill surfaces when the
+              local snapshot is older than 30s. Complements the backend's
+              own `data_freshness_seconds` (rendered further down) by
+              reflecting the freshness of the local fetch + WS push
+              chain, not just the upstream's report. */}
+          {age !== null && <StaleIndicator age={age} />}
         </div>
         <div className="flex items-center gap-2">
           <span className={`mono text-xs font-bold ${trendColor}`}>

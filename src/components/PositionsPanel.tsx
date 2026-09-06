@@ -49,7 +49,9 @@ import { Position } from '@/hooks/useBot'
 import { formatHierarchicalMarket } from '@/lib/formatters'
 import { fmtPnl, fmtUsd, fmtDurationHm, fmtTimeAbs, fmtPrice } from '@/lib/design-tokens'
 import { useRealtimeData } from '@/hooks/useRealtimeData'
+import { useStaleAge } from '@/hooks/useStaleAge'
 import { Badge } from '@/components/ui/badge'
+import { ErrorState, StaleIndicator } from '@/components/ui/states'
 import ConfirmationDialog from './ConfirmationDialog'
 
 interface PositionsApiResponse {
@@ -160,6 +162,9 @@ function PositionsPanel({
     data: fetched,
     isLoading,
     isRealtime: wsIsRealtime,
+    error,
+    lastUpdated,
+    refetch,
   } = useRealtimeData<PositionsApiResponse>('/api/positions', {
     wsChannel: 'positions',
     pollInterval: 5000,
@@ -167,6 +172,13 @@ function PositionsPanel({
 
   const positions = positionsOverride ?? fetched?.positions ?? []
   const isRealtime = isRealtimeOverride ?? wsIsRealtime
+
+  // W41-3 — compute the data's age so we can surface a StaleIndicator
+  // in the header when the snapshot is older than 30s (stale) or 120s
+  // (dead). Skipped when the caller provides an override (the override
+  // doesn't expose a timestamp; the parent's snapshot freshness is its
+  // own concern).
+  const age = useStaleAge(positionsOverride == null ? lastUpdated : null)
 
   const MAX_PER_MARKET = 3.0 // USD 3.00 institutional limit
   const MAX_TOTAL_PORTFOLIO = 25.0 // USD 25.00 total exposure cap
@@ -309,6 +321,12 @@ function PositionsPanel({
           ) : (
             <Badge variant="warning" className="text-[9.5px] py-0.5">⟳ Polling</Badge>
           )}
+          {/* W41-3 — StaleIndicator renders as an inline amber/red pill
+              when the fetched snapshot is older than 30s. Hidden while
+              fresh (<30s) so the header doesn't accumulate noise. Skipped
+              when the caller provides a positions override (no timestamp
+              surfaced from the override). */}
+          {age !== null && <StaleIndicator age={age} />}
         </div>
 
         {/* Aggregate KPI Badges */}
@@ -349,6 +367,20 @@ function PositionsPanel({
           <span className="spinner mr-2" aria-hidden="true" />
           Loading positions…
         </div>
+      )}
+
+      {/* W41-3 — Error state. Rendered only when the initial REST fetch
+          failed AND no override was supplied (the override short-circuits
+          the loading gate; an error from the underlying hook is irrelevant
+          in that case). Includes a Retry button that calls the hook's
+          refetch(), which re-runs the initial fetch + clears the error. */}
+      {!isLoading && error && positionsOverride == null && positions.length === 0 && (
+        <ErrorState
+          message="Positions unavailable"
+          detail={error}
+          onRetry={refetch}
+          retryLabel="Retry"
+        />
       )}
 
       {/* Filter & Search Bar */}
