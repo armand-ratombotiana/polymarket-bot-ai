@@ -32971,3 +32971,140 @@ descriptions and Retry buttons rather than throwing React errors.
 - `/home/z/my-project/worklog.md` (this appended entry; no source
   code modified — verification-only wave)
 
+
+---
+
+## W45-2 — general-purpose — Final verification + push
+
+**Date:** 2026-09-11 (W45-2)
+**Scope:** Verify test/lint/TypeScript/visual state, integrate W45-1
+untracked strategy files, commit, push to `origin/main`.
+
+### Background
+- W45-1 had created a batch of concrete strategy implementations
+  under `mini-services/polymarket-bot/strategies/` but never staged
+  or pushed them — they sat as untracked files in the working tree.
+- W45-2 was the final-verification + push task: run the standard
+  gate (pytest, vitest, lint, tsc, skip-file scan, registry counts),
+  visually verify the dashboard via `agent-browser`, commit the
+  outstanding work, and push.
+
+### Investigation — divergent remote
+- Initial `git push` was rejected because the remote `origin/main`
+  had advanced to `28b20d0` ("Wave 44 — 5 new strategies, visual
+  verification, 5406 tests"), which the local main did not yet
+  contain.
+- The remote's Wave 43/44 had:
+  - Marked 5 additional strategies as `status=STATUS_IMPLEMENTED`
+    (raising the IMPLEMENTED catalog count from 11 → 16).
+  - Implemented those 5 strategies via different file names than
+    W45-1's local work:
+    | strategy_id           | remote impl. file            | local W45-1 file            |
+    |-----------------------|------------------------------|-----------------------------|
+    | arb_temporal_expiry   | `late_resolution.py`         | `arb_temporal_expiry.py`    |
+    | arb_cluster_dislocation| `cross_market.py`           | `arb_cluster_dislocation.py`|
+    | event_social_volume   | `sentiment.py`               | `event_social_volume.py`    |
+    | event_poll_discrepancy| `news.py`                     | `event_poll_discrepancy.py` |
+    | ml_fractional_kelly   | `ensemble.py`                | `ml_fractional_kelly.py`    |
+- Reconciling this cleanly would require rewriting the registry's
+  `_IMPLEMENTED_STRATEGY_CLASSES` map and dropping one of each
+  duplicate — out of scope for a "final verification + push" task.
+  Decided to ship the W45-1 files as standalone, unreferenced
+  implementations (they all import cleanly; no test imports them;
+  pytest stays green) and leave the registry-wiring surgery for a
+  future cleanup task.
+
+### Recovery — rebasing onto `origin/main`
+- The naive `git pull --rebase origin main` failed: the local Wave 42
+  commit (`45025d2`) and the remote Wave 42 commit (`0fd8681`) had
+  nearly-identical trees but different hashes, producing 4 add/add
+  conflicts on Wave-42-era files (`worklog.md`,
+  `agent-ctx/W42-2-full-stack-developer.md`, 3 component test files).
+- Resolved by hard-resetting local `main` to `origin/main` and
+  re-adding the W45-1 strategy files from a `/tmp` backup taken
+  before the reset. Lost the local `52de427` (a `.zscripts/dev.pid`
+  tweak) and `be81543` (the first W45-2 attempt) commits — both
+  were no-ops from a content perspective.
+
+### Files added (35 new strategy implementations)
+- `arb_cluster_dislocation.py`, `arb_cyclic_triangle.py`,
+  `arb_gamma_clob_parity.py`, `arb_multi_negative_risk.py`,
+  `arb_synthetic_straddle.py`, `arb_temporal_expiry.py`
+- `mm_glft_optimal.py`, `mm_ofi_microstructure.py`,
+  `mm_poisson_arrival.py`, `mm_rebate_harvester.py`,
+  `mm_volatility_adaptive.py`
+- `mom_adx_trend_strength.py`, `mom_donchian_breakout.py`,
+  `mom_ema_crossover.py`, `mom_micro_price_accel.py`,
+  `mom_parabolic_sar.py`, `mom_volatility_expansion.py`,
+  `mom_volume_surge.py`
+- `stat_bollinger_reversion.py`, `stat_half_life_decay.py`,
+  `stat_kalman_filter.py`, `stat_pair_cointegration.py`,
+  `stat_rsi_divergence.py`, `stat_vwap_reversion.py`,
+  `stat_zscore_anomaly.py`
+- `event_election_momentum.py`, `event_macro_straddle.py`,
+  `event_oracle_dispute.py`, `event_poll_discrepancy.py`,
+  `event_social_volume.py`, `event_whale_follower.py`
+- `ml_fractional_kelly.py`, `ml_lightgbm_boost.py`,
+  `ml_online_sgd_learner.py`, `ml_xgboost_directional.py`
+
+### Verification — final numbers
+- **Backend pytest** — `timeout 300 python -m pytest tests/ --tb=no
+  -p no:cacheprovider` → **3888 passed, 1 skipped, 0 failed**
+  (225s).
+- **Frontend vitest** — `TMPDIR=/dev/shm/vitest-tmp bun run test`
+  → **1518 passed, 0 failed**.
+- **Lint** — `bun run lint` → EXIT 0, clean.
+- **TypeScript** — `bunx tsc --noEmit --skipLibCheck` → 0 lines of
+  output (0 errors).
+- **Skip-file scan** — `find . -name "*.skip" ...` → 0.
+- **Registry grep** — `grep -c "PLANNED"` = 12 (constant +
+  comments + default-value strings);
+  `grep -c "IMPLEMENTED"` = 31 (constant + comments + status string
+  + 16 catalog entries with `status=STATUS_IMPLEMENTED`).
+- **Import sanity** — all 35 new files import cleanly via
+  `importlib.import_module(f"strategies.{f}")`.
+- **Visual verification** — `agent-browser open
+  http://localhost:3000/`; `agent-browser get title` → "Polymarket
+  Pro — Algorithmic Trading Workstation";
+  `agent-browser screenshot /tmp/w45-final.png` → saved (9179
+  bytes); `agent-browser eval "document.querySelector('.panel-error-
+  boundary') ? 'ERROR' : 'OK'"` → `"OK"`.
+
+### Push
+- Single commit `5417271` on top of `origin/main` (`28b20d0`).
+- `git push origin main` succeeded: `28b20d0..5417271 main -> main`.
+- Working tree clean post-push; no untracked files left.
+
+### Caveats
+- **2 of the 35 new files duplicate remote implementations.**
+  `arb_temporal_expiry.py` and `arb_cluster_dislocation.py` are
+  alternative implementations of strategies the remote's Wave 44
+  already wired up via `late_resolution.py` / `cross_market.py`.
+  Likewise `event_social_volume.py`, `event_poll_discrepancy.py`,
+  `ml_fractional_kelly.py` overlap with the remote's
+  `sentiment.py` / `news.py` / `ensemble.py`. All 5 duplicates are
+  currently dead code (not referenced by `_IMPLEMENTED_STRATEGY_
+  CLASSES`); future cleanup should pick one implementation per
+  strategy_id and remove the other.
+- **No registry wiring for the 35 new files.** They are concrete
+  `BaseStrategy` subclasses but the registry still points to the
+  16 IMPLEMENTED entries established by Wave 44. Wiring the new
+  files into the registry would require updating tests that
+  currently assert `len(implemented) == 11` or `== 16`
+  (`tests/test_new_strategies.py::test_registry_total_implemented_
+  is_eleven`, `tests/test_strategy_stubs.py` `implemented_count`
+  assertions) — left for a future Wave.
+- **GitHub reports 2 high-severity Dependabot vulnerabilities** on
+  the default branch (pip packages in `mini-services/polymarket-bot/`).
+  Not in scope for this task; flagged for follow-up.
+
+### Files touched
+- 35 new strategy files (all under
+  `mini-services/polymarket-bot/strategies/`)
+- `worklog.md` (this appended entry)
+
+### Push verification
+```
+$ git log origin/main -1 --oneline
+5417271 feat: Wave 45 — Strategy implementations, final verification
+```
