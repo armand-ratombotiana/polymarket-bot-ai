@@ -3,9 +3,9 @@ W19-6 — Strategy stubs implementation tests.
 
 Covers the four task-spec verification points:
 
-  1. The catalog carries exactly 16 IMPLEMENTED strategies
-     (3 original + 3 W19-6 + 5 W22-3 + 5 W44-1 additions) and
-     exactly 34 PLANNED entries (50 − 16 = 34).
+  1. The catalog carries exactly 50 IMPLEMENTED strategies
+     (3 original + 3 W19-6 + 5 W22-3 + 5 W44-1 + 34 W46-1 additions) and
+     exactly 0 PLANNED entries (all promoted as of W46-1).
   2. Each W19-6 strategy's ``evaluate`` method generates the
      documented signal direction under controlled inputs:
        - Mean Reversion → BUY below lower Bollinger Band,
@@ -141,79 +141,44 @@ def registry():
 
 def test_catalog_size_is_50(registry):
     """The catalog must carry exactly 50 entries — 3 original + 3 W19-6
-    implemented strategies + 44 planned stubs. No entries added, no
-    entries removed (the W19-6 changes promote three existing stubs to
-    IMPLEMENTED rather than adding new rows)."""
+    + 5 W22-3 + 5 W44-1 + 34 W46-1 implemented strategies, with 0
+    PLANNED stubs remaining. No entries added, no entries removed."""
     catalog = registry.get_catalog()
     assert len(catalog) == 50
     assert len(catalog) == len(STRATEGY_CATALOG)
 
 
-def test_catalog_has_sixteen_implemented_strategies(registry):
-    """3 (original concrete strategies) + 3 (W19-6 additions) + 5 (W22-3 additions) + 5 (W44-1 additions) = 16
-    IMPLEMENTED entries. The sixteen documented ids are:
-      - mm_avellaneda_stoikov    → MarketMakerStrategy
-      - arb_binary_dutch_book    → ArbScannerStrategy
-      - ml_random_forest_quant   → SignalTraderStrategy
-      - stat_ornstein_uhlenbeck  → MeanReversionStrategy (W19-6)
-      - mom_macd_histogram       → MomentumStrategy      (W19-6)
-      - ml_isotonic_calibrated   → ValueStrategy         (W19-6)
-      - arb_cross_correlation    → StatisticalArbitrage  (W22-3)
-      - event_news_sentiment     → EventDriven           (W22-3)
-      - event_resolution_sniper  → Convergence           (W22-3)
-      - mm_asymmetric_spread     → SpreadCapture         (W22-3)
-      - mm_grid_liquidity        → LiquidityProvision    (W22-3)
-      - arb_temporal_expiry      → LateResolution        (W44-1)
-      - ml_fractional_kelly      → Ensemble              (W44-1)
-      - event_poll_discrepancy   → NewsTrader            (W44-1)
-      - event_social_volume      → SentimentAggregator   (W44-1)
-      - arb_cluster_dislocation  → CrossMarket           (W44-1)
+def test_catalog_has_fifty_implemented_strategies(registry):
+    """3 (original concrete strategies) + 3 (W19-6 additions) + 5 (W22-3 additions)
+    + 5 (W44-1 additions) + 34 (W46-1 additions) = 50 IMPLEMENTED entries.
+    Every catalog row now maps to a concrete ``BaseStrategy`` subclass — the
+    ``QuantStrategyInstance`` no-op fallback has no remaining callers in the
+    catalog (kept as a defensive fallback for future catalog rows).
     """
     catalog = registry.get_catalog()
     implemented = [r for r in catalog if r["status"] == STATUS_IMPLEMENTED]
-    assert len(implemented) == 16
+    assert len(implemented) == 50
+    # Every catalog id must report IMPLEMENTED — no row left behind.
     implemented_ids = {r["strategy_id"] for r in implemented}
-    assert implemented_ids == {
-        "mm_avellaneda_stoikov",
-        "arb_binary_dutch_book",
-        "ml_random_forest_quant",
-        "stat_ornstein_uhlenbeck",
-        "mom_macd_histogram",
-        "ml_isotonic_calibrated",
-        "arb_cross_correlation",
-        "event_news_sentiment",
-        "event_resolution_sniper",
-        "mm_asymmetric_spread",
-        "mm_grid_liquidity",
-        # W44-1 additions.
-        "arb_temporal_expiry",
-        "ml_fractional_kelly",
-        "event_poll_discrepancy",
-        "event_social_volume",
-        "arb_cluster_dislocation",
-    }
+    full_ids = {r["strategy_id"] for r in catalog}
+    assert implemented_ids == full_ids
 
 
-def test_catalog_has_34_planned_strategies(registry):
-    """50 − 16 = 34 PLANNED stubs. These remain no-op
-    ``QuantStrategyInstance`` wrappers — the W44-1 promotion did NOT
-    promote any other stubs to IMPLEMENTED."""
+def test_catalog_has_zero_planned_strategies(registry):
+    """W46-1 — every prior PLANNED stub has been promoted to IMPLEMENTED.
+    Zero PLANNED entries remain in the catalog."""
     catalog = registry.get_catalog()
     planned = [r for r in catalog if r["status"] == STATUS_PLANNED]
-    assert len(planned) == 34
-    # Every planned entry must report ``implemented=False`` (the legacy
-    # boolean must stay consistent with the new ``status`` field).
-    for r in planned:
-        assert r["implemented"] is False
+    assert len(planned) == 0
 
 
-def test_catalog_implemented_only_filter_returns_sixteen(registry):
-    """``get_catalog(implemented_only=True)`` returns exactly the sixteen
-    IMPLEMENTED rows, never any PLANNED ones."""
+def test_catalog_implemented_only_filter_returns_fifty(registry):
+    """``get_catalog(implemented_only=True)`` returns exactly the fifty
+    IMPLEMENTED rows — there are no PLANNED rows left to filter out."""
     full = registry.get_catalog()
     filtered = registry.get_catalog(implemented_only=True)
 
-    assert len(filtered) == 16
+    assert len(filtered) == 50
     for row in filtered:
         assert row["status"] == STATUS_IMPLEMENTED
         assert row["implemented"] is True
@@ -587,9 +552,9 @@ async def test_registry_starts_value_strategy():
 async def test_registry_marks_running_state_in_catalog():
     """After ``start_strategy`` succeeds, ``get_catalog()`` must report
     ``is_running=True`` for the started IMPLEMENTED strategy and
-    ``is_running=False`` for every other IMPLEMENTED strategy (that
-    wasn't started) AND for every PLANNED strategy (stubs never have a
-    running state because they don't execute a real loop)."""
+    ``is_running=False`` for every other IMPLEMENTED strategy (W46-1:
+    all 50 catalog rows are IMPLEMENTED, so the assertion is over
+    the 49 other rows that weren't started)."""
     reg = StrategyRegistry()
     await reg.start_strategy("stat_ornstein_uhlenbeck")
     catalog = reg.get_catalog()
@@ -601,18 +566,15 @@ async def test_registry_marks_running_state_in_catalog():
         r for r in catalog
         if r["status"] == STATUS_IMPLEMENTED and r["strategy_id"] != "stat_ornstein_uhlenbeck"
     ]
-    assert len(other_implemented) == 15  # 16 implemented − 1 started
+    assert len(other_implemented) == 49  # 50 implemented − 1 started
     for r in other_implemented:
         assert r["is_running"] is False
 
-    # Every PLANNED entry must also report is_running=False (stubs have
-    # no concrete ``_run`` loop, so even if they were started the flag
-    # would stay False — the ``is_running`` derivation in
-    # ``StrategyRegistry.get_catalog`` filters on
-    # ``implemented and strategy_id in self._instances``).
-    for r in catalog:
-        if r["status"] == STATUS_PLANNED:
-            assert r["is_running"] is False
+    # W46-1 — there are no PLANNED entries left, so the prior
+    # "every PLANNED entry must report is_running=False" loop is
+    # vacuously true; assert the count is zero for the regression guard.
+    planned = [r for r in catalog if r["status"] == STATUS_PLANNED]
+    assert len(planned) == 0
 
     await reg.stop_strategy("stat_ornstein_uhlenbeck")
 
@@ -631,7 +593,7 @@ _VALID_TOKEN = os.environ.get("API_TOKEN", "test-token-conftest")
 
 def test_api_strategies_catalog_returns_full_50_entries():
     """``GET /api/strategies/catalog`` (no query param) must return all
-    50 entries — IMPLEMENTED and PLANNED alike — with the ``status``
+    50 entries — every row is IMPLEMENTED as of W46-1 — with the ``status``
     field populated on every row."""
     from fastapi.testclient import TestClient
     from api.server import app
@@ -645,17 +607,17 @@ def test_api_strategies_catalog_returns_full_50_entries():
     data = response.json()
     assert "catalog" in data and isinstance(data["catalog"], list)
     assert data["total"] == len(data["catalog"])
-    assert data["total"] == 50  # 16 implemented + 34 planned
+    assert data["total"] == 50  # 50 implemented + 0 planned
     # ``status`` field is present on every row.
     for row in data["catalog"]:
         assert "status" in row
         assert row["status"] in {STATUS_IMPLEMENTED, STATUS_PLANNED, "EXPERIMENTAL"}
 
 
-def test_api_strategies_catalog_implemented_only_returns_sixteen():
+def test_api_strategies_catalog_implemented_only_returns_fifty():
     """``GET /api/strategies/catalog?implemented_only=true`` must return
-    only the sixteen IMPLEMENTED strategies — every PLANNED stub is
-    excluded from the response."""
+    all fifty IMPLEMENTED strategies — there are no PLANNED stubs left to
+    filter out as of W46-1."""
     from fastapi.testclient import TestClient
     from api.server import app
 
@@ -670,14 +632,14 @@ def test_api_strategies_catalog_implemented_only_returns_sixteen():
         f"got {response.status_code}"
     )
     data = response.json()
-    assert data["total"] == 16, (
-        f"implemented_only filter must return exactly 16 entries; got {data['total']}"
+    assert data["total"] == 50, (
+        f"implemented_only filter must return exactly 50 entries; got {data['total']}"
     )
     for row in data["catalog"]:
         assert row["status"] == STATUS_IMPLEMENTED
         assert row["implemented"] is True
     # The response surfaces the implementation breakdown for the UI.
-    assert data["implemented_count"] == 16
+    assert data["implemented_count"] == 50
     assert data["filtered"] is True
 
 
@@ -693,6 +655,6 @@ def test_api_strategies_catalog_includes_status_breakdown():
     response = client.get("/api/strategies/catalog", headers=headers)
     assert response.status_code == 200
     data = response.json()
-    assert data["implemented_count"] == 16
-    assert data["planned_count"] == 34
+    assert data["implemented_count"] == 50
+    assert data["planned_count"] == 0
     assert data["filtered"] is False

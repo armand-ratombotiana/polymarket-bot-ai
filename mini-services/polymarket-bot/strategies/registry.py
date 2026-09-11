@@ -8,6 +8,17 @@ W19-6 — Honest status reporting. Each strategy now carries a ``status``
 field that distinguishes IMPLEMENTED (real trading logic) from PLANNED
 (no-op stub). The API exposes ``?implemented_only=true`` so the UI can
 filter the catalog to show only strategies that actually execute.
+
+W46-1 — full IMPLEMENTED catalog. Every one of the 50 catalog entries
+now maps to a concrete ``BaseStrategy`` subclass that ships the 9-method
+``StrategyContract`` (metadata / configure / validate / generate_signal /
+estimate_edge / size_position / entry_logic / exit_logic / diagnostics)
+plus a real async ``_run`` trading loop. The 34 strategies promoted in
+W46-1 each ship a dedicated module under ``strategies/`` mirroring the
+W44-1 layout (one file per strategy, one class per file). The
+``QuantStrategyInstance`` no-op wrapper remains in the file as a
+defensive fallback for any future catalog row that lacks a concrete
+class mapping — but no such row currently exists.
 """
 from __future__ import annotations
 
@@ -49,7 +60,13 @@ class StrategyMeta:
 
 # ── 50 Strategy Metadata Catalog ──────────────────────────────────────────────
 # Status legend: IMPLEMENTED = real trading loop; PLANNED = no-op stub.
-# Sixteen IMPLEMENTED strategies (3 original + 3 W19-6 + 5 W22-3 + 5 W44-1):
+# W46-1 — every catalog entry now maps to a concrete ``BaseStrategy``
+# subclass. The 34 strategies promoted in W45-1/W46-1 each ship a real
+# ``_run`` loop plus the 9-method ``StrategyContract`` implementation
+# (metadata / configure / validate / generate_signal / estimate_edge /
+# size_position / entry_logic / exit_logic / diagnostics).
+#
+# Fifty IMPLEMENTED strategies (3 original + 3 W19-6 + 5 W22-3 + 5 W44-1 + 34 W46-1):
 #   • mm_avellaneda_stoikov       → MarketMakerStrategy
 #   • arb_binary_dutch_book       → ArbScannerStrategy
 #   • ml_random_forest_quant      → SignalTraderStrategy
@@ -66,69 +83,103 @@ class StrategyMeta:
 #   • event_poll_discrepancy       → NewsTrader            (W44-1)
 #   • event_social_volume          → SentimentAggregator   (W44-1)
 #   • arb_cluster_dislocation      → CrossMarket           (W44-1)
+#   • mm_glft_optimal              → GlftOptimalQuoter     (W46-1)
+#   • mm_volatility_adaptive        → VolatilityAdaptiveMM  (W46-1)
+#   • mm_rebate_harvester          → RebateHarvester       (W46-1)
+#   • mm_ofi_microstructure        → OfiMicrostructureMM   (W46-1)
+#   • mm_poisson_arrival           → PoissonArrivalQuoter  (W46-1)
+#   • arb_multi_negative_risk      → NegativeRiskMultiArb  (W46-1)
+#   • arb_gamma_clob_parity        → GammaClobParityArb    (W46-1)
+#   • arb_synthetic_straddle        → SyntheticStraddleArb  (W46-1)
+#   • arb_cyclic_triangle           → CyclicTriangleArb    (W46-1)
+#   • stat_bollinger_reversion     → BollingerBandsReversion (W46-1)
+#   • stat_rsi_divergence          → RsiDivergenceTrader   (W46-1)
+#   • stat_zscore_anomaly          → ZScoreAnomalyTrader   (W46-1)
+#   • stat_pair_cointegration       → PairCointegrationTrader (W46-1)
+#   • stat_vwap_reversion          → VwapReversionTrader   (W46-1)
+#   • stat_kalman_filter           → KalmanFilterTrader   (W46-1)
+#   • stat_half_life_decay          → HalfLifeDecayReverter (W46-1)
+#   • mom_ema_crossover            → EmaCrossoverTrend     (W46-1)
+#   • mom_donchian_breakout        → DonchianBreakoutTrader (W46-1)
+#   • mom_volatility_expansion      → VolatilityExpansionTrader (W46-1)
+#   • mom_volume_surge             → VolumeSurgeMomentum   (W46-1)
+#   • mom_parabolic_sar             → ParabolicSarFollower  (W46-1)
+#   • mom_adx_trend_strength       → AdxTrendStrength      (W46-1)
+#   • mom_micro_price_accel         → MicroPriceAcceleration (W46-1)
+#   • event_oracle_dispute         → OracleDisputeSniper   (W46-1)
+#   • event_election_momentum       → ElectionMomentumTracker (W46-1)
+#   • event_macro_straddle         → MacroStraddleTrader   (W46-1)
+#   • event_whale_follower          → WhaleFollower         (W46-1)
+#   • ml_lightgbm_boost            → LightGBMBoost         (W46-1)
+#   • ml_xgboost_directional       → XGBoostDirectional    (W46-1)
+#   • ml_online_sgd_learner         → OnlineSgdLearner       (W46-1)
+#   • ml_gmm_regime_switch          → GmmRegimeSwitch       (W46-1)
+#   • ml_svm_hyperplane            → SvmHyperplaneClassifier (W46-1)
+#   • ml_bayesian_belief            → BayesianBeliefUpdater (W46-1)
+#   • ml_qlearning_execution       → QLearningExecutionAgent (W46-1)
 
 STRATEGY_CATALOG: list[StrategyMeta] = [
     # ── Group A: Market Making & Liquidity Provision (8) ──
     StrategyMeta("mm_avellaneda_stoikov", "Avellaneda-Stoikov MM", "market_making", "Reservation price with inventory skewing & volatility bounds", "Medium", True, status=STATUS_IMPLEMENTED),
-    StrategyMeta("mm_glft_optimal", "GLFT Optimal Quoter", "market_making", "Gueant-Tapia-Manziadi intensity-based optimal quote spread", "Medium", False),
+    StrategyMeta("mm_glft_optimal", "GLFT Optimal Quoter", "market_making", "Gueant-Tapia-Manziadi intensity-based optimal quote spread", "Medium", False, status=STATUS_IMPLEMENTED),
     StrategyMeta("mm_asymmetric_spread", "Asymmetric Spread Skew", "market_making", "Skewed bid/ask width based on directional order flow momentum", "Medium", False, status=STATUS_IMPLEMENTED),
-    StrategyMeta("mm_volatility_adaptive", "Volatility Adaptive MM", "market_making", "Dynamic spread widening/narrowing based on ATR & realized vol", "Low", False),
-    StrategyMeta("mm_rebate_harvester", "Rebate Harvester", "market_making", "Maximizes maker fee rebates at top-of-book with queue priority", "Low", False),
-    StrategyMeta("mm_ofi_microstructure", "Order Flow Imbalance MM", "market_making", "Real-time micro-depth OFI quotes against toxic adverse selection", "Medium", False),
+    StrategyMeta("mm_volatility_adaptive", "Volatility Adaptive MM", "market_making", "Dynamic spread widening/narrowing based on ATR & realized vol", "Low", False, status=STATUS_IMPLEMENTED),
+    StrategyMeta("mm_rebate_harvester", "Rebate Harvester", "market_making", "Maximizes maker fee rebates at top-of-book with queue priority", "Low", False, status=STATUS_IMPLEMENTED),
+    StrategyMeta("mm_ofi_microstructure", "Order Flow Imbalance MM", "market_making", "Real-time micro-depth OFI quotes against toxic adverse selection", "Medium", False, status=STATUS_IMPLEMENTED),
     StrategyMeta("mm_grid_liquidity", "Grid Trading Liquidity", "market_making", "Multi-level layered limit orders with step-ladder profit taking", "Medium", False, status=STATUS_IMPLEMENTED),
-    StrategyMeta("mm_poisson_arrival", "Poisson Arrival Quoter", "market_making", "Quoting calibrated to continuous trade arrival intensity lambda(p)", "Low", False),
+    StrategyMeta("mm_poisson_arrival", "Poisson Arrival Quoter", "market_making", "Quoting calibrated to continuous trade arrival intensity lambda(p)", "Low", False, status=STATUS_IMPLEMENTED),
 
     # ── Group B: Arbitrage & Relative Value (8) ──
     StrategyMeta("arb_binary_dutch_book", "Binary Dutch Book", "arbitrage", "Guaranteed payout arbitrage when Ask(YES) + Ask(NO) < 1.00 - fees", "Low", True, status=STATUS_IMPLEMENTED),
-    StrategyMeta("arb_multi_negative_risk", "Negative Risk Multi-Arb", "arbitrage", "Combinatorial arbitrage across N-outcome mutually exclusive events", "Low", False),
-    StrategyMeta("arb_gamma_clob_parity", "Gamma-CLOB Parity Arb", "arbitrage", "Exploits pricing dislocations between Gamma AMM and CLOB books", "Low", False),
-    StrategyMeta("arb_synthetic_straddle", "Synthetic Straddle Arb", "arbitrage", "Exploits implied volatility mispricing on paired event outcomes", "Medium", False),
+    StrategyMeta("arb_multi_negative_risk", "Negative Risk Multi-Arb", "arbitrage", "Combinatorial arbitrage across N-outcome mutually exclusive events", "Low", False, status=STATUS_IMPLEMENTED),
+    StrategyMeta("arb_gamma_clob_parity", "Gamma-CLOB Parity Arb", "arbitrage", "Exploits pricing dislocations between Gamma AMM and CLOB books", "Low", False, status=STATUS_IMPLEMENTED),
+    StrategyMeta("arb_synthetic_straddle", "Synthetic Straddle Arb", "arbitrage", "Exploits implied volatility mispricing on paired event outcomes", "Medium", False, status=STATUS_IMPLEMENTED),
     StrategyMeta("arb_temporal_expiry", "Late Resolution (Decay Curve)", "arbitrage", "W44-1: trades late-resolution decay — BUY when the observed mid is below the modeled logistic-decay fair value (market under-pricing near-certain outcome), SELL when above (over-pricing); uses a logistic decay curve with a 6h half-life and 0.5 steepness", "Low", False, status=STATUS_IMPLEMENTED),
     StrategyMeta("arb_cross_correlation", "Cross-Category Arb", "arbitrage", "Pairs trading on economically correlated event groups (crypto/macro)", "Medium", False, status=STATUS_IMPLEMENTED),
     StrategyMeta("arb_cluster_dislocation", "Cross-Market Cluster Dislocation", "arbitrage", "W44-1: trades cluster dislocations — BUY the most-dislocated under-priced cluster member and SELL the over-priced one when the member's z-score against the cluster mean exceeds 1.5σ with cluster correlation ≥ 0.55 and ≥ 3 members", "Low", False, status=STATUS_IMPLEMENTED),
-    StrategyMeta("arb_cyclic_triangle", "Cyclic Triangle Arb", "arbitrage", "Triangle arbitrage across multi-condition chained prediction markets", "Low", False),
+    StrategyMeta("arb_cyclic_triangle", "Cyclic Triangle Arb", "arbitrage", "Triangle arbitrage across multi-condition chained prediction markets", "Low", False, status=STATUS_IMPLEMENTED),
 
     # ── Group C: Statistical Arbitrage & Mean Reversion (8) ──
-    StrategyMeta("stat_bollinger_reversion", "Bollinger Bands Reversion", "statistical", "Buys/sells when price touches 2.5-sigma bands and mean-reverts", "Medium", False),
+    StrategyMeta("stat_bollinger_reversion", "Bollinger Bands Reversion", "statistical", "Buys/sells when price touches 2.5-sigma bands and mean-reverts", "Medium", False, status=STATUS_IMPLEMENTED),
     StrategyMeta("stat_ornstein_uhlenbeck", "Mean Reversion (Bollinger Bands)", "statistical", "W19-6: trades mean-reversion — BUY when price breaches the lower Bollinger Band, SELL when price breaches the upper band, with a rolling-window MA + sigma estimator", "Medium", False, status=STATUS_IMPLEMENTED),
-    StrategyMeta("stat_rsi_divergence", "RSI Divergence Mean Rev", "statistical", "Identifies overbought (RSI>80) and oversold (RSI<20) exhaustion", "Medium", False),
-    StrategyMeta("stat_zscore_anomaly", "Z-Score Anomaly Trader", "statistical", "Outlier detection on price deviation from volume-weighted mean", "Medium", False),
-    StrategyMeta("stat_pair_cointegration", "Pair Cointegration Trader", "statistical", "Augmented Dickey-Fuller cointegrated spread mean-reversion", "Low", False),
-    StrategyMeta("stat_vwap_reversion", "VWAP Pullback Reversion", "statistical", "Trades mean-reversion toward Volume Weighted Average Price", "Low", False),
-    StrategyMeta("stat_kalman_filter", "Kalman Filter Fair Value", "statistical", "State-space Kalman filter tracking true underlying fair value", "Low", False),
-    StrategyMeta("stat_half_life_decay", "Half-Life Decay Reverter", "statistical", "Calibrates trade horizon to statistical mean-reversion half-life", "Medium", False),
+    StrategyMeta("stat_rsi_divergence", "RSI Divergence Mean Rev", "statistical", "Identifies overbought (RSI>80) and oversold (RSI<20) exhaustion", "Medium", False, status=STATUS_IMPLEMENTED),
+    StrategyMeta("stat_zscore_anomaly", "Z-Score Anomaly Trader", "statistical", "Outlier detection on price deviation from volume-weighted mean", "Medium", False, status=STATUS_IMPLEMENTED),
+    StrategyMeta("stat_pair_cointegration", "Pair Cointegration Trader", "statistical", "Augmented Dickey-Fuller cointegrated spread mean-reversion", "Low", False, status=STATUS_IMPLEMENTED),
+    StrategyMeta("stat_vwap_reversion", "VWAP Pullback Reversion", "statistical", "Trades mean-reversion toward Volume Weighted Average Price", "Low", False, status=STATUS_IMPLEMENTED),
+    StrategyMeta("stat_kalman_filter", "Kalman Filter Fair Value", "statistical", "State-space Kalman filter tracking true underlying fair value", "Low", False, status=STATUS_IMPLEMENTED),
+    StrategyMeta("stat_half_life_decay", "Half-Life Decay Reverter", "statistical", "Calibrates trade horizon to statistical mean-reversion half-life", "Medium", False, status=STATUS_IMPLEMENTED),
 
     # ── Group D: Momentum, Breakout & Trend Following (8) ──
-    StrategyMeta("mom_ema_crossover", "EMA Crossover Trend", "momentum", "Fast/Slow Exponential Moving Average trend capture (8/21 EMA)", "Medium", False),
+    StrategyMeta("mom_ema_crossover", "EMA Crossover Trend", "momentum", "Fast/Slow Exponential Moving Average trend capture (8/21 EMA)", "Medium", False, status=STATUS_IMPLEMENTED),
     StrategyMeta("mom_macd_histogram", "Momentum (Rate of Change)", "momentum", "W19-6: trades momentum — BUY when ROC (Rate of Change) is strongly positive, SELL when momentum reverses; uses a 10-cycle ROC window with ±5% thresholds", "Medium", False, status=STATUS_IMPLEMENTED),
-    StrategyMeta("mom_donchian_breakout", "Donchian Channel Breakout", "momentum", "20-period high/low breakout momentum with trailing stops", "High", False),
-    StrategyMeta("mom_volatility_expansion", "Volatility Expansion Trend", "momentum", "Enters explosive trend regimes following ATR volatility squeeze", "High", False),
-    StrategyMeta("mom_volume_surge", "Volume Surge Momentum", "momentum", "Follows sudden 3x volume spikes with directional price breakout", "High", False),
-    StrategyMeta("mom_parabolic_sar", "Parabolic SAR Follower", "momentum", "Trend-following with dynamic trailing stop and reverse points", "Medium", False),
-    StrategyMeta("mom_adx_trend_strength", "ADX Trend Strength", "momentum", "Filters and trades only strong directional trends (ADX > 25)", "Medium", False),
-    StrategyMeta("mom_micro_price_accel", "Micro-Price Acceleration", "momentum", "Fast execution following micro-price acceleration (P_micro - P_mid)", "High", False),
+    StrategyMeta("mom_donchian_breakout", "Donchian Channel Breakout", "momentum", "20-period high/low breakout momentum with trailing stops", "High", False, status=STATUS_IMPLEMENTED),
+    StrategyMeta("mom_volatility_expansion", "Volatility Expansion Trend", "momentum", "Enters explosive trend regimes following ATR volatility squeeze", "High", False, status=STATUS_IMPLEMENTED),
+    StrategyMeta("mom_volume_surge", "Volume Surge Momentum", "momentum", "Follows sudden 3x volume spikes with directional price breakout", "High", False, status=STATUS_IMPLEMENTED),
+    StrategyMeta("mom_parabolic_sar", "Parabolic SAR Follower", "momentum", "Trend-following with dynamic trailing stop and reverse points", "Medium", False, status=STATUS_IMPLEMENTED),
+    StrategyMeta("mom_adx_trend_strength", "ADX Trend Strength", "momentum", "Filters and trades only strong directional trends (ADX > 25)", "Medium", False, status=STATUS_IMPLEMENTED),
+    StrategyMeta("mom_micro_price_accel", "Micro-Price Acceleration", "momentum", "Fast execution following micro-price acceleration (P_micro - P_mid)", "High", False, status=STATUS_IMPLEMENTED),
 
     # ── Group E: Event-Driven, Sentiment & Intelligence (8) ──
     StrategyMeta("event_news_sentiment", "News Sentiment Breakout", "event_driven", "NLP sentiment scoring on breaking news feeds to trade probability shifts", "Medium", False, status=STATUS_IMPLEMENTED),
     StrategyMeta("event_social_volume", "Sentiment (Social Aggregator)", "event_driven", "W44-1: trades aggregated social sentiment — BUY when the current aggregated sentiment z-score against a rolling 50-cycle baseline exceeds +2σ (bullish shift), SELL when below -2σ (bearish shift); weights by source-diversity across ≥ 2 platforms and ≥ 100 mentions", "Medium", False, status=STATUS_IMPLEMENTED),
     StrategyMeta("event_poll_discrepancy", "News (Polling Gap)", "event_driven", "W44-1: trades polling-vs-price discrepancies — BUY when poll_probability - mid exceeds the polling margin of error + 2.5% buffer (market under-prices YES outcome), SELL in the symmetric case; skips polls with < 500 respondents or > 72h staleness", "Medium", False, status=STATUS_IMPLEMENTED),
-    StrategyMeta("event_oracle_dispute", "Oracle Dispute Sniper", "event_driven", "Positions ahead of UMA resolution disputes and bond challenges", "High", False),
-    StrategyMeta("event_election_momentum", "Election Momentum Tracker", "event_driven", "Tracks polling momentum shifts in political & election markets", "Medium", False),
-    StrategyMeta("event_macro_straddle", "Macro Announcement Straddle", "event_driven", "Pre-positions ahead of CPI/FOMC/jobs reports using straddle execution", "Medium", False),
-    StrategyMeta("event_whale_follower", "Whale Block Order Follower", "event_driven", "Detects institutional block orders (> $5,000) and rides market impact", "Medium", False),
+    StrategyMeta("event_oracle_dispute", "Oracle Dispute Sniper", "event_driven", "Positions ahead of UMA resolution disputes and bond challenges", "High", False, status=STATUS_IMPLEMENTED),
+    StrategyMeta("event_election_momentum", "Election Momentum Tracker", "event_driven", "Tracks polling momentum shifts in political & election markets", "Medium", False, status=STATUS_IMPLEMENTED),
+    StrategyMeta("event_macro_straddle", "Macro Announcement Straddle", "event_driven", "Pre-positions ahead of CPI/FOMC/jobs reports using straddle execution", "Medium", False, status=STATUS_IMPLEMENTED),
+    StrategyMeta("event_whale_follower", "Whale Block Order Follower", "event_driven", "Detects institutional block orders (> $5,000) and rides market impact", "Medium", False, status=STATUS_IMPLEMENTED),
     StrategyMeta("event_resolution_sniper", "Resolution Expiry Sniper", "event_driven", "High-conviction sniper executing in final 24h of near-certain events", "Low", False, status=STATUS_IMPLEMENTED),
 
     # ── Group F: Machine Learning & Reinforcement Learning (10) ──
-    StrategyMeta("ml_lightgbm_boost", "LightGBM Gradient Boost", "machine_learning", "Ultra-fast gradient boosted decision tree classifier with calibrated probs", "Medium", False),
-    StrategyMeta("ml_xgboost_directional", "XGBoost Directional", "machine_learning", "Regularized gradient boosting model on order flow & volume dynamics", "Medium", False),
+    StrategyMeta("ml_lightgbm_boost", "LightGBM Gradient Boost", "machine_learning", "Ultra-fast gradient boosted decision tree classifier with calibrated probs", "Medium", False, status=STATUS_IMPLEMENTED),
+    StrategyMeta("ml_xgboost_directional", "XGBoost Directional", "machine_learning", "Regularized gradient boosting model on order flow & volume dynamics", "Medium", False, status=STATUS_IMPLEMENTED),
     StrategyMeta("ml_random_forest_quant", "Random Forest Quant Model", "machine_learning", "Multi-factor bagging ensemble of 100 decision trees", "Low", True, status=STATUS_IMPLEMENTED),
-    StrategyMeta("ml_online_sgd_learner", "Online SGD Momentum", "machine_learning", "Real-time passive-aggressive incremental learner updating from every fill", "Medium", False),
+    StrategyMeta("ml_online_sgd_learner", "Online SGD Momentum", "machine_learning", "Real-time passive-aggressive incremental learner updating from every fill", "Medium", False, status=STATUS_IMPLEMENTED),
     StrategyMeta("ml_fractional_kelly", "Ensemble (Fractional Kelly)", "machine_learning", "W44-1: ensemble meta-strategy — aggregates BUY/SELL signals from N upstream strategies via weighted-vote (min_confidence ≥ 0.40, vote margin ≥ 10%), computes the aggregated edge as the weighted-mean of the concurring signals' edges, and sizes the consensus position via quarter-Kelly (kelly_fraction = 0.25)", "Low", False, status=STATUS_IMPLEMENTED),
     StrategyMeta("ml_isotonic_calibrated", "Value (ML Fair Value)", "machine_learning", "W19-6: trades mispriced markets — BUY when ML model p_yes >> market mid, SELL when model p_yes << market mid; uses the ensemble model for fair-value estimation with a 5% minimum edge gate", "Low", False, status=STATUS_IMPLEMENTED),
-    StrategyMeta("ml_gmm_regime_switch", "GMM Regime Switching", "machine_learning", "Gaussian Mixture Model identifying high-vol vs low-vol market regimes", "Medium", False),
-    StrategyMeta("ml_svm_hyperplane", "SVM Hyperplane Classifier", "machine_learning", "Non-linear RBF kernel hyperplane separator for market state classification", "Medium", False),
-    StrategyMeta("ml_bayesian_belief", "Bayesian Belief Updater", "machine_learning", "Bayesian posterior probability updates based on new evidence arrival", "Low", False),
-    StrategyMeta("ml_qlearning_execution", "Q-Learning Execution Agent", "machine_learning", "Reinforcement learning agent optimizing limit order placement & timing", "Medium", False),
+    StrategyMeta("ml_gmm_regime_switch", "GMM Regime Switching", "machine_learning", "Gaussian Mixture Model identifying high-vol vs low-vol market regimes", "Medium", False, status=STATUS_IMPLEMENTED),
+    StrategyMeta("ml_svm_hyperplane", "SVM Hyperplane Classifier", "machine_learning", "Non-linear RBF kernel hyperplane separator for market state classification", "Medium", False, status=STATUS_IMPLEMENTED),
+    StrategyMeta("ml_bayesian_belief", "Bayesian Belief Updater", "machine_learning", "Bayesian posterior probability updates based on new evidence arrival", "Low", False, status=STATUS_IMPLEMENTED),
+    StrategyMeta("ml_qlearning_execution", "Q-Learning Execution Agent", "machine_learning", "Reinforcement learning agent optimizing limit order placement & timing", "Medium", False, status=STATUS_IMPLEMENTED),
 ]
 
 
@@ -157,6 +208,49 @@ _IMPLEMENTED_STRATEGY_CLASSES: dict[str, str] = {
     "event_poll_discrepancy": "strategies.news.NewsTrader",
     "event_social_volume": "strategies.sentiment.SentimentAggregator",
     "arb_cluster_dislocation": "strategies.cross_market.CrossMarket",
+    # The thirty-four W46-1 additions — promoted from PLANNED to IMPLEMENTED.
+    # Each maps to a concrete ``BaseStrategy`` subclass implementing the
+    # 9-method ``StrategyContract`` ABC + a real ``_run`` async loop.
+    # Group A (market making, 5):
+    "mm_glft_optimal": "strategies.mm_glft_optimal.GlftOptimalQuoter",
+    "mm_volatility_adaptive": "strategies.mm_volatility_adaptive.VolatilityAdaptiveMM",
+    "mm_rebate_harvester": "strategies.mm_rebate_harvester.RebateHarvester",
+    "mm_ofi_microstructure": "strategies.mm_ofi_microstructure.OfiMicrostructureMM",
+    "mm_poisson_arrival": "strategies.mm_poisson_arrival.PoissonArrivalQuoter",
+    # Group B (arbitrage, 4):
+    "arb_multi_negative_risk": "strategies.arb_multi_negative_risk.NegativeRiskMultiArb",
+    "arb_gamma_clob_parity": "strategies.arb_gamma_clob_parity.GammaClobParityArb",
+    "arb_synthetic_straddle": "strategies.arb_synthetic_straddle.SyntheticStraddleArb",
+    "arb_cyclic_triangle": "strategies.arb_cyclic_triangle.CyclicTriangleArb",
+    # Group C (statistical, 7):
+    "stat_bollinger_reversion": "strategies.stat_bollinger_reversion.BollingerBandsReversion",
+    "stat_rsi_divergence": "strategies.stat_rsi_divergence.RsiDivergenceTrader",
+    "stat_zscore_anomaly": "strategies.stat_zscore_anomaly.ZScoreAnomalyTrader",
+    "stat_pair_cointegration": "strategies.stat_pair_cointegration.PairCointegrationTrader",
+    "stat_vwap_reversion": "strategies.stat_vwap_reversion.VwapReversionTrader",
+    "stat_kalman_filter": "strategies.stat_kalman_filter.KalmanFilterTrader",
+    "stat_half_life_decay": "strategies.stat_half_life_decay.HalfLifeDecayReverter",
+    # Group D (momentum, 7):
+    "mom_ema_crossover": "strategies.mom_ema_crossover.EmaCrossoverTrend",
+    "mom_donchian_breakout": "strategies.mom_donchian_breakout.DonchianBreakoutTrader",
+    "mom_volatility_expansion": "strategies.mom_volatility_expansion.VolatilityExpansionTrader",
+    "mom_volume_surge": "strategies.mom_volume_surge.VolumeSurgeMomentum",
+    "mom_parabolic_sar": "strategies.mom_parabolic_sar.ParabolicSarFollower",
+    "mom_adx_trend_strength": "strategies.mom_adx_trend_strength.AdxTrendStrength",
+    "mom_micro_price_accel": "strategies.mom_micro_price_accel.MicroPriceAcceleration",
+    # Group E (event-driven, 4):
+    "event_oracle_dispute": "strategies.event_oracle_dispute.OracleDisputeSniper",
+    "event_election_momentum": "strategies.event_election_momentum.ElectionMomentumTracker",
+    "event_macro_straddle": "strategies.event_macro_straddle.MacroStraddleTrader",
+    "event_whale_follower": "strategies.event_whale_follower.WhaleFollower",
+    # Group F (machine learning, 7):
+    "ml_lightgbm_boost": "strategies.ml_lightgbm_boost.LightGBMBoost",
+    "ml_xgboost_directional": "strategies.ml_xgboost_directional.XGBoostDirectional",
+    "ml_online_sgd_learner": "strategies.ml_online_sgd_learner.OnlineSgdLearner",
+    "ml_gmm_regime_switch": "strategies.ml_gmm_regime_switch.GmmRegimeSwitch",
+    "ml_svm_hyperplane": "strategies.ml_svm_hyperplane.SvmHyperplaneClassifier",
+    "ml_bayesian_belief": "strategies.ml_bayesian_belief.BayesianBeliefUpdater",
+    "ml_qlearning_execution": "strategies.ml_qlearning_execution.QLearningExecutionAgent",
 }
 
 # Legacy aliases — the registry accepts these alternative ids for backward

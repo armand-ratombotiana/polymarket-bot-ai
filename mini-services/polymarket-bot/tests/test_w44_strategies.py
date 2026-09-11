@@ -31,8 +31,9 @@ Test groups (per strategy):
   (10) ``exit_logic()`` returns None or a dict (never raises).
   (11) ``diagnostics()`` returns a dict carrying the strategy's name.
 
-Plus a registry wiring test asserting the catalog reports 16
-IMPLEMENTED and 34 PLANNED entries (5 W44-1 promotions).
+Plus a registry wiring test asserting the catalog reports 50
+IMPLEMENTED and 0 PLANNED entries (the W46-1 wave promoted every
+prior PLANNED stub — the 5 W44-1 additions are still IMPLEMENTED).
 
 Approach
 --------
@@ -141,7 +142,7 @@ CONTRACT_METHODS = [
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Section 1 — Registry wiring: 16 IMPLEMENTED, 34 PLANNED.
+# Section 1 — Registry wiring: 50 IMPLEMENTED, 0 PLANNED (post-W46-1).
 # ═══════════════════════════════════════════════════════════════════════════
 
 @pytest.fixture
@@ -158,18 +159,20 @@ def test_registry_catalog_size_is_50(registry):
     assert len(catalog) == len(STRATEGY_CATALOG)
 
 
-def test_registry_catalog_has_16_implemented(registry):
-    """3 + 3 + 5 + 5 = 16 IMPLEMENTED entries after the W44-1 wave."""
+def test_registry_catalog_has_50_implemented(registry):
+    """W46-1 — every catalog row reports ``status == IMPLEMENTED``.
+    3 + 3 + 5 + 5 + 34 = 50 IMPLEMENTED entries after the W46-1 wave."""
     catalog = registry.get_catalog()
     implemented = [r for r in catalog if r["status"] == STATUS_IMPLEMENTED]
-    assert len(implemented) == 16
+    assert len(implemented) == 50
 
 
-def test_registry_catalog_has_34_planned(registry):
-    """50 − 16 = 34 PLANNED stubs after the W44-1 wave."""
+def test_registry_catalog_has_zero_planned(registry):
+    """W46-1 — every prior PLANNED stub has been promoted. 0 PLANNED
+    entries remain in the catalog."""
     catalog = registry.get_catalog()
     planned = [r for r in catalog if r["status"] == STATUS_PLANNED]
-    assert len(planned) == 34
+    assert len(planned) == 0
 
 
 def test_w44_strategy_ids_are_implemented(registry):

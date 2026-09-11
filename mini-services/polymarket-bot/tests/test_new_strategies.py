@@ -170,12 +170,13 @@ def test_registry_marks_five_new_strategies_as_implemented():
         )
 
 
-def test_registry_total_implemented_is_eleven():
-    """6 (original + W19-6) + 5 (W22-3) + 5 (W44-1) = 16 IMPLEMENTED strategies."""
+def test_registry_total_implemented_is_fifty():
+    """6 (original + W19-6) + 5 (W22-3) + 5 (W44-1) + 34 (W46-1) = 50
+    IMPLEMENTED strategies. W46-1 promoted every prior PLANNED stub."""
     implemented = [s for s in STRATEGY_CATALOG if s.status == STATUS_IMPLEMENTED]
-    assert len(implemented) == 16
+    assert len(implemented) == 50
     planned = [s for s in STRATEGY_CATALOG if s.status != STATUS_IMPLEMENTED]
-    assert len(planned) == 34  # 50 − 16
+    assert len(planned) == 0  # 50 − 50 = 0
 
 
 @pytest.mark.asyncio
@@ -1146,12 +1147,11 @@ def test_catalog_size_remains_50():
 
 def test_no_strategy_left_in_both_states():
     """Every catalog entry is either IMPLEMENTED or PLANNED — never both.
-    Also: the 5 W22-3 entries must be IMPLEMENTED; the 34 others must
-    be PLANNED."""
+    W46-1: every entry is IMPLEMENTED (50), zero entries are PLANNED (0)."""
     impl = [s for s in STRATEGY_CATALOG if s.status == STATUS_IMPLEMENTED]
     planned = [s for s in STRATEGY_CATALOG if s.status != STATUS_IMPLEMENTED]
-    assert len(impl) == 16
-    assert len(planned) == 34
+    assert len(impl) == 50
+    assert len(planned) == 0
     # No id appears in both sets.
     impl_ids = {s.strategy_id for s in impl}
     planned_ids = {s.strategy_id for s in planned}

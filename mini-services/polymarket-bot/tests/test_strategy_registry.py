@@ -86,7 +86,10 @@ def test_get_catalog_flags_implemented_set_correctly(registry):
     implemented = [row for row in catalog if row["implemented"]]
     implemented_ids = {row["strategy_id"] for row in implemented}
 
-    assert implemented_ids == {
+    # W46-1 — every catalog row is now IMPLEMENTED. The 16 ids below are
+    # the original concrete-strategy set (3 original + 3 W19-6 + 5 W22-3 +
+    # 5 W44-1); they remain a subset of the full implemented set.
+    expected_subset = {
         "mm_avellaneda_stoikov",
         "arb_binary_dutch_book",
         "ml_random_forest_quant",
@@ -107,14 +110,16 @@ def test_get_catalog_flags_implemented_set_correctly(registry):
         "event_social_volume",
         "arb_cluster_dislocation",
     }
-    assert len(implemented) == 16
+    assert expected_subset.issubset(implemented_ids)
+    assert len(implemented) == 50  # 3 + 3 + 5 + 5 + 34 W46-1 promotions
 
 
 # ── 2b. get_catalog flags implemented_only filter ───────────────────────────
-def test_get_catalog_implemented_only_filter_returns_sixteen(registry):
-    """``implemented_only=True`` returns only the sixteen IMPLEMENTED rows."""
+def test_get_catalog_implemented_only_filter_returns_fifty(registry):
+    """``implemented_only=True`` returns all fifty IMPLEMENTED rows
+    (W46-1 — no PLANNED stubs left to filter out)."""
     catalog = registry.get_catalog(implemented_only=True)
-    assert len(catalog) == 16
+    assert len(catalog) == 50
     for row in catalog:
         assert row["status"] == "IMPLEMENTED"
         assert row["implemented"] is True
@@ -198,14 +203,21 @@ async def test_stop_strategy_returns_false_for_unknown_id(registry):
     assert registry.get_active_instances() == {}
 
 
-# ── 9. start_strategy on stub (non-implemented) id returns True ─────────────
+# ── 9. start_strategy on a W46-1 strategy returns True and registers the concrete class ────
 async def test_start_strategy_on_stub_returns_true_and_registers(registry):
-    """A catalog entry that's NOT in the documented implemented set must
-    still instantiate a ``QuantStrategyInstance`` (the stub fallback) when
-    ``start_strategy`` is called — returning True and registering the
-    instance under its strategy_id."""
-    # Pick a stub entry: stat_bollinger_reversion (statistical, not in
-    # the implemented set).
+    """W46-1 — every catalog entry now maps to a concrete ``BaseStrategy``
+    subclass, so ``start_strategy`` on any id returns ``True`` AND registers
+    the concrete instance (NOT the ``QuantStrategyInstance`` stub).
+
+    Prior to W46-1 this test asserted that an un-mapped stub fell through
+    to the ``QuantStrategyInstance`` no-op wrapper. With all 50 strategies
+    IMPLEMENTED, there is no stub path; this test now exercises a
+    representative id from each wave (using ``stat_bollinger_reversion``
+    — promoted from PLANNED to IMPLEMENTED in W46-1) and asserts it
+    instantiates the concrete ``BollingerBandsReversion`` class.
+    """
+    from strategies.stat_bollinger_reversion import BollingerBandsReversion
+
     stub_id = "stat_bollinger_reversion"
     assert stub_id in {s.strategy_id for s in STRATEGY_CATALOG}
 
@@ -214,7 +226,8 @@ async def test_start_strategy_on_stub_returns_true_and_registers(registry):
     assert ok is True
     instances = registry.get_active_instances()
     assert stub_id in instances
-    assert isinstance(instances[stub_id], QuantStrategyInstance)
+    assert isinstance(instances[stub_id], BollingerBandsReversion)
+    assert not isinstance(instances[stub_id], QuantStrategyInstance)
 
 
 # ── 10. start_strategy is idempotent ────────────────────────────────────────
