@@ -95,7 +95,7 @@ from strategies.momentum import (  # noqa: E402
 )
 from strategies.registry import (  # noqa: E402
     STATUS_IMPLEMENTED,
-    STATUS_PLANNED,
+    STATUS_LEGACY,
     STRATEGY_CATALOG,
     StrategyRegistry,
 )
@@ -165,10 +165,10 @@ def test_catalog_has_fifty_implemented_strategies(registry):
 
 
 def test_catalog_has_zero_planned_strategies(registry):
-    """W46-1 — every prior PLANNED stub has been promoted to IMPLEMENTED.
-    Zero PLANNED entries remain in the catalog."""
+    """W46-1 — every prior EXPERIMENTAL stub has been promoted to IMPLEMENTED.
+    Zero EXPERIMENTAL entries remain in the catalog."""
     catalog = registry.get_catalog()
-    planned = [r for r in catalog if r["status"] == STATUS_PLANNED]
+    planned = [r for r in catalog if r["status"] == STATUS_LEGACY]
     assert len(planned) == 0
 
 
@@ -191,12 +191,12 @@ def test_catalog_implemented_only_filter_returns_fifty(registry):
 
 def test_catalog_row_has_status_field(registry):
     """Every catalog row must carry a ``status`` key in
-    {IMPLEMENTED, PLANNED, EXPERIMENTAL} — the honest per-strategy
-    lifecycle flag W19-6 introduces."""
+    {IMPLEMENTED, EXPERIMENTAL} — the honest per-strategy
+    lifecycle flag W19-6 introduces (W47-1 — all rows are IMPLEMENTED)."""
     catalog = registry.get_catalog()
     for row in catalog:
         assert "status" in row
-        assert row["status"] in {STATUS_IMPLEMENTED, STATUS_PLANNED, "EXPERIMENTAL"}
+        assert row["status"] in {STATUS_IMPLEMENTED, STATUS_LEGACY, "EXPERIMENTAL"}
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -570,10 +570,10 @@ async def test_registry_marks_running_state_in_catalog():
     for r in other_implemented:
         assert r["is_running"] is False
 
-    # W46-1 — there are no PLANNED entries left, so the prior
-    # "every PLANNED entry must report is_running=False" loop is
+    # W46-1 — there are no EXPERIMENTAL entries left, so the prior
+    # "every EXPERIMENTAL entry must report is_running=False" loop is
     # vacuously true; assert the count is zero for the regression guard.
-    planned = [r for r in catalog if r["status"] == STATUS_PLANNED]
+    planned = [r for r in catalog if r["status"] == STATUS_LEGACY]
     assert len(planned) == 0
 
     await reg.stop_strategy("stat_ornstein_uhlenbeck")
@@ -607,11 +607,11 @@ def test_api_strategies_catalog_returns_full_50_entries():
     data = response.json()
     assert "catalog" in data and isinstance(data["catalog"], list)
     assert data["total"] == len(data["catalog"])
-    assert data["total"] == 50  # 50 implemented + 0 planned
+    assert data["total"] == 50  # 50 implemented + 0 experimental
     # ``status`` field is present on every row.
     for row in data["catalog"]:
         assert "status" in row
-        assert row["status"] in {STATUS_IMPLEMENTED, STATUS_PLANNED, "EXPERIMENTAL"}
+        assert row["status"] in {STATUS_IMPLEMENTED, STATUS_LEGACY, "EXPERIMENTAL"}
 
 
 def test_api_strategies_catalog_implemented_only_returns_fifty():

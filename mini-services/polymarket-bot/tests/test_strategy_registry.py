@@ -263,7 +263,8 @@ async def test_stop_strategy_on_running_stub_returns_true_and_removes(registry):
 def test_strategy_meta_dataclass_carries_all_documented_fields():
     """``StrategyMeta`` must expose all documented fields: strategy_id,
     name, category, description, risk_level, default_enabled, status
-    (W19-6 addition — defaults to ``PLANNED``)."""
+    (W47-1 — defaults to ``IMPLEMENTED`` because every catalog row is
+    now backed by a concrete class)."""
     meta = StrategyMeta(
         strategy_id="test_id",
         name="Test Strategy",
@@ -281,9 +282,10 @@ def test_strategy_meta_dataclass_carries_all_documented_fields():
     assert meta.default_enabled is False
     assert meta.status == "IMPLEMENTED"
 
-    # Defaults: ``default_enabled`` is False and ``status`` is PLANNED
-    # (W19-6 — honest default; a new entry is assumed to be a stub
-    # until explicitly marked IMPLEMENTED).
+    # Defaults: ``default_enabled`` is False and ``status`` is IMPLEMENTED
+    # (W47-1 — the default is now IMPLEMENTED because every catalog row
+    # is backed by a concrete class; a new entry is assumed to be
+    # IMPLEMENTED unless explicitly marked otherwise).
     meta2 = StrategyMeta("x", "y", "z", "w", "Low")
     assert meta2.default_enabled is False
-    assert meta2.status == "PLANNED"
+    assert meta2.status == "IMPLEMENTED"

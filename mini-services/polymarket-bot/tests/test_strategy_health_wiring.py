@@ -107,7 +107,7 @@ from core.strategy_health import (  # noqa: E402
 )
 from strategies.registry import (  # noqa: E402
     STATUS_IMPLEMENTED,
-    STATUS_PLANNED,
+    STATUS_LEGACY,
     strategy_registry,
 )
 
@@ -346,10 +346,10 @@ async def test_loop_calls_check_strategy_for_each_implemented_strategy(
     fetch).
 
     Drives the loop body for one iteration with a synthetic catalog
-    containing ONE IMPLEMENTED strategy + ONE PLANNED strategy. Only
+    containing ONE IMPLEMENTED strategy + ONE EXPERIMENTAL strategy. Only
     the IMPLEMENTED row should reach ``check_strategy``.
     """
-    # Build a minimal catalog: one IMPLEMENTED + one PLANNED row.
+    # Build a minimal catalog: one IMPLEMENTED + one EXPERIMENTAL row.
     minimal_catalog = [
         {
             "strategy_id": _TEST_STRATEGY_ID,
@@ -365,11 +365,11 @@ async def test_loop_calls_check_strategy_for_each_implemented_strategy(
         },
         {
             "strategy_id": "mm_glft_optimal",
-            "name": "Test Planned",
+            "name": "Test Experimental",
             "category": "market_making",
-            "description": "test planned",
+            "description": "test experimental",
             "risk_level": "Medium",
-            "status": STATUS_PLANNED,
+            "status": STATUS_LEGACY,
             "implemented": False,
             "is_running": False,
             "default_enabled": False,
@@ -394,13 +394,13 @@ async def test_loop_calls_check_strategy_for_each_implemented_strategy(
         monitor_override=fresh_monitor,
     )
 
-    # The IMPLEMENTED strategy was evaluated; the PLANNED strategy was NOT.
+    # The IMPLEMENTED strategy was evaluated; the EXPERIMENTAL strategy was NOT.
     assert _TEST_STRATEGY_ID in seen, (
         f"IMPLEMENTED strategy '{_TEST_STRATEGY_ID}' must be passed to "
         f"check_strategy; saw {seen}"
     )
     assert "mm_glft_optimal" not in seen, (
-        "PLANNED strategies must be skipped by the loop (only IMPLEMENTED "
+        "EXPERIMENTAL strategies must be skipped by the loop (only IMPLEMENTED "
         f"rows are evaluated); saw {seen}"
     )
 

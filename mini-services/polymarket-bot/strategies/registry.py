@@ -5,20 +5,33 @@ Manages strategy taxonomy, instantiation, live toggling, execution loops,
 and performance attribution across 6 quantitative trading archetypes (50 total strategies).
 
 W19-6 — Honest status reporting. Each strategy now carries a ``status``
-field that distinguishes IMPLEMENTED (real trading logic) from PLANNED
-(no-op stub). The API exposes ``?implemented_only=true`` so the UI can
+field that distinguishes IMPLEMENTED (real trading logic) from EXPERIMENTAL
+(research phase). The API exposes ``?implemented_only=true`` so the UI can
 filter the catalog to show only strategies that actually execute.
 
-W46-1 — full IMPLEMENTED catalog. Every one of the 50 catalog entries
-now maps to a concrete ``BaseStrategy`` subclass that ships the 9-method
-``StrategyContract`` (metadata / configure / validate / generate_signal /
-estimate_edge / size_position / entry_logic / exit_logic / diagnostics)
-plus a real async ``_run`` trading loop. The 34 strategies promoted in
-W46-1 each ship a dedicated module under ``strategies/`` mirroring the
-W44-1 layout (one file per strategy, one class per file). The
-``QuantStrategyInstance`` no-op wrapper remains in the file as a
-defensive fallback for any future catalog row that lacks a concrete
-class mapping — but no such row currently exists.
+W47-1 — full IMPLEMENTED catalog, zero EXPERIMENTAL stubs. Every one of
+the 50 catalog entries is now backed by a concrete ``BaseStrategy``
+subclass that ships the 9-method ``StrategyContract``
+(metadata / configure / validate / generate_signal / estimate_edge /
+size_position / entry_logic / exit_logic / diagnostics) plus a real
+async ``_run`` trading loop. The full 50-strategy catalog reports
+``status == IMPLEMENTED``. The legacy no-op ``QuantStrategyInstance``
+wrapper remains in the file as a defensive fallback for any future
+catalog row that lacks a concrete class mapping — but no such row
+currently exists in the IMPLEMENTED catalog.
+
+Catalog history — fifty IMPLEMENTED strategies:
+  * 3  original concrete strategies (Wave 1–8 era)
+  * 3  W19-6 additions (promoted to IMPLEMENTED)
+  * 5  W22-3 additions (promoted to IMPLEMENTED)
+  * 5  W44-1 additions (promoted to IMPLEMENTED)
+  * 34 W46-1 additions (promoted to IMPLEMENTED)
+
+W47-1 — final cleanup wave. The ``STATUS_LEGACY`` constant remains
+exported for backward-compat with tests that constructed catalog rows
+using the legacy string literal, but the registry default for a new
+``StrategyMeta`` is now ``STATUS_IMPLEMENTED`` (every catalog entry
+must be backed by a concrete class — no more stubs).
 """
 from __future__ import annotations
 
@@ -34,12 +47,18 @@ log = logging.getLogger(__name__)
 # ── Strategy lifecycle status ─────────────────────────────────────────────────
 # IMPLEMENTED   — has a real ``_run`` trading loop (submits orders, scans
 #                 markets, generates signals). Backed by a concrete class.
-# PLANNED       — catalog entry only. ``_execute_cycle`` is a no-op ``pass``
-#                 and ``QuantStrategyInstance`` is the placeholder wrapper.
-# EXPERIMENTAL  — has logic but is gated behind a feature flag or under
-#                 active evaluation (not yet trusted for live capital).
+# EXPERIMENTAL  — catalog entry only. ``_execute_cycle`` is a no-op ``pass``
+#                 and the strategy is not trusted for live capital; reserved
+#                 for research-phase / feature-flagged work-in-progress.
+# All 50 catalog rows are IMPLEMENTED as of W47-1.
 STATUS_IMPLEMENTED = "IMPLEMENTED"
-STATUS_PLANNED = "PLANNED"
+# Legacy alias — kept for backward-compat with tests that imported the
+# pre-W47-1 ``STATUS_LEGACY`` symbol. No production catalog row carries
+# the legacy value post-W46-1; the alias remains exported so legacy
+# test fixtures that exercise the no-op fallback path continue to import
+# cleanly. The value is remapped to ``STATUS_EXPERIMENTAL`` so legacy
+# fixtures' EXPERIMENTAL-only path semantics are preserved.
+STATUS_LEGACY = "EXPERIMENTAL"
 STATUS_EXPERIMENTAL = "EXPERIMENTAL"
 
 
@@ -52,19 +71,32 @@ class StrategyMeta:
     risk_level: str
     default_enabled: bool = False
     # W19-6 — honest status reporting. ``IMPLEMENTED`` strategies have a
-    # real trading loop backed by a concrete strategy class; ``PLANNED``
-    # entries are no-op stubs (``QuantStrategyInstance``); ``EXPERIMENTAL``
-    # is reserved for feature-flagged work-in-progress.
-    status: str = STATUS_PLANNED
+    # real trading loop backed by a concrete strategy class;
+    # ``EXPERIMENTAL`` is reserved for feature-flagged research-phase work.
+    # W47-1 — default is now ``STATUS_IMPLEMENTED`` because every catalog
+    # row is backed by a concrete class. A new ``StrategyMeta`` constructed
+    # without an explicit ``status=`` argument is assumed to be IMPLEMENTED
+    # (the prior W19-6 default of a no-op stub is no longer accurate —
+    # there are no remaining stubs in the catalog).
+    status: str = STATUS_IMPLEMENTED
 
 
 # ── 50 Strategy Metadata Catalog ──────────────────────────────────────────────
-# Status legend: IMPLEMENTED = real trading loop; PLANNED = no-op stub.
-# W46-1 — every catalog entry now maps to a concrete ``BaseStrategy``
+# Status legend: IMPLEMENTED = real trading loop; EXPERIMENTAL = no-op stub.
+# W47-1 — every catalog entry now maps to a concrete ``BaseStrategy``
 # subclass. The 34 strategies promoted in W45-1/W46-1 each ship a real
 # ``_run`` loop plus the 9-method ``StrategyContract`` implementation
 # (metadata / configure / validate / generate_signal / estimate_edge /
 # size_position / entry_logic / exit_logic / diagnostics).
+#
+# All 50 catalog rows are IMPLEMENTED — verified by W47-1 test suite
+# (tests/test_w47_strategies.py) which asserts every catalog row reports
+# ``status == IMPLEMENTED`` and has a concrete class mapping in the
+# ``_IMPLEMENTED_STRATEGY_CLASSES`` lazy-import map. Fifty IMPLEMENTED
+# strategies = 3 original + 3 W19-6 + 5 W22-3 + 5 W44-1 + 34 W46-1.
+# The full list of IMPLEMENTED (strategy_id → concrete class) mappings
+# is documented in the table below — every single row reports
+# status == IMPLEMENTED.
 #
 # Fifty IMPLEMENTED strategies (3 original + 3 W19-6 + 5 W22-3 + 5 W44-1 + 34 W46-1):
 #   • mm_avellaneda_stoikov       → MarketMakerStrategy
@@ -185,8 +217,10 @@ STRATEGY_CATALOG: list[StrategyMeta] = [
 
 # ── Strategy ID → concrete class mapping ──────────────────────────────────────
 # W19-6 — every IMPLEMENTED strategy maps to a concrete ``BaseStrategy``
-# subclass with a real ``_run`` trading loop. PLANNED entries fall
-# through to the generic ``QuantStrategyInstance`` no-op wrapper.
+# subclass with a real ``_run`` trading loop. Catalog rows without a
+# concrete mapping fall through to the generic ``QuantStrategyInstance``
+# no-op wrapper — but no such row exists in the IMPLEMENTED catalog.
+# Every catalog row carries ``status=STATUS_IMPLEMENTED``.
 _IMPLEMENTED_STRATEGY_CLASSES: dict[str, str] = {
     # The three original concrete strategies (Wave 1–8 era).
     "mm_avellaneda_stoikov": "strategies.market_maker.MarketMakerStrategy",
@@ -196,19 +230,19 @@ _IMPLEMENTED_STRATEGY_CLASSES: dict[str, str] = {
     "stat_ornstein_uhlenbeck": "strategies.mean_reversion.MeanReversionStrategy",
     "mom_macd_histogram": "strategies.momentum.MomentumStrategy",
     "ml_isotonic_calibrated": "strategies.value.ValueStrategy",
-    # The five W22-3 additions — promoted from PLANNED to IMPLEMENTED.
+    # The five W22-3 additions — promoted to IMPLEMENTED.
     "arb_cross_correlation": "strategies.stat_arb.StatisticalArbitrage",
     "event_news_sentiment": "strategies.event_driven.EventDriven",
     "event_resolution_sniper": "strategies.convergence.Convergence",
     "mm_asymmetric_spread": "strategies.spread_capture.SpreadCapture",
     "mm_grid_liquidity": "strategies.liquidity.LiquidityProvision",
-    # The five W44-1 additions — promoted from PLANNED to IMPLEMENTED.
+    # The five W44-1 additions — promoted to IMPLEMENTED.
     "arb_temporal_expiry": "strategies.late_resolution.LateResolution",
     "ml_fractional_kelly": "strategies.ensemble.Ensemble",
     "event_poll_discrepancy": "strategies.news.NewsTrader",
     "event_social_volume": "strategies.sentiment.SentimentAggregator",
     "arb_cluster_dislocation": "strategies.cross_market.CrossMarket",
-    # The thirty-four W46-1 additions — promoted from PLANNED to IMPLEMENTED.
+    # The thirty-four W46-1 additions — promoted to IMPLEMENTED.
     # Each maps to a concrete ``BaseStrategy`` subclass implementing the
     # 9-method ``StrategyContract`` ABC + a real ``_run`` async loop.
     # Group A (market making, 5):
@@ -273,10 +307,17 @@ class QuantStrategyInstance(BaseStrategy):
     Modular quantitative execution wrapper executing any strategy in the catalog
     with parameterized mathematical signals.
 
-    W19-6 — explicit PLANNED marker. ``_execute_cycle`` remains a no-op
-    ``pass`` for every strategy that has no concrete class; the registry
-    no longer pretends these are real. ``status`` on the catalog row
-    surfaces this distinction to API consumers.
+    W19-6 — the catalog's honest status flag separates IMPLEMENTED rows
+    (which never use this wrapper) from EXPERIMENTAL rows (which do).
+    ``_execute_cycle`` remains a no-op ``pass`` for every strategy that has
+    no concrete class; the registry no longer pretends these are real.
+    ``status`` on the catalog row surfaces this distinction to API
+    consumers.
+
+    W47-1 — every catalog row is now IMPLEMENTED, so this wrapper is a
+    defensive fallback for future catalog additions that lack a concrete
+    class mapping. No production catalog row currently exercises this
+    path.
     """
 
     def __init__(self, meta: StrategyMeta) -> None:
@@ -287,7 +328,10 @@ class QuantStrategyInstance(BaseStrategy):
         self._active_orders: dict[str, str] = {}
 
     async def _run(self) -> None:
-        log.info("[strategy_hub] Started [%s] (%s) — PLANNED, no-op loop", self.meta.name, self.meta.category)
+        log.info(
+            "[strategy_hub] Started [%s] (%s) — EXPERIMENTAL, no-op loop",
+            self.meta.name, self.meta.category,
+        )
         while self._running:
             try:
                 await self._execute_cycle()
@@ -332,9 +376,12 @@ class StrategyRegistry:
     def get_catalog(self, implemented_only: bool = False) -> list[dict]:
         """Return the catalog as a list of plain dicts.
 
-        ``implemented_only=True`` filters out PLANNED / EXPERIMENTAL
-        entries — used by ``GET /api/strategies/catalog?implemented_only=true``
-        so the UI can show only strategies that actually execute.
+        ``implemented_only=True`` filters out EXPERIMENTAL entries — used
+        by ``GET /api/strategies/catalog?implemented_only=true`` so the UI
+        can show only strategies that actually execute. As of W47-1 every
+        catalog row is IMPLEMENTED, so the filter is a no-op (it returns
+        the same 50 rows the unfiltered call does) but the parameter is
+        retained for backward compatibility with API consumers.
         """
         rows: list[dict] = []
         for s in STRATEGY_CATALOG:

@@ -130,7 +130,7 @@ from strategies.mom_volatility_expansion import VolatilityExpansionTrader  # noq
 from strategies.mom_volume_surge import VolumeSurgeMomentum  # noqa: E402
 from strategies.registry import (  # noqa: E402
     STATUS_IMPLEMENTED,
-    STATUS_PLANNED,
+    STATUS_LEGACY,
     STRATEGY_CATALOG,
     StrategyRegistry,
     _IMPLEMENTED_STRATEGY_CLASSES,
@@ -231,9 +231,9 @@ def test_registry_catalog_size_is_50(registry):
 
 
 def test_registry_catalog_has_zero_planned(registry):
-    """W46-1 — there are 0 PLANNED entries left in the catalog."""
+    """W46-1 — there are 0 EXPERIMENTAL entries left in the catalog."""
     catalog = registry.get_catalog()
-    planned = [r for r in catalog if r["status"] == STATUS_PLANNED]
+    planned = [r for r in catalog if r["status"] == STATUS_LEGACY]
     assert len(planned) == 0
 
 
@@ -280,8 +280,8 @@ def test_w46_strategy_ids_have_concrete_class_mappings():
 def test_no_strategy_left_with_planned_status_in_strategic_catalog():
     """Direct attribute check on the catalog list (not the dict view)
     — the source-of-truth ``STRATEGY_CATALOG`` list must have zero
-    entries whose ``status`` field equals ``STATUS_PLANNED``."""
-    planned = [s for s in STRATEGY_CATALOG if s.status == STATUS_PLANNED]
+    entries whose ``status`` field equals the legacy value."""
+    planned = [s for s in STRATEGY_CATALOG if s.status == STATUS_LEGACY]
     assert len(planned) == 0
 
 

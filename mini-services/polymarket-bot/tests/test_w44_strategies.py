@@ -102,7 +102,7 @@ from strategies.news import NewsTrader  # noqa: E402
 from strategies.sentiment import SentimentAggregator  # noqa: E402
 from strategies.registry import (  # noqa: E402
     STATUS_IMPLEMENTED,
-    STATUS_PLANNED,
+    STATUS_LEGACY,
     STRATEGY_CATALOG,
     StrategyRegistry,
 )
@@ -168,10 +168,10 @@ def test_registry_catalog_has_50_implemented(registry):
 
 
 def test_registry_catalog_has_zero_planned(registry):
-    """W46-1 — every prior PLANNED stub has been promoted. 0 PLANNED
+    """W46-1 — every prior EXPERIMENTAL stub has been promoted. 0 EXPERIMENTAL
     entries remain in the catalog."""
     catalog = registry.get_catalog()
-    planned = [r for r in catalog if r["status"] == STATUS_PLANNED]
+    planned = [r for r in catalog if r["status"] == STATUS_LEGACY]
     assert len(planned) == 0
 
 
