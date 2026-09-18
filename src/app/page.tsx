@@ -11,7 +11,7 @@ import { useAudio } from '@/hooks/useAudio'
 // reconciles to the persisted blob on mount — same hydration pattern
 // as useTranslation + ThemeToggle.
 import { usePreferences } from '@/hooks/usePreferences'
-import Sidebar, { NavSection } from '@/components/Sidebar'
+import Sidebar, { NavSection, NAV_GROUPS } from '@/components/Sidebar'
 import TopStatusBar from '@/components/TopStatusBar'
 // W14-2 — i18n: used to resolve the active panel's localized label
 // for the TopStatusBar breadcrumb. Initialised to 'en' (matching
@@ -271,12 +271,23 @@ export default function Dashboard() {
   const { t } = useTranslation()
 
   // W49-6 — Resolve the active panel's display name + parent group
-  // label for the TopStatusBar breadcrumb. Falls back to the English
-  // label if the i18n key is missing (defensive — the en catalog is
-  // the source of truth, and any key gap should still render a sane
-  // breadcrumb rather than an empty string).
-  const panelName: string | undefined = undefined
-  const panelGroup: string | undefined = undefined
+  // label for the TopStatusBar breadcrumb. Looks up the active section
+  // in NAV_GROUPS, resolves its i18n labelKey via t(), and resolves the
+  // parent group's labelKey too. Falls back to the English label if the
+  // i18n key is missing (defensive — the en catalog is the source of
+  // truth, and any key gap should still render a sane breadcrumb rather
+  // than an empty string).
+  const panelName = useMemo(() => {
+    for (const group of NAV_GROUPS) {
+      const item = group.items.find(i => i.id === activeSection)
+      if (item) return t(item.labelKey) || item.label
+    }
+    return undefined
+  }, [activeSection, t])
+  const panelGroup = useMemo(() => {
+    const group = NAV_GROUPS.find(g => g.items.some(i => i.id === activeSection))
+    return group ? (t(group.labelKey) || group.label) : undefined
+  }, [activeSection, t])
 
   // Modal states
   const [selectedMarket, setSelectedMarket] = useState<{ tokenId: string; slug: string } | null>(null)

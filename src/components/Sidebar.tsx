@@ -1,12 +1,39 @@
 // components/Sidebar.tsx — Primary navigation sidebar
 //
-// W49-2 — Redesigned for a cleaner, more professional navigation
-// experience. Slimmer (200px / 48px collapsed), grouped by function,
-// with a live status footer (bot indicator, backend connection, paper/
-// live mode badge, UTC clock) and a polished active state (3px accent
-// left border + slightly elevated background).
+// W50-2b — Premium redesign for a more refined, modern navigation
+// experience. The structure is unchanged from W49-2 (same NavSection
+// type, same NAV_GROUPS data, same i18n keys, same collapse/expand +
+// mobile drawer + UTC clock behaviour). The visible refinements are:
 //
-// Group structure (functional, not feature-tile):
+//   • Logo header — "Pro" gets a subtle blue gradient text-clip effect
+//     (inline style, since `background-clip: text` is a one-off). The
+//     brand container is wrapped in `.sidebar-brand` for organizational
+//     clarity. The collapse button gets the `sidebar-collapse-btn`
+//     class + a smoother transition so the CSS agent can target it.
+//
+//   • Mobile backdrop — now blurs the page behind it via the Tailwind
+//     `backdrop-blur-sm` utility (paired with `bg-black/60`).
+//
+//   • Group labels — still rendered via `.sidebar-group-label` (the
+//     CSS agent handles the uppercase / letter-spaced / faded styling
+//     + the bottom fade divider). Group items are wrapped in a
+//     `.sidebar-group` container for organizational clarity.
+//
+//   • Nav items — unchanged. The 3px accent bar + background gradient
+//     + hover translateX(2px) + icon color shift are all driven by
+//     CSS rules on `.sidebar-item` / `.sidebar-item.active` /
+//     `.sidebar-item.active::before`.
+//
+//   • Keyboard shortcut badges — unchanged. The `.sidebar-kbd-badge`
+//     physical-keycap look is driven by CSS.
+//
+//   • Footer status section — the UTC clock gets `font-variant-numeric:
+//     tabular-nums` inline so the digits don't shift width as seconds
+//     tick over (this is a per-element typographic concern, not a
+//     class-level one). The pulsing status dots, gradient top border,
+//     and PAPER badge distinct background are all CSS-driven.
+//
+// Group structure (unchanged from W49-2):
 //   Overview     — Command Center
 //   Markets      — Live Books, Screener, Order Flow
 //   Portfolio    — Positions, Orders, Trades
@@ -95,7 +122,7 @@ interface NavGroup {
   items: NavItem[]
 }
 
-const NAV_GROUPS: NavGroup[] = [
+export const NAV_GROUPS: NavGroup[] = [
   {
     id: 'main',
     labelKey: 'groups.overview',
@@ -256,10 +283,14 @@ export default function Sidebar({ active, onChange, mobileOpen, onMobileClose }:
 
   return (
     <>
-      {/* Mobile backdrop */}
+      {/* ── Mobile backdrop ───────────────────────────────────────────
+          W50-2b — Premium backdrop: bg-black/60 (kept for the test
+          selector `[aria-hidden="true"].fixed.inset-0`) paired with
+          `backdrop-blur-sm` so the workstation content behind the
+          drawer is gently defocused — standard mobile-drawer affordance. */}
       {mobileOpen && (
         <div
-          className="fixed inset-0 bg-black/60 z-[35] md:hidden"
+          className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[35] md:hidden"
           onClick={onMobileClose}
           aria-hidden="true"
         />
@@ -270,43 +301,105 @@ export default function Sidebar({ active, onChange, mobileOpen, onMobileClose }:
         aria-label="Primary navigation"
         style={mobileOpen ? { width: 'var(--sidebar-width)' } : undefined}
       >
-        {/* Logo header */}
+        {/* ── Logo header — premium gradient accent on "Pro" ────────── */}
         <div className="sidebar-header">
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0 }}>
-            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" aria-hidden="true" style={{ flexShrink: 0 }}>
+          {/* W50-2b — `.sidebar-brand` wrapper groups the SVG + wordmark
+              so the CSS agent can target the brand cluster (e.g. for a
+              hover state) without needing to restructure the JSX. The
+              inline layout styles (flex / gap / minWidth) are kept here
+              since they're structural, not visual-theming. */}
+          <div
+            className="sidebar-brand"
+            style={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0 }}
+          >
+            <svg
+              width="22"
+              height="22"
+              viewBox="0 0 24 24"
+              fill="none"
+              aria-hidden="true"
+              style={{ flexShrink: 0 }}
+            >
               <circle cx="12" cy="12" r="10.5" stroke="#3b82f6" strokeWidth="1.5" />
               <circle cx="12" cy="12" r="5.5" stroke="#3b82f6" strokeWidth="1" strokeOpacity="0.5" />
               <line x1="12" y1="2" x2="12" y2="22" stroke="#3b82f6" strokeWidth="1" strokeOpacity="0.35" />
               <line x1="2" y1="12" x2="22" y2="12" stroke="#3b82f6" strokeWidth="1" strokeOpacity="0.35" />
             </svg>
-            <span className="app-name" style={{
-              fontSize: '13px',
-              fontWeight: 700,
-              color: 'var(--text-primary)',
-              letterSpacing: '-0.01em',
-              whiteSpace: 'nowrap',
-            }}>
-              Polymarket<span style={{ color: '#60a5fa' }}>Pro</span>
+            <span
+              className="app-name"
+              style={{
+                fontSize: '13px',
+                fontWeight: 700,
+                color: 'var(--text-primary)',
+                letterSpacing: '-0.01em',
+                whiteSpace: 'nowrap',
+                display: 'inline-flex',
+                alignItems: 'baseline',
+              }}
+            >
+              Polymarket
+              {/* W50-2b — Subtle blue gradient text-clip on "Pro". Done
+                  inline because `background-clip: text` is a one-off
+                  per-element effect (no shared utility class). The
+                  gradient goes from the primary accent at 0% to a
+                  lighter sky tone at 100% — visible but not flashy.
+                  The `color: transparent` fallback covers browsers
+                  that don't support `-webkit-text-fill-color`. */}
+              <span
+                style={{
+                  marginLeft: '3px',
+                  background: 'linear-gradient(135deg, #60a5fa 0%, #93c5fd 50%, #bfdbfe 100%)',
+                  WebkitBackgroundClip: 'text',
+                  backgroundClip: 'text',
+                  WebkitTextFillColor: 'transparent',
+                  color: 'transparent',
+                  fontWeight: 700,
+                  letterSpacing: '0.02em',
+                }}
+              >
+                Pro
+              </span>
             </span>
           </div>
+          {/* ── Collapse / expand toggle ──────────────────────────────
+              W50-2b — Refined collapse button. Adds:
+                • `sidebar-collapse-btn` class so the CSS agent can
+                  target it (hover bg, focus ring, etc.) without
+                  having to know about `sidebar-header > button`.
+                • A subtle 1px transparent border (instead of `none`)
+                  so a CSS `:hover { border-color: var(--border-hover) }`
+                  rule animates in cleanly without causing a 2px layout
+                  shift.
+                • A `transition` on background-color / color /
+                  border-color so hover states interpolate smoothly.
+                • Slightly tighter padding (5px → was 4px) for a more
+                  refined hit target.
+              The aria-label + title remain "Collapse sidebar" /
+              "Expand sidebar" so the Sidebar.test.tsx selector
+              `getByRole('button', { name: /collapse sidebar/i })`
+              still resolves. */}
           <button
             onClick={() => setCollapsed(c => !c)}
+            className="sidebar-collapse-btn"
             style={{
               background: 'transparent',
-              border: 'none',
+              border: '1px solid transparent',
               color: 'var(--text-dim)',
               cursor: 'pointer',
-              padding: '4px',
-              borderRadius: '4px',
+              padding: '5px',
+              borderRadius: '6px',
               display: 'flex',
               alignItems: 'center',
+              justifyContent: 'center',
               lineHeight: 1,
               flexShrink: 0,
+              transition:
+                'background-color 120ms ease, color 120ms ease, border-color 120ms ease',
             }}
             aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
             title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
           >
-            <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+            <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
               <rect x="1" y="2" width="12" height="1.5" rx="0.75" fill="currentColor" />
               <rect x="1" y="6.25" width="12" height="1.5" rx="0.75" fill="currentColor" />
               <rect x="1" y="10.5" width="12" height="1.5" rx="0.75" fill="currentColor" />
@@ -314,10 +407,18 @@ export default function Sidebar({ active, onChange, mobileOpen, onMobileClose }:
           </button>
         </div>
 
-        {/* Nav groups */}
+        {/* ── Nav groups ───────────────────────────────────────────────
+            W50-2b — Group wrapper now carries the `sidebar-group` class
+            for organizational clarity (the CSS agent can target it for
+            group-level spacing / hover treatments if desired). The
+            existing `.sidebar-group-label` + `.sidebar-item` classes
+            are preserved verbatim — the visual refinements (uppercase
+            label, letter-spacing, faded divider, active gradient,
+            hover translateX, keycap kbd badge, custom scrollbar) are
+            all driven by CSS on those existing class names. */}
         <div className="sidebar-nav" role="list">
           {NAV_GROUPS.map((group) => (
-            <div key={group.id} role="listitem">
+            <div key={group.id} role="listitem" className="sidebar-group">
               {!collapsed && (
                 <div className="sidebar-group-label">
                   {t(group.labelKey)}
@@ -360,8 +461,8 @@ export default function Sidebar({ active, onChange, mobileOpen, onMobileClose }:
           ))}
         </div>
 
-        {/* W49-2 — Footer status section.
-            Four rows:
+        {/* ── Footer status section ───────────────────────────────────
+            W49-2 + W50-2b — Four rows:
               1. Bot status (green dot + "Bot Engine Active" label)
               2. Backend connection status (green dot + "Backend: Connected")
               3. Mode badge (PAPER / LIVE)
@@ -369,10 +470,22 @@ export default function Sidebar({ active, onChange, mobileOpen, onMobileClose }:
 
             The text content is resolved through the i18n `t()` lookup so
             both en + fr locales work without code changes. The clock is
-            formatted via `formatUTC` to stay locale-independent. When the
-            sidebar is collapsed, only the status dot remains (per the
-            `.sidebar.collapsed .sidebar-status-text { display: none }`
-            rule) so the rail stays scannable at 48px wide. */}
+            formatted via `formatUTC` to stay locale-independent.
+
+            W50-2b — Premium footer touches applied at the JSX level:
+              • UTC clock gets `font-variant-numeric: tabular-nums` inline
+                so each digit occupies the same column width — the clock
+                no longer wiggles by 1-2px as seconds tick. This is a
+                per-element typographic concern (not a class-level one),
+                so it's applied as an inline style on `.sidebar-time`.
+              • The mode badge (`.sidebar-mode-badge`), status dots
+                (`.sidebar-status-dot`), and gradient top border on the
+                section itself are all CSS-driven — left untouched here
+                so the parallel CSS agent can refine them.
+
+            When the sidebar is collapsed, only the status dot remains
+            (per the `.sidebar.collapsed .sidebar-status-text { display:
+            none }` rule) so the rail stays scannable at 48px wide. */}
         <div className="sidebar-status-section" role="status" aria-live="polite">
           <div className="sidebar-status-row">
             <span className="sidebar-status-dot" aria-hidden="true" />
@@ -393,7 +506,14 @@ export default function Sidebar({ active, onChange, mobileOpen, onMobileClose }:
             </span>
           </div>
           <div className="sidebar-status-row">
-            <span className="sidebar-time" aria-label="Current UTC time">
+            <span
+              className="sidebar-time"
+              aria-label="Current UTC time"
+              style={{
+                fontVariantNumeric: 'tabular-nums',
+                letterSpacing: '0.02em',
+              }}
+            >
               {formatUTC(now)}
             </span>
             <span className="sidebar-status-text" style={{ fontSize: '9.5px', color: 'var(--text-dim)' }}>

@@ -20,7 +20,7 @@ export default defineConfig({
       'e2e/**',
       'playwright.config.ts',
     ],
-  },
+  } as Record<string, unknown>,
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),

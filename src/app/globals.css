@@ -2642,3 +2642,269 @@ svg[tabindex="0"]:focus-visible,
   outline-offset: 2px;
   border-radius: var(--radius-sm);
 }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   W50-2a — PREMIUM TRADING WORKSTATION REFINEMENTS
+   Additive layer over W49-1. Glassmorphic overlays, multi-layer
+   ambient shadows, premium scrollbar, layered focus rings, KPI
+   accent bars, shimmer skeletons, pulsing live-status dots. NO
+   existing class names or tokens are renamed; rules below win
+   per-property via later cascade + same/higher specificity.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* New tokens: spring easing + 3-layer (ambient/key/contact) shadow bundles. */
+:root {
+  --easing-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --shadow-ambient: 0 12px 32px -10px rgba(0, 0, 0, 0.55);
+  --shadow-key:     0 4px 12px -2px  rgba(0, 0, 0, 0.40);
+  --shadow-contact: 0 1px 2px   0     rgba(0, 0, 0, 0.30);
+  --shadow-card-premium:
+    0 1px 0 0 rgba(255, 255, 255, 0.04) inset,
+    var(--shadow-contact), var(--shadow-key), var(--shadow-ambient);
+  --shadow-popover-premium:
+    0 1px 0 0 rgba(255, 255, 255, 0.05) inset,
+    0 2px 4px rgba(0, 0, 0, 0.35), 0 12px 28px rgba(0, 0, 0, 0.50);
+  --shadow-modal-premium:
+    0 1px 0 0 rgba(255, 255, 255, 0.06) inset,
+    0 4px 8px rgba(0, 0, 0, 0.40), 0 24px 56px rgba(0, 0, 0, 0.60);
+  /* Layered focus ring: 2px page-color moat + 4px accent halo. */
+  --ring-focus-layered: 0 0 0 2px var(--bg-base), 0 0 0 4px var(--accent);
+}
+/* Light-theme: softer slate-900 ambient shadows, white focus moat. */
+.light {
+  --shadow-ambient: 0 12px 32px -10px rgba(15, 23, 42, 0.18);
+  --shadow-key:     0 4px 12px -2px  rgba(15, 23, 42, 0.10);
+  --shadow-contact: 0 1px 2px   0     rgba(15, 23, 42, 0.06);
+  --shadow-card-premium:
+    0 1px 0 0 rgba(255, 255, 255, 0.80) inset,
+    var(--shadow-contact), var(--shadow-key), var(--shadow-ambient);
+  --shadow-popover-premium:
+    0 1px 0 0 rgba(255, 255, 255, 0.90) inset,
+    0 2px 4px rgba(15, 23, 42, 0.08), 0 12px 28px rgba(15, 23, 42, 0.14);
+  --shadow-modal-premium:
+    0 1px 0 0 rgba(255, 255, 255, 0.95) inset,
+    0 4px 8px rgba(15, 23, 42, 0.10), 0 24px 56px rgba(15, 23, 42, 0.20);
+  --ring-focus-layered: 0 0 0 2px var(--bg-page), 0 0 0 4px var(--accent);
+}
+
+/* 1. Glassmorphism on .surface-tier-overlay — 12px blur + saturate. */
+.surface-tier-overlay {
+  background: rgba(31, 35, 48, 0.78);
+  backdrop-filter: blur(12px) saturate(140%);
+  -webkit-backdrop-filter: blur(12px) saturate(140%);
+  border: 1px solid var(--border-strong);
+  box-shadow: var(--shadow-popover-premium);
+}
+.light .surface-tier-overlay { background: rgba(255, 255, 255, 0.86); }
+
+/* 2. Refined .card — top-edge highlight (::before) + inner glow on hover. */
+.card { position: relative; box-shadow: var(--shadow-card-premium); }
+.card::before {
+  content: ''; position: absolute; inset: 0 0 auto 0; height: 1px;
+  background: linear-gradient(90deg, transparent 0%, rgba(255, 255, 255, 0.08) 50%, transparent 100%);
+  border-top-left-radius: inherit; border-top-right-radius: inherit;
+  pointer-events: none;
+}
+.card-hover:hover {
+  box-shadow:
+    0 1px 0 0 rgba(255, 255, 255, 0.06) inset,
+    0 0 0 1px var(--accent-bd), var(--shadow-key), var(--shadow-ambient);
+}
+.light .card::before {
+  background: linear-gradient(90deg, transparent 0%, rgba(15, 23, 42, 0.06) 50%, transparent 100%);
+}
+
+/* 3. Premium scrollbar — 6px, rgba thumb, hover brightens to accent. */
+.scrollbar-thin::-webkit-scrollbar { width: 6px; height: 6px; }
+.scrollbar-thin::-webkit-scrollbar-track { background: transparent; }
+.scrollbar-thin::-webkit-scrollbar-thumb {
+  background: rgba(161, 168, 181, 0.22); border-radius: 9999px;
+  border: 1px solid transparent; background-clip: padding-box;
+  transition: background-color var(--duration-fast) var(--easing-std);
+}
+.scrollbar-thin::-webkit-scrollbar-thumb:hover { background: rgba(59, 130, 246, 0.55); background-clip: padding-box; }
+.scrollbar-thin { scrollbar-width: thin; scrollbar-color: rgba(161, 168, 181, 0.22) transparent; }
+.light .scrollbar-thin { scrollbar-color: rgba(71, 85, 105, 0.35) transparent; }
+.light .scrollbar-thin::-webkit-scrollbar-thumb { background: rgba(71, 85, 105, 0.30); }
+.light .scrollbar-thin::-webkit-scrollbar-thumb:hover { background: rgba(37, 99, 235, 0.55); }
+
+::-webkit-scrollbar              { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb {
+  background: rgba(161, 168, 181, 0.18); border-radius: 9999px;
+  border: 2px solid transparent; background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover { background: rgba(59, 130, 246, 0.50); background-clip: padding-box; }
+* { scrollbar-color: rgba(161, 168, 181, 0.22) transparent; }
+.light * { scrollbar-color: rgba(71, 85, 105, 0.30) transparent; }
+
+/* 4. Subtle background texture on .app-shell — two-stop radial glow. */
+.app-shell {
+  background-color: var(--bg-base);
+  background-image:
+    radial-gradient(circle at 20% 0%, rgba(59, 130, 246, 0.04), transparent 50%),
+    radial-gradient(circle at 80% 100%, rgba(6, 182, 212, 0.03), transparent 55%);
+  background-attachment: fixed;
+}
+.light .app-shell {
+  background-image:
+    radial-gradient(circle at 20% 0%, rgba(37, 99, 235, 0.05), transparent 50%),
+    radial-gradient(circle at 80% 100%, rgba(8, 145, 178, 0.04), transparent 55%);
+}
+
+/* 5. Refined .kpi-card — left-edge accent bar (::after) on hover. */
+.kpi-card { position: relative; overflow: hidden; box-shadow: var(--shadow-card-premium); }
+.kpi-card::after {
+  content: ''; position: absolute; left: 0; top: 14%; bottom: 14%; width: 2px;
+  background: linear-gradient(180deg, var(--accent-fg), var(--accent));
+  border-radius: 0 2px 2px 0; opacity: 0; transform: translateX(-3px);
+  transition: opacity var(--duration-base) var(--easing-std),
+              transform var(--duration-base) var(--easing-std);
+  pointer-events: none;
+}
+.kpi-card:hover::after,
+.kpi-card.is-interactive:hover::after { opacity: 1; transform: translateX(0); }
+.kpi-card.is-interactive:hover {
+  box-shadow:
+    0 1px 0 0 rgba(255, 255, 255, 0.06) inset,
+    0 0 0 1px var(--accent-bd), var(--shadow-key), var(--shadow-ambient);
+}
+
+/* 6. Layered focus rings (Stripe/Linear pattern) — moat + accent halo.
+   Default outline disabled on these elements; restored in forced-colors. */
+.input:focus-visible,
+.select:focus-visible,
+.btn:focus-visible,
+.sidebar-item:focus-visible,
+.filter-chip:focus-visible,
+.tab-item:focus-visible,
+.modal-close:focus-visible,
+[data-tooltip]:focus-visible {
+  outline: 2px solid transparent; outline-offset: 0;
+  box-shadow: var(--ring-focus-layered); border-radius: var(--radius-md);
+}
+.input:focus,
+.select:focus {
+  border-color: var(--accent);
+  box-shadow: var(--ring-focus-layered), inset 0 0 0 1px var(--accent-bd);
+}
+@media (forced-colors: active) {
+  .input:focus-visible,
+  .select:focus-visible,
+  .btn:focus-visible,
+  .sidebar-item:focus-visible,
+  .filter-chip:focus-visible,
+  .tab-item:focus-visible,
+  .modal-close:focus-visible,
+  [data-tooltip]:focus-visible {
+    outline: 2px solid CanvasText; outline-offset: 2px; box-shadow: none;
+  }
+}
+
+/* 7. Improved .data-table — sticky-header gradient, refined zebra + hover. */
+.data-table thead th {
+  background: linear-gradient(180deg, var(--bg-elevated) 0%, var(--bg-page) 100%);
+  border-bottom: 1px solid var(--border-strong);
+  box-shadow: inset 0 -1px 0 0 var(--border-strong);
+  position: sticky; top: 0; z-index: 10;
+}
+.data-table tbody tr:nth-child(even) { background: rgba(255, 255, 255, 0.015); }
+.data-table tbody tr:hover td { background: var(--bg-elevated); color: var(--text-primary); }
+.data-table td { font-variant-numeric: tabular-nums; font-feature-settings: 'tnum' 1, 'zero' 1; }
+.light .data-table tbody tr:nth-child(even) { background: rgba(15, 23, 42, 0.018); }
+.light .data-table thead th {
+  background: linear-gradient(180deg, var(--bg-elevated) 0%, var(--bg-page) 100%);
+}
+
+/* 8. Refined .btn — layered inset rim + drop shadow; spring on active. */
+.btn {
+  position: relative;
+  box-shadow: 0 1px 0 0 rgba(255, 255, 255, 0.04) inset, var(--shadow-contact);
+}
+.btn:hover {
+  box-shadow: 0 1px 0 0 rgba(255, 255, 255, 0.06) inset,
+              var(--shadow-contact), 0 2px 4px rgba(0, 0, 0, 0.20);
+}
+.btn:active {
+  transform: translateY(0) scale(0.985);
+  box-shadow: 0 1px 0 0 rgba(255, 255, 255, 0.02) inset,
+              0 0 0 1px rgba(0, 0, 0, 0.30) inset;
+  transition: transform var(--duration-fast) var(--easing-spring);
+}
+.btn:disabled { box-shadow: none; filter: grayscale(0.3); }
+.btn-primary {
+  box-shadow: 0 1px 0 0 rgba(255, 255, 255, 0.20) inset,
+              0 1px 2px rgba(0, 0, 0, 0.30),
+              0 4px 12px rgba(59, 130, 246, 0.20);
+}
+.btn-primary:hover {
+  box-shadow: 0 1px 0 0 rgba(255, 255, 255, 0.25) inset,
+              0 2px 4px rgba(0, 0, 0, 0.30),
+              0 6px 18px rgba(59, 130, 246, 0.30);
+}
+.btn-primary:active {
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.30) inset,
+              0 0 0 1px rgba(255, 255, 255, 0.10) inset;
+}
+
+/* 9. Loading skeleton polish — left-to-right gradient shine sweep. */
+@keyframes shimmer {
+  0%   { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+.animate-pulse {
+  background-image: linear-gradient(90deg,
+    transparent 0%, rgba(255, 255, 255, 0.06) 40%,
+    rgba(255, 255, 255, 0.10) 50%, rgba(255, 255, 255, 0.06) 60%,
+    transparent 100%);
+  background-size: 200% 100%; background-repeat: no-repeat;
+  animation: shimmer 1.8s var(--easing-std) infinite;
+}
+.light .animate-pulse {
+  background-image: linear-gradient(90deg,
+    transparent 0%, rgba(15, 23, 42, 0.04) 40%,
+    rgba(15, 23, 42, 0.08) 50%, rgba(15, 23, 42, 0.04) 60%,
+    transparent 100%);
+}
+
+/* 10. Status indicator dots — soft glow halo + pulsing for "live" states. */
+.status-dot.healthy     { box-shadow: 0 0 0 2px rgba(16, 185, 129, 0.18); animation: status-dot-live 2.4s var(--easing-std) infinite; }
+.status-dot.connecting  { box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.20); animation: status-dot-pulse-strong 1s var(--easing-std) infinite; }
+.status-dot.degraded    { box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.20); }
+.status-dot.unavailable { box-shadow: 0 0 0 2px rgba(239, 68, 68, 0.20); }
+@keyframes status-dot-live {
+  0%, 100% { box-shadow: 0 0 0 2px rgba(16, 185, 129, 0.18); }
+  50%      { box-shadow: 0 0 0 4px rgba(16, 185, 129, 0.10); }
+}
+@keyframes status-dot-pulse-strong {
+  0%, 100% { transform: scale(1);    opacity: 1;    }
+  50%      { transform: scale(0.85); opacity: 0.55; }
+}
+
+/* Sidebar status dot — soft pulse so trader sees the bot is alive.
+   .is-stale / .is-offline are forward-compat modifiers. */
+.sidebar-status-dot {
+  display: inline-block; width: 6px; height: 6px;
+  border-radius: var(--radius-full); background: var(--color-green);
+  box-shadow: 0 0 6px rgba(16, 185, 129, 0.50); flex-shrink: 0;
+  animation: sidebar-status-pulse 2.2s var(--easing-std) infinite;
+}
+.sidebar-status-dot.is-stale {
+  background: var(--color-amber);
+  box-shadow: 0 0 6px rgba(245, 158, 11, 0.50);
+  animation-duration: 1.4s;
+}
+.sidebar-status-dot.is-offline { background: var(--text-dim); box-shadow: none; animation: none; }
+@keyframes sidebar-status-pulse {
+  0%, 100% { opacity: 1;    box-shadow: 0 0 6px rgba(16, 185, 129, 0.50); }
+  50%      { opacity: 0.55; box-shadow: 0 0 4px rgba(16, 185, 129, 0.25); }
+}
+
+/* Reduced-motion parity for W50-2a animations. */
+@media (prefers-reduced-motion: reduce) {
+  .status-dot.healthy,
+  .status-dot.connecting,
+  .sidebar-status-dot,
+  .sidebar-status-dot.is-stale,
+  .animate-pulse { animation: none !important; }
+  .kpi-card::after { transition: none; }
+}

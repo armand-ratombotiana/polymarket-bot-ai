@@ -1,12 +1,34 @@
 // components/TopStatusBar.tsx — Compact single-line status bar + system health mini-bar.
 //
-// W49-6 — Redesigned for a compact, professional single-line layout.
-// The bar is now organised into three logical clusters:
+// W50-2c — Redesigned for a more compact, information-dense, modern header
+// that reads like a professional trading terminal. Key improvements:
 //
+//   • Top border highlight (1px lighter line) + shadow-lg + backdrop-blur
+//     give the bar a subtle floating effect above the workspace.
+//   • Three logical clusters separated by 1px var(--border-dim) vertical
+//     dividers so the eye can scan LEFT → logo+breadcrumb, CENTER → KPIs,
+//     RIGHT → status pills + action buttons.
+//   • Stat chips use `tabular-nums` so Balance/P&L/Exposure don't shimmy as
+//     digits change tick-to-tick; chips are 32px tall, all buttons are
+//     32px tall (h-8) for a consistent rhythm.
+//   • Connection pill now shows Live/Degraded/Offline with a pulse-ring
+//     dot when healthy (green ping), amber when degraded, red when offline.
+//   • Freshness chip shows "Updated Xs ago"; the existing freshnessClass
+//     already drives amber (>10s) + red (>30s) tints via the CSS agent's
+//     freshness-fresh / freshness-ok / freshness-stale / freshness-dead
+//     classes (W50-2c aligns the visible thresholds: <10s fresh, 10–30s
+//     amber, >30s red).
+//   • Right cluster gains a compact System Health pill (dot + tier label)
+//     alongside the existing 2px bottom mini-bar — the pill is the
+//     discoverable, label-bearing surface; the bottom strip is the
+//     ambient always-on indicator.
+//
+// Prior (W49-6) architecture preserved 1:1:
 //   LEFT   → app logo + "Polymarket Pro" + active-panel breadcrumb
 //   CENTER → Balance · P&L today · Exposure · Mode badge  (KPI cluster)
-//   RIGHT  → Connection pill · Alert bell · Theme · Locale · Settings ·
-//            Shortcuts · Mute · Config · Cancel All · Kill/Resume
+//   RIGHT  → Connection pill · Latency · WS pill · Health pill ·
+//            Settings · Theme · Locale · Alerts · Shortcuts · Mute ·
+//            Config · Cancel All · Kill/Resume
 //
 // Below the 44px status row sits a 2px System Health mini-bar that
 // reflects the rolled-up health of /api/system/health. Clicking it
@@ -256,11 +278,14 @@ export default function TopStatusBar({
   // ── Derived display values ───────────────────────────────────────────
   const connLabel =
     status === 'connected' ? 'Connected' : status === 'connecting' ? 'Connecting…' : 'Disconnected'
-  const connDotClass = status === 'connected' ? 'healthy' : 'connecting'
 
   const dataAge = snapshot.timestamp > 0 ? snapshot.timestamp : null
   const ageStr = dataAge ? fmtAge(dataAge) : 'No data'
-  const ageClass = dataAge ? freshnessClass(dataAge, 15, 60) : 'freshness-dead'
+  // W50-2c — thresholds aligned to the spec: <10s fresh (green),
+  // 10–30s amber (freshness-stale), ≥30s red (freshness-dead).
+  // We pass (10, 30) so freshness-ok (neutral) is unreachable — the
+  // chip jumps straight from green to amber at the 10s mark.
+  const ageClass = dataAge ? freshnessClass(dataAge, 10, 30) : 'freshness-dead'
 
   // Mode label + badge styling (kept identical to the prior bar so the
   // existing W38-8 tests that assert 'PAPER TRADING' / 'LIVE TRADING' /
@@ -288,7 +313,8 @@ export default function TopStatusBar({
 
   return (
     <header
-      className="topbar h-auto sticky top-0 z-40 flex flex-col items-stretch bg-[#0e1015]/95 backdrop-blur-md border-b border-[#1f2335]"
+      className="topbar h-auto sticky top-0 z-40 flex flex-col items-stretch bg-[#0e1015]/95 backdrop-blur-md border-b border-[#1f2335] shadow-lg shadow-black/30"
+      style={{ borderTop: '1px solid rgba(255,255,255,0.04)' }}
       role="banner"
       aria-label="System status bar"
     >
@@ -298,7 +324,7 @@ export default function TopStatusBar({
         <div className="flex items-center gap-2.5 shrink-0 min-w-0">
           <button
             onClick={onMobileNav}
-            className="btn btn-ghost btn-sm p-1.5 md:hidden"
+            className="btn btn-ghost btn-sm h-8 w-8 p-0 inline-flex items-center justify-center md:hidden"
             aria-label="Open navigation"
           >
             <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
@@ -335,17 +361,22 @@ export default function TopStatusBar({
             {/* W49-6 — Active panel breadcrumb. Renders as
                 "Markets / Live Books" so the trader always knows which
                 sidebar section is mounted. Hidden below lg (tablet +
-                mobile) per the responsive spec. */}
+                mobile) per the responsive spec.
+                W50-2c — refined chevron separators replace the bare "/"
+                glyphs for a more modern, professional look. */}
             {panelName && (
               <span
-                className="hidden lg:flex items-center gap-1.5 text-[11.5px] whitespace-nowrap min-w-0"
+                className="hidden lg:flex items-center gap-1.5 text-[11.5px] whitespace-nowrap min-w-0 ml-1"
                 aria-current="page"
               >
-                <span className="text-[#3e4560]" aria-hidden="true">/</span>
                 {panelGroup && (
-                  <span className="text-[#7e8aaa] font-medium truncate">{panelGroup}</span>
+                  <>
+                    <span className="text-[#7e8aaa] font-medium truncate">{panelGroup}</span>
+                    <svg aria-hidden="true" width="8" height="10" viewBox="0 0 8 10" fill="none" className="text-[#3e4560] shrink-0">
+                      <path d="M2 1L7 5L2 9" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" strokeLinejoin="round" />
+                    </svg>
+                  </>
                 )}
-                <span className="text-[#3e4560]" aria-hidden="true">/</span>
                 <span className="text-[#dde1ed] font-semibold truncate">{panelName}</span>
               </span>
             )}
@@ -366,6 +397,16 @@ export default function TopStatusBar({
           )}
         </div>
 
+        {/* W50-2c — Subtle 1px vertical divider between LEFT and CENTER
+            clusters. Uses var(--border-dim) so the CSS agent can recolour
+            it per theme. Hidden below md (where the CENTER cluster also
+            hides), so we never render a dangling divider on mobile. */}
+        <span
+          aria-hidden="true"
+          className="hidden md:block self-center h-6 w-px shrink-0"
+          style={{ background: 'var(--border-dim)' }}
+        />
+
         {/* ─── CENTER: KPI cluster (md+) ──────────────────────────────── */}
         <div className="hidden md:flex items-center gap-2 grow justify-center">
           {/* Balance — mono, bold, cyan. Flashes green on increase,
@@ -382,17 +423,17 @@ export default function TopStatusBar({
             }`}
             title={`Paper balance ${paper_balance != null ? fmtUsd(paper_balance) : '—'}`}
           >
-            <span className="text-[10px] text-[#7e8aaa] uppercase font-bold">BAL</span>
-            <span className="mono font-bold text-cyan-300">
+            <span className="text-[10px] text-[#7e8aaa] uppercase font-bold tracking-wider">BAL</span>
+            <span className="mono font-bold text-cyan-300 tabular-nums">
               {paper_balance != null ? fmtUsd(paper_balance) : '—'}
             </span>
           </div>
 
           {/* P&L today — green/red, mono, bold. */}
           <div className="flex items-center gap-1.5 bg-[#13161e] border border-[#1f2335] px-2.5 py-1 rounded-md text-xs whitespace-nowrap">
-            <span className="text-[10px] text-[#7e8aaa] uppercase font-bold">P&amp;L</span>
+            <span className="text-[10px] text-[#7e8aaa] uppercase font-bold tracking-wider">P&amp;L</span>
             <span
-              className={`mono font-bold ${
+              className={`mono font-bold tabular-nums ${
                 daily_pnl > 0 ? 'text-green-400' : daily_pnl < 0 ? 'text-red-400' : 'text-[#dde1ed]'
               }`}
             >
@@ -405,8 +446,8 @@ export default function TopStatusBar({
             className="flex items-center gap-1.5 bg-[#13161e] border border-[#1f2335] px-2.5 py-1 rounded-md text-xs whitespace-nowrap"
             title="Gross $ exposure across open positions"
           >
-            <span className="text-[10px] text-[#7e8aaa] uppercase font-bold">EXP</span>
-            <span className="mono font-bold text-[#dde1ed]">{fmtUsd(exposure)}</span>
+            <span className="text-[10px] text-[#7e8aaa] uppercase font-bold tracking-wider">EXP</span>
+            <span className="mono font-bold text-[#dde1ed] tabular-nums">{fmtUsd(exposure)}</span>
           </div>
 
           {/* Mode badge — kept as 'PAPER TRADING' / 'LIVE TRADING' /
@@ -428,9 +469,9 @@ export default function TopStatusBar({
                 <span className="w-1.5 h-1.5 rounded-full bg-cyan-400" aria-hidden="true" />
                 ML:
               </span>
-              <span className="mono text-[11px] text-green-400 font-semibold">Brier {mlInfo.brier.toFixed(3)}</span>
+              <span className="mono text-[11px] text-green-400 font-semibold tabular-nums">Brier {mlInfo.brier.toFixed(3)}</span>
               <span className="text-[#3e4560]" aria-hidden="true">|</span>
-              <span className="mono text-[11px] text-cyan-300 font-semibold">AUC {(mlInfo.auc * 100).toFixed(0)}%</span>
+              <span className="mono text-[11px] text-cyan-300 font-semibold tabular-nums">AUC {(mlInfo.auc * 100).toFixed(0)}%</span>
               <span className="text-[#3e4560]" aria-hidden="true">|</span>
               <span className={`text-[10px] font-bold uppercase ${mlInfo.status === 'HEALTHY' ? 'text-green-400' : 'text-amber-400'}`}>
                 {mlInfo.status}
@@ -444,48 +485,80 @@ export default function TopStatusBar({
               className="hidden xl:flex items-center gap-1.5 bg-[#13161e] border border-[#1f2335] px-2.5 py-1 rounded-md text-xs whitespace-nowrap"
               title="Bot engine uptime since last restart"
             >
-              <span className="text-[10px] text-[#7e8aaa] uppercase font-bold">UP</span>
-              <span className="mono font-semibold text-[#dde1ed]">{fmtUptime(uptime)}</span>
+              <span className="text-[10px] text-[#7e8aaa] uppercase font-bold tracking-wider">UP</span>
+              <span className="mono font-semibold text-[#dde1ed] tabular-nums">{fmtUptime(uptime)}</span>
             </div>
           )}
         </div>
 
+        {/* W50-2c — Subtle 1px vertical divider between CENTER and RIGHT
+            clusters. Same var(--border-dim) treatment as the LEFT/CENTER
+            divider; hidden below md. */}
+        <span
+          aria-hidden="true"
+          className="hidden md:block self-center h-6 w-px shrink-0"
+          style={{ background: 'var(--border-dim)' }}
+        />
+
         {/* ─── RIGHT: status + controls + actions ─────────────────────── */}
         <div className="flex items-center gap-1.5 shrink-0">
-          {/* UTC clock — xl+ only (frees space on smaller screens). */}
-          <span className="hidden xl:inline-block mono text-[11px] text-[#7e8aaa] bg-[#0e1015] border border-[#1f2335] px-2 py-1 rounded-md">
+          {/* UTC clock — xl+ only (frees space on smaller screens).
+              W50-2c — pinned to 32px height + tabular-nums so the digit
+              columns don't shimmy as seconds tick. */}
+          <span className="hidden xl:inline-flex items-center mono text-[11px] text-[#7e8aaa] bg-[#0e1015] border border-[#1f2335] px-2 h-8 rounded-md tabular-nums">
             {nowUtc}
           </span>
 
-          {/* REST connection pill — sm+ (hidden on the narrowest phones). */}
+          {/* W50-2c — REST connection pill. Compact 32px height with a
+              pulse-ring dot: emerald when Live, amber when Degraded,
+              red when Offline. The ring is a separate absolutely-positioned
+              <span> with animate-ping so the dot itself stays crisp
+              (ping on the same element blurs the fill). The visible
+              label uses the spec's short form (Live/Degraded/Offline);
+              the full connLabel is preserved in the title + SR region
+              for compatibility. */}
           <div
-            className="hidden sm:flex items-center gap-1.5 text-xs whitespace-nowrap bg-[#0e1015] border border-[#1f2335] px-2 py-1 rounded-md transition-colors hover:border-[#2d3450]"
+            className="hidden sm:flex items-center gap-1.5 text-xs whitespace-nowrap bg-[#0e1015] border border-[#1f2335] px-2 h-8 rounded-md transition-colors hover:border-[#2d3450]"
             title={`Bot API Connection: ${connLabel}`}
           >
-            <span
-              className={`w-2 h-2 rounded-full ${
-                status === 'connected'
-                  ? 'bg-green-400 shadow-sm shadow-green-500/50 animate-pulse'
-                  : 'bg-amber-400 shadow-sm shadow-amber-500/50'
-              }`}
-              aria-hidden="true"
-            />
-            <span className="font-semibold text-[11px] text-[#dde1ed]">{connLabel}</span>
+            <span className="relative flex w-2 h-2 items-center justify-center" aria-hidden="true">
+              {status === 'connected' && (
+                <span className="absolute inline-flex w-2 h-2 rounded-full bg-emerald-400 opacity-75 animate-ping" />
+              )}
+              <span
+                className={`relative inline-block w-2 h-2 rounded-full ${
+                  status === 'connected'
+                    ? 'bg-emerald-400'
+                    : status === 'connecting'
+                    ? 'bg-amber-400'
+                    : 'bg-red-500'
+                }`}
+              />
+            </span>
+            <span className="font-semibold text-[11px] text-[#dde1ed]">
+              {status === 'connected' ? 'Live' : status === 'connecting' ? 'Degraded' : 'Offline'}
+            </span>
           </div>
 
-          {/* Data freshness — sm+. */}
+          {/* W50-2c — Data freshness chip. "Updated Xs ago" prefix added
+              so the trader can scan staleness at a glance. The existing
+              ageClass (freshness-fresh / freshness-ok / freshness-stale /
+              freshness-dead) drives the colour: <10s fresh, 10–30s amber,
+              >30s red (aligned to the spec's thresholds via the CSS
+              agent's freshness-* rules). */}
           <div
-            className={`hidden sm:flex text-[11px] mono text-[#7e8aaa] px-2 py-1 bg-[#0e1015] border border-[#1f2335] rounded-md items-center gap-1 ${ageClass}`}
+            className={`hidden sm:flex text-[11px] mono text-[#7e8aaa] px-2 h-8 bg-[#0e1015] border border-[#1f2335] rounded-md items-center gap-1 tabular-nums ${ageClass}`}
             title="Data freshness since last snapshot"
           >
             <span aria-hidden="true">⏱</span>
-            <span>{ageStr}</span>
+            <span>Updated {ageStr}</span>
           </div>
 
-          {/* Latency telemetry — lg+. */}
+          {/* W50-2c — Latency telemetry chip. 32px height + tabular-nums
+              so the ms digits don't shift as latency fluctuates. */}
           {latencyMs !== null && status === 'connected' && (
             <div
-              className="hidden lg:flex text-[11px] mono text-[#7e8aaa] px-2 py-1 bg-[#0e1015] border border-[#1f2335] rounded-md items-center gap-1"
+              className="hidden lg:flex text-[11px] mono text-[#7e8aaa] px-2 h-8 bg-[#0e1015] border border-[#1f2335] rounded-md items-center gap-1 tabular-nums"
               title="REST API Roundtrip Latency"
             >
               <span
@@ -498,14 +571,51 @@ export default function TopStatusBar({
             </div>
           )}
 
+          {/* W50-2c — Compact System Health indicator pill (dot + tier
+              label). The existing 2px bottom mini-bar is the ambient
+              always-on indicator; this pill is the discoverable,
+              label-bearing surface that's also clickable to open the
+              System Health sidebar section. Renders even when
+              onOpenSystemHealth is absent (degrades to non-interactive
+              status). */}
+          {onOpenSystemHealth ? (
+            <button
+              type="button"
+              onClick={onOpenSystemHealth}
+              className="hidden sm:flex items-center gap-1.5 text-xs whitespace-nowrap bg-[#0e1015] border border-[#1f2335] px-2 h-8 rounded-md transition-colors hover:border-[#2d3450] focus:outline-none focus-visible:ring-2 focus-visible:ring-white/40"
+              title={`System health: ${healthTier} — click to open the System Health panel`}
+              aria-label={`System health: ${healthTier}. ${healthStyle.label}. Open System Health panel.`}
+            >
+              <span
+                className={`w-2 h-2 rounded-full inline-block ${healthStyle.bg} ${healthStyle.glow}`}
+                aria-hidden="true"
+              />
+              <span className="font-semibold text-[11px] text-[#dde1ed] capitalize">{healthTier}</span>
+            </button>
+          ) : (
+            <div
+              className="hidden sm:flex items-center gap-1.5 text-xs whitespace-nowrap bg-[#0e1015] border border-[#1f2335] px-2 h-8 rounded-md"
+              title={`System health: ${healthTier}`}
+              role="status"
+              aria-label={`System health: ${healthTier}. ${healthStyle.label}.`}
+            >
+              <span
+                className={`w-2 h-2 rounded-full inline-block ${healthStyle.bg}`}
+                aria-hidden="true"
+              />
+              <span className="font-semibold text-[11px] text-[#dde1ed] capitalize">{healthTier}</span>
+            </div>
+          )}
+
           {/* WebSocket transport pill. */}
           <ConnectionStatusPill />
 
           {/* ── Icon cluster (preferences + alerts + actions) ── */}
-          {/* Settings (🛠) — opens the full preferences modal. */}
+          {/* Settings (🛠) — opens the full preferences modal.
+              W50-2c — compact 32px square button. */}
           <button
             onClick={() => setSettingsOpen(true)}
-            className="btn btn-ghost btn-sm p-1.5 text-xs text-[#7e8aaa] hover:text-white"
+            className="btn btn-ghost btn-sm h-8 w-8 p-0 inline-flex items-center justify-center text-xs text-[#7e8aaa] hover:text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-white/40"
             title="User preferences (theme, polling, sound, privacy)"
             aria-label="Open user preferences"
             aria-haspopup="dialog"
@@ -527,11 +637,11 @@ export default function TopStatusBar({
               so the unread count badge live-updates. */}
           <AlertNotificationsPanel />
 
-          {/* Mute toggle — sm+. */}
+          {/* Mute toggle — sm+. W50-2c — compact 32px square button. */}
           {onToggleMute && (
             <button
               onClick={onToggleMute}
-              className="btn btn-ghost btn-sm p-1.5 text-xs text-[#7e8aaa] hover:text-white hidden sm:inline-flex"
+              className="btn btn-ghost btn-sm h-8 w-8 p-0 inline-flex items-center justify-center text-xs text-[#7e8aaa] hover:text-white hidden sm:inline-flex focus:outline-none focus-visible:ring-2 focus-visible:ring-white/40"
               title={muted ? 'Unmute alerts' : 'Mute alerts'}
               aria-label={muted ? 'Unmute audio alerts' : 'Mute audio alerts'}
               aria-pressed={muted}
@@ -540,11 +650,11 @@ export default function TopStatusBar({
             </button>
           )}
 
-          {/* Keyboard shortcuts (?) — sm+. */}
+          {/* Keyboard shortcuts (?) — sm+. W50-2c — compact 32px square. */}
           {onOpenShortcuts && (
             <button
               onClick={onOpenShortcuts}
-              className="btn btn-ghost btn-sm p-1.5 text-xs text-[#7e8aaa] hover:text-white hidden sm:inline-flex"
+              className="btn btn-ghost btn-sm h-8 w-8 p-0 inline-flex items-center justify-center text-xs text-[#7e8aaa] hover:text-white hidden sm:inline-flex focus:outline-none focus-visible:ring-2 focus-visible:ring-white/40"
               title="Shortcuts (?)"
               aria-label="Open keyboard shortcuts cheatsheet"
             >
@@ -552,32 +662,38 @@ export default function TopStatusBar({
             </button>
           )}
 
-          {/* Strategy / risk config — md+. */}
+          {/* Strategy / risk config — md+. W50-2c — 32px height; the
+              "Config" text label hides below lg to fit narrower screens
+              while keeping the ⚙️ icon always visible. */}
           {onOpenConfig && (
             <button
               onClick={onOpenConfig}
-              className="btn btn-ghost btn-sm text-xs font-semibold text-[#7e8aaa] hover:text-white items-center gap-1 px-2 py-1 hidden md:flex"
+              className="btn btn-ghost btn-sm h-8 text-xs font-semibold text-[#7e8aaa] hover:text-white items-center gap-1 px-2 hidden md:inline-flex focus:outline-none focus-visible:ring-2 focus-visible:ring-white/40"
               aria-label="Open strategy and risk configuration modal"
             >
-              <span aria-hidden="true">⚙️</span> Config
+              <span aria-hidden="true">⚙️</span> <span className="hidden lg:inline">Config</span>
             </button>
           )}
 
-          {/* Cancel All — sm+. */}
+          {/* Cancel All — sm+. W50-2c — 32px height. */}
           <button
             onClick={onCancelAll}
-            className="btn btn-amber btn-sm text-xs font-bold px-2.5 py-1 shadow-sm hidden sm:inline-flex"
+            className="btn btn-amber btn-sm h-8 text-xs font-bold px-2.5 py-1 shadow-sm hidden sm:inline-flex focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-400/60"
             title="Cancel all open orders across strategies"
           >
             ✕ Cancel All
           </button>
 
           {/* Kill switch / Resume — always visible (the trader's
-              emergency brake must be reachable on every breakpoint). */}
+              emergency brake must be reachable on every breakpoint).
+              W50-2c — 32px height for visual parity with the rest of
+              the action cluster; the existing bg-red-600 / bg-green-600
+              fills + animate-pulse on RESUME are preserved verbatim so
+              the W38-8 tests that assert the button labels still match. */}
           {kill_switch ? (
             <button
               onClick={onResumeSwitch}
-              className="btn btn-resume btn-sm text-xs font-extrabold px-3 py-1 bg-green-600 hover:bg-green-500 text-white shadow-md animate-pulse"
+              className="btn btn-resume btn-sm h-8 text-xs font-extrabold px-3 py-1 bg-green-600 hover:bg-green-500 text-white shadow-md animate-pulse focus:outline-none focus-visible:ring-2 focus-visible:ring-green-400/70"
               title="Resume trading (K)"
             >
               ▶ RESUME
@@ -585,7 +701,7 @@ export default function TopStatusBar({
           ) : (
             <button
               onClick={onKillSwitch}
-              className="btn btn-kill btn-sm text-xs font-extrabold px-3 py-1 bg-red-600 hover:bg-red-500 text-white shadow-md"
+              className="btn btn-kill btn-sm h-8 text-xs font-extrabold px-3 py-1 bg-red-600 hover:bg-red-500 text-white shadow-md focus:outline-none focus-visible:ring-2 focus-visible:ring-red-400/70"
               title="Emergency Kill Switch (K)"
             >
               🛑 KILL SWITCH

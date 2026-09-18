@@ -1,5 +1,5 @@
-// components/CommandCenterDashboard.tsx — W39-3 / W49-3 Professional Trading
-// Dashboard.
+// components/CommandCenterDashboard.tsx — W39-3 / W49-3 / W50-2d Professional
+// Trading Dashboard.
 //
 // Replaces the prior five-row panel-grid assembly (which interleaved a
 // 3-KPI "risk bar" with a sidebar of EquityCurve + Analytics + ML) with
@@ -27,6 +27,39 @@
 // dimmed), value (large bold tabular-nums), sub-text (trend %, timestamp,
 // context), color tone (green/red/amber), loading skeleton, and stale
 // indicator all live in CSS utility classes declared in globals.css.
+//
+// ─────────────────────────────────────────────────────────────────────────
+// W50-2d — Premium visual redesign of the 5-row Command Center dashboard.
+// Each row gains refined structural polish + new visual affordances
+// WITHOUT modifying the shared <KpiCard> component or removing any
+// existing class name (the CSS agent layers enhancements on top):
+//
+//   • Row 1 — System status bar wrapped in a slim premium chrome
+//     container (data-area="system") for refined border + shadow.
+//
+//   • Row 2 — 3 hero KPIs gain trailing SVG sparklines + trend-arrow
+//     sub-text (▲/▼) so the trader reads direction at a glance, not
+//     just magnitude. The Open Exposure card carries a MiniProgressArc
+//     showing exposure/cap ratio inline next to the value.
+//
+//   • Row 3 — 5 P&L KPIs each wrapped in a <KpiToneCell data-tone>
+//     wrapper (display:contents → transparent to grid layout) so the
+//     CSS agent can apply tone-tinted backgrounds (green/red/amber
+//     halo) via descendant selectors without modifying KpiCard.
+//
+//   • Row 4 — 3 activity cells keep their existing panel ReactNodes
+//     (each panel already has its own header chrome) but gain a
+//     data-area hook + dashboard-activity-cell class for premium
+//     grid-cell polish (refined border, hover lift).
+//
+//   • Row 5 — System status cards gain data-tone attributes on their
+//     root divs for tone-tinted card surfaces.
+//
+// All visual styling is driven by data-tone + data-area + className
+// hooks. Existing class names (.kpi-card, .kpi-label, .kpi-value,
+// .kpi-tone-*, .kpi-stale-pill, .kpi-skeleton, .command-center-layout,
+// .sys-status-card, .sys-status-col, .sys-status-body) are preserved
+// unchanged so the CSS agent's enhancements layer cleanly on top.
 //
 // Data sources:
 //   * `snapshot` prop — paper_balance, positions, daily_pnl, kill_switch,
@@ -64,7 +97,6 @@ import {
   fmtPct,
   fmtInt,
   fmtAge,
-  freshnessClass,
 } from '@/lib/design-tokens'
 import { KpiCard, type KpiTone } from '@/components/KpiCard'
 import CommandCenterHealthBar from '@/components/CommandCenterHealthBar'
@@ -226,26 +258,189 @@ function severityTone(a: Alert): KpiTone {
   return 'neutral'
 }
 
-// Risk-posture derivation — mirrors the CommandCenterHealthBar's logic so
-// the System Status row's risk KPI matches the system status bar's Risk
-// Level indicator.
-function deriveRiskStatus(
-  snapshot: BotSnapshot,
-  dataAgeSec: number | null,
-): { label: string; tone: KpiTone; sub: string } {
-  if (snapshot.kill_switch) {
-    return { label: 'Critical', tone: 'negative', sub: 'Kill switch active' }
-  }
-  if (snapshot.observation_only) {
-    return { label: 'Caution', tone: 'warning', sub: 'Observation only' }
-  }
-  if (snapshot.daily_pnl <= -1.0) {
-    return { label: 'Caution', tone: 'warning', sub: 'Loss near stop' }
-  }
-  if (dataAgeSec != null && dataAgeSec > 60) {
-    return { label: 'Caution', tone: 'warning', sub: 'Data stale' }
-  }
-  return { label: 'Normal', tone: 'positive', sub: 'Trading enabled' }
+// ── W50-2d Inline sub-component: TrendArrow ─────────────────────────────────
+// Tiny inline arrow (▲/▼/■) rendered before the trend % sub-text on the
+// hero KPIs. Direction-aware semantic color (green up / red down / muted
+// flat). Hidden from screen readers because the sub-text already carries
+// the +/− sign and the value tone already conveys direction via color.
+function TrendArrow({
+  direction,
+  className = '',
+}: {
+  direction: 'up' | 'down' | 'flat'
+  className?: string
+}) {
+  const arrow = direction === 'up' ? '▲' : direction === 'down' ? '▼' : '■'
+  const colorClass =
+    direction === 'up'
+      ? 'text-green-400'
+      : direction === 'down'
+      ? 'text-red-400'
+      : 'text-[#7e8aaa]'
+  return (
+    <span
+      aria-hidden="true"
+      className={`inline-block text-[9px] leading-none ${colorClass} ${className}`.trim()}
+    >
+      {arrow}
+    </span>
+  )
+}
+
+// ── W50-2d Inline sub-component: MiniSparkline ──────────────────────────────
+// Tiny 40×14 SVG polyline rendered as the `trailing` element on hero KPIs.
+// Synthesizes a 6-point trend line based on the daily P&L direction (we
+// don't have historical equity samples at this layer — the sparkline is a
+// direction signal, not a precise chart). Tone-aware stroke + faint
+// gradient fill so the line matches the value's semantic tone.
+function MiniSparkline({
+  tone,
+  direction,
+}: {
+  tone: KpiTone
+  direction: 'up' | 'down' | 'flat'
+}) {
+  const stroke =
+    tone === 'positive'
+      ? 'var(--color-green-fg)'
+      : tone === 'negative'
+      ? 'var(--color-red-fg)'
+      : tone === 'warning'
+      ? 'var(--color-amber-fg)'
+      : 'var(--kpi-value-color)'
+  const fill =
+    tone === 'positive'
+      ? 'rgba(74,222,128,0.14)'
+      : tone === 'negative'
+      ? 'rgba(248,113,113,0.12)'
+      : tone === 'warning'
+      ? 'rgba(251,191,36,0.12)'
+      : 'rgba(221,225,237,0.06)'
+  const linePoints =
+    direction === 'up'
+      ? '0,12 8,10 16,8 24,7 32,4 40,2'
+      : direction === 'down'
+      ? '0,2 8,4 16,6 24,8 32,10 40,12'
+      : '0,7 8,7 16,7 24,7 32,7 40,7'
+  const fillPoints =
+    direction === 'up'
+      ? '0,14 0,12 8,10 16,8 24,7 32,4 40,2 40,14'
+      : direction === 'down'
+      ? '0,14 0,2 8,4 16,6 24,8 32,10 40,12 40,14'
+      : '0,14 0,7 8,7 16,7 24,7 32,7 40,7 40,14'
+  return (
+    <svg
+      width="40"
+      height="14"
+      viewBox="0 0 40 14"
+      aria-hidden="true"
+      className="mini-sparkline shrink-0"
+      role="presentation"
+    >
+      <polygon points={fillPoints} fill={fill} stroke="none" />
+      <polyline
+        points={linePoints}
+        fill="none"
+        stroke={stroke}
+        strokeWidth="1.5"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  )
+}
+
+// ── W50-2d Inline sub-component: MiniProgressArc ────────────────────────────
+// Tiny 16×16 SVG radial arc used as the `trailing` element on the Open
+// Exposure hero KPI. Renders a 270° arc with the fill proportional to the
+// exposure / cap ratio. Tone-aware stroke color (amber when ratio > 0.9).
+// The CSS agent can refine the track/fill colors via descendant selectors.
+function MiniProgressArc({
+  ratio,
+  tone,
+}: {
+  ratio: number
+  tone: KpiTone
+}) {
+  const clamped = Math.max(0, Math.min(1, Number.isFinite(ratio) ? ratio : 0))
+  const stroke =
+    tone === 'warning'
+      ? 'var(--color-amber-fg)'
+      : tone === 'negative'
+      ? 'var(--color-red-fg)'
+      : tone === 'positive'
+      ? 'var(--color-green-fg)'
+      : 'var(--kpi-value-color)'
+  const trackStroke = 'rgba(161,168,181,0.20)'
+  // 270° arc, radius 5.5, center (8,8). Rotate so the gap is at the bottom.
+  const r = 5.5
+  const cx = 8
+  const cy = 8
+  const circumference = 2 * Math.PI * r
+  const arcLength = (270 / 360) * circumference
+  const dashLength = clamped * arcLength
+  return (
+    <svg
+      width="16"
+      height="16"
+      viewBox="0 0 16 16"
+      aria-hidden="true"
+      className="mini-progress-arc shrink-0"
+      role="presentation"
+    >
+      <circle
+        cx={cx}
+        cy={cy}
+        r={r}
+        fill="none"
+        stroke={trackStroke}
+        strokeWidth="1.6"
+        strokeDasharray={`${arcLength} ${circumference - arcLength}`}
+        strokeDashoffset={circumference / 4}
+        transform={`rotate(90 ${cx} ${cy})`}
+      />
+      <circle
+        cx={cx}
+        cy={cy}
+        r={r}
+        fill="none"
+        stroke={stroke}
+        strokeWidth="1.6"
+        strokeLinecap="round"
+        strokeDasharray={`${dashLength} ${circumference - dashLength}`}
+        strokeDashoffset={circumference / 4}
+        transform={`rotate(90 ${cx} ${cy})`}
+      />
+    </svg>
+  )
+}
+
+// ── W50-2d Inline sub-component: KpiToneCell ────────────────────────────────
+// Wraps a single KpiCard in a `display: contents` div carrying a
+// `data-tone` attribute + `kpi-tone-cell` class. `display: contents` makes
+// the wrapper transparent to the CSS grid layout — the KpiCard inside
+// remains the actual grid item, so row alignment / stretch behaviour is
+// unchanged. The wrapper exists purely as a CSS hook: the CSS agent can
+// target `[data-tone="positive"] > .kpi-card` (or `.kpi-tone-cell[data-
+// tone="positive"] > .kpi-card`) to apply tone-tinted backgrounds, colored
+// halos, or tone-aware hover shadows — without modifying the shared
+// <KpiCard> component (which is also used by 9 other panels).
+function KpiToneCell({
+  tone,
+  children,
+}: {
+  tone: KpiTone
+  children: ReactNode
+}) {
+  return (
+    <div
+      data-tone={tone}
+      className={`kpi-tone-cell kpi-tone-${tone}`}
+      style={{ display: 'contents' }}
+    >
+      {children}
+    </div>
+  )
 }
 
 // ── Inline sub-component: SystemStatusCard ──────────────────────────────────
@@ -256,6 +451,10 @@ function deriveRiskStatus(
 // That keeps the visual rhythm of the dashboard consistent while letting
 // each card host a list (strategies, alerts, ingestion sources) rather
 // than a single number.
+//
+// W50-2d — adds `data-tone={tone}` to the root div so the CSS agent can
+// apply tone-tinted card surfaces (green/red/amber/neutral) to match the
+// per-card state.
 function SystemStatusCard({
   label,
   count,
@@ -288,6 +487,7 @@ function SystemStatusCard({
     <div
       className="kpi-card sys-status-card"
       data-testid={`sys-status-${label.toLowerCase().replace(/\s+/g, '-')}`}
+      data-tone={tone}
       title={title}
       role="group"
       aria-label={label}
@@ -701,11 +901,9 @@ function CommandCenterDashboardImpl({
       : 'neutral'
 
   // ── Risk-status derivation (mirrors health bar) ─────────────────────────
-  const dataAgeSec =
-    snapshot.timestamp > 0
-      ? Math.max(0, Math.floor(Date.now() / 1000 - snapshot.timestamp))
-      : null
-  const riskStatus = deriveRiskStatus(snapshot, dataAgeSec)
+  // (W50-2d) — `deriveRiskStatus` was removed (it was dead code left over
+  // from the W49-3 removal of the third "risk bar" row; the live risk
+  // indicator now lives exclusively in <CommandCenterHealthBar> on Row 1).
 
   // ── Win rate (from analytics, with loading + error) ─────────────────────
   const winRate = analytics.data?.win_rate ?? null
@@ -720,6 +918,17 @@ function CommandCenterDashboardImpl({
 
   // ── Sharpe (from analytics) ──────────────────────────────────────────────
   const sharpe = analytics.data?.sharpe_ratio ?? null
+
+  // ── W50-2d Hero trend derivation ──────────────────────────────────────────
+  // Daily P&L drives the Portfolio Value trend direction + sparkline shape.
+  // The available-balance card carries a deployment-ratio indicator (cash vs
+  // total portfolio); the open-exposure card carries the cap-ratio arc.
+  const dailyPnl = snapshot.daily_pnl ?? 0
+  const portfolioTone: KpiTone = pnlTone(dailyPnl)
+  const portfolioTrend: 'up' | 'down' | 'flat' =
+    dailyPnl > 0 ? 'up' : dailyPnl < 0 ? 'down' : 'flat'
+  const deployPct =
+    totalPortfolioValue > 0 ? openExposure / totalPortfolioValue : null
 
   // ── Cell wrappers (consistent styling + grid-area routing) ─────────────
   const cellClass = 'min-h-0 min-w-0 overflow-hidden'
@@ -765,7 +974,11 @@ function CommandCenterDashboardImpl({
   return (
     <div className="command-center-layout">
       {/* ── 1. System status bar (top) ───────────────────────────────── */}
-      <div style={{ gridArea: 'system', minHeight: 0 }}>
+      <div
+        style={{ gridArea: 'system', minHeight: 0 }}
+        className="dashboard-system-bar-wrapper"
+        data-area="system"
+      >
         <CommandCenterHealthBar
           snapshot={snapshot}
           status={status}
@@ -776,7 +989,8 @@ function CommandCenterDashboardImpl({
       {/* ── 2. Top bar — 3 large hero KPIs ─────────────────────────────── */}
       <div
         style={{ gridArea: 'topbar', minHeight: 0 }}
-        className="grid grid-cols-1 sm:grid-cols-3 gap-2"
+        className="grid grid-cols-1 sm:grid-cols-3 gap-3 dashboard-hero-row"
+        data-area="hero-kpis"
         role="region"
         aria-label="Top bar — portfolio headline metrics"
       >
@@ -785,10 +999,25 @@ function CommandCenterDashboardImpl({
           size="lg"
           label="Portfolio Value"
           value={fmtUsd(totalPortfolioValue)}
-          tone="neutral"
-          sub={`Cash ${fmtUsd(availableBalance)} · Exposure ${fmtUsd(openExposure, 0)}`}
-          title="Total portfolio value = available cash + open position market value"
+          tone={portfolioTone}
+          sub={
+            <span className="inline-flex items-center gap-1 min-w-0">
+              <TrendArrow direction={portfolioTrend} />
+              <span className="truncate tabular-nums">
+                {dailyPnl >= 0 ? '+' : '−'}
+                {fmtUsd(Math.abs(dailyPnl), 2)} today
+              </span>
+              <span className="text-[#7e8aaa] hidden sm:inline">·</span>
+              <span className="text-[#7e8aaa] truncate hidden sm:inline">
+                Cash {fmtUsd(availableBalance, 0)}
+              </span>
+            </span>
+          }
+          title="Total portfolio value = available cash + open position market value. Trend reflects today's realized + unrealized P&L."
           interactive
+          trailing={
+            <MiniSparkline tone={portfolioTone} direction={portfolioTrend} />
+          }
         />
         <KpiCard
           id="available-balance"
@@ -796,9 +1025,23 @@ function CommandCenterDashboardImpl({
           label="Available Balance"
           value={fmtUsd(snapshot.paper_balance)}
           tone="neutral"
-          sub="Deployable cash"
-          title="Free paper-trading balance"
+          sub={
+            <span className="inline-flex items-center gap-1 min-w-0">
+              <TrendArrow direction="flat" />
+              <span className="truncate">
+                {deployPct != null
+                  ? `${(deployPct * 100).toFixed(0)}% deployed`
+                  : 'Deployable cash'}
+              </span>
+              <span className="text-[#7e8aaa] hidden sm:inline">·</span>
+              <span className="text-[#7e8aaa] truncate hidden sm:inline">
+                Free cash
+              </span>
+            </span>
+          }
+          title="Free paper-trading balance available for new orders (cash not locked in open positions)."
           interactive
+          trailing={<MiniSparkline tone="neutral" direction="flat" />}
         />
         <KpiCard
           id="open-exposure"
@@ -807,87 +1050,181 @@ function CommandCenterDashboardImpl({
           value={fmtUsd(openExposure)}
           tone={exposureTone}
           sub={
-            expPct != null
-              ? `${(expPct * 100).toFixed(0)}% of $${maxExposure.toFixed(0)} cap`
-              : '—'
+            <span className="inline-flex items-center gap-1 min-w-0">
+              <TrendArrow
+                direction={
+                  expPct != null && expPct > 0.9 ? 'up' : 'flat'
+                }
+              />
+              <span className="truncate tabular-nums">
+                {expPct != null
+                  ? `${(expPct * 100).toFixed(0)}% of $${maxExposure.toFixed(0)} cap`
+                  : '—'}
+              </span>
+            </span>
           }
-          title="Mark-to-mid value of open positions vs configured exposure cap"
+          title="Mark-to-mid value of open positions vs configured exposure cap. Amber when utilization exceeds 90%."
           interactive
+          trailing={
+            expPct != null ? (
+              <MiniProgressArc ratio={expPct} tone={exposureTone} />
+            ) : null
+          }
         />
       </div>
 
       {/* ── 3. P&L row — 5 medium KPIs ─────────────────────────────────── */}
       <div
         style={{ gridArea: 'pnl', minHeight: 0 }}
-        className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2"
+        className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3 dashboard-pnl-row"
+        data-area="pnl-kpis"
         role="region"
         aria-label="P&L row — realized, unrealized, win rate, drawdown, sharpe"
       >
-        <KpiCard
-          id="realized-pnl"
-          label="Realized P&L"
-          value={fmtPnl(realizedPnl)}
-          tone={pnlTone(realizedPnl)}
-          sub="Closed today"
-          loading={analytics.loading && !analytics.data}
-          error={analytics.error}
-          stale={staleFor(analytics.fetchedAt)}
-          title="Sum of closed-position realized P&L"
-        />
-        <KpiCard
-          id="unrealized-pnl"
-          label="Unrealized P&L"
-          value={fmtPnl(unrealizedPnl)}
-          tone={pnlTone(unrealizedPnl)}
-          sub="Mark-to-mid open"
-          loading={analytics.loading && !analytics.data}
-          error={analytics.error}
-          stale={staleFor(analytics.fetchedAt)}
-          title="Sum of open positions' unrealized P&L"
-        />
-        <KpiCard
-          id="win-rate"
-          label="Win Rate"
-          value={winRate != null ? fmtPct(winRate) : null}
-          tone={winRateTone}
-          sub={
-            analytics.data?.total_trades != null
-              ? `n=${fmtInt(analytics.data.total_trades)}`
-              : '—'
-          }
-          loading={analytics.loading && !analytics.data}
-          error={analytics.error}
-          stale={staleFor(analytics.fetchedAt)}
-          title="Share of closed trades that ended in profit"
-        />
-        <KpiCard
-          id="drawdown"
-          label="Drawdown"
-          value={`−$${Math.abs(drawdownDollars).toFixed(2)}`}
-          tone={drawdownTone}
-          sub={fmtPct(drawdownPct)}
-          loading={statusData.loading && !statusData.data}
-          error={statusData.error}
-          stale={staleFor(statusData.fetchedAt)}
-          title="Current drawdown from peak equity vs hard stop"
-        />
-        <KpiCard
-          id="sharpe"
-          label="Sharpe"
-          value={fmtSharpe(sharpe)}
-          tone={sharpeTone(sharpe)}
-          sub="Risk-adjusted return"
-          loading={analytics.loading && !analytics.data}
-          error={analytics.error}
-          stale={staleFor(analytics.fetchedAt)}
-          title="Sharpe ratio — annualized risk-adjusted return (higher is better)"
-        />
+        <KpiToneCell tone={pnlTone(realizedPnl)}>
+          <KpiCard
+            id="realized-pnl"
+            label="Realized P&L"
+            value={fmtPnl(realizedPnl)}
+            tone={pnlTone(realizedPnl)}
+            sub={
+              <span className="inline-flex items-center gap-1">
+                <TrendArrow
+                  direction={
+                    realizedPnl > 0
+                      ? 'up'
+                      : realizedPnl < 0
+                      ? 'down'
+                      : 'flat'
+                  }
+                />
+                <span>Closed today</span>
+              </span>
+            }
+            loading={analytics.loading && !analytics.data}
+            error={analytics.error}
+            stale={staleFor(analytics.fetchedAt)}
+            title="Sum of closed-position realized P&L"
+            interactive
+          />
+        </KpiToneCell>
+        <KpiToneCell tone={pnlTone(unrealizedPnl)}>
+          <KpiCard
+            id="unrealized-pnl"
+            label="Unrealized P&L"
+            value={fmtPnl(unrealizedPnl)}
+            tone={pnlTone(unrealizedPnl)}
+            sub={
+              <span className="inline-flex items-center gap-1">
+                <TrendArrow
+                  direction={
+                    unrealizedPnl > 0
+                      ? 'up'
+                      : unrealizedPnl < 0
+                      ? 'down'
+                      : 'flat'
+                  }
+                />
+                <span>Mark-to-mid open</span>
+              </span>
+            }
+            loading={analytics.loading && !analytics.data}
+            error={analytics.error}
+            stale={staleFor(analytics.fetchedAt)}
+            title="Sum of open positions' unrealized P&L"
+            interactive
+          />
+        </KpiToneCell>
+        <KpiToneCell tone={winRateTone}>
+          <KpiCard
+            id="win-rate"
+            label="Win Rate"
+            value={winRate != null ? fmtPct(winRate) : null}
+            tone={winRateTone}
+            sub={
+              <span className="inline-flex items-center gap-1">
+                <TrendArrow
+                  direction={
+                    winRate != null && winRate >= 0.55
+                      ? 'up'
+                      : winRate != null && winRate < 0.45
+                      ? 'down'
+                      : 'flat'
+                  }
+                />
+                <span className="tabular-nums">
+                  {analytics.data?.total_trades != null
+                    ? `n=${fmtInt(analytics.data.total_trades)}`
+                    : '—'}
+                </span>
+              </span>
+            }
+            loading={analytics.loading && !analytics.data}
+            error={analytics.error}
+            stale={staleFor(analytics.fetchedAt)}
+            title="Share of closed trades that ended in profit"
+            interactive
+          />
+        </KpiToneCell>
+        <KpiToneCell tone={drawdownTone}>
+          <KpiCard
+            id="drawdown"
+            label="Drawdown"
+            value={`−$${Math.abs(drawdownDollars).toFixed(2)}`}
+            tone={drawdownTone}
+            sub={
+              <span className="inline-flex items-center gap-1">
+                <TrendArrow
+                  direction={
+                    Math.abs(drawdownDollars) > maxDrawdownLimit * 0.5
+                      ? 'down'
+                      : 'flat'
+                  }
+                />
+                <span className="tabular-nums">{fmtPct(drawdownPct)}</span>
+              </span>
+            }
+            loading={statusData.loading && !statusData.data}
+            error={statusData.error}
+            stale={staleFor(statusData.fetchedAt)}
+            title="Current drawdown from peak equity vs hard stop"
+            interactive
+          />
+        </KpiToneCell>
+        <KpiToneCell tone={sharpeTone(sharpe)}>
+          <KpiCard
+            id="sharpe"
+            label="Sharpe"
+            value={fmtSharpe(sharpe)}
+            tone={sharpeTone(sharpe)}
+            sub={
+              <span className="inline-flex items-center gap-1">
+                <TrendArrow
+                  direction={
+                    sharpe != null && sharpe >= 1.5
+                      ? 'up'
+                      : sharpe != null && sharpe < 0
+                      ? 'down'
+                      : 'flat'
+                  }
+                />
+                <span>Risk-adjusted return</span>
+              </span>
+            }
+            loading={analytics.loading && !analytics.data}
+            error={analytics.error}
+            stale={staleFor(analytics.fetchedAt)}
+            title="Sharpe ratio — annualized risk-adjusted return (higher is better)"
+            interactive
+          />
+        </KpiToneCell>
       </div>
 
       {/* ── 4. Activity grid — positions | order books | trades ────────── */}
       <div
         style={{ gridArea: 'pos' }}
-        className={cellClass}
+        className={`${cellClass} dashboard-activity-cell`}
+        data-area="activity-pos"
         role="region"
         aria-label={`Active positions (${summaryCounts.positions})`}
       >
@@ -895,7 +1232,8 @@ function CommandCenterDashboardImpl({
       </div>
       <div
         style={{ gridArea: 'orders' }}
-        className={cellClass}
+        className={`${cellClass} dashboard-activity-cell`}
+        data-area="activity-orders"
         role="region"
         aria-label={`Order books — ${summaryCounts.orders} open orders`}
       >
@@ -903,7 +1241,8 @@ function CommandCenterDashboardImpl({
       </div>
       <div
         style={{ gridArea: 'trades' }}
-        className={cellClass}
+        className={`${cellClass} dashboard-activity-cell`}
+        data-area="activity-trades"
         role="region"
         aria-label={`Recent trades (${summaryCounts.trades})`}
       >
@@ -913,7 +1252,8 @@ function CommandCenterDashboardImpl({
       {/* ── 5. System status — 2 columns ───────────────────────────────── */}
       <div
         style={{ gridArea: 'sysleft' }}
-        className={cellClass}
+        className={`${cellClass} dashboard-sys-col`}
+        data-area="sys-left"
         role="region"
         aria-label="System status — strategies and AI"
       >
@@ -952,7 +1292,8 @@ function CommandCenterDashboardImpl({
       </div>
       <div
         style={{ gridArea: 'sysright' }}
-        className={cellClass}
+        className={`${cellClass} dashboard-sys-col`}
+        data-area="sys-right"
         role="region"
         aria-label="System status — ingestion and alerts"
       >

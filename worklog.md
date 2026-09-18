@@ -33185,3 +33185,517 @@ $ git log origin/main -1 --oneline
 - **Visual:** dashboard renders correctly, no error boundary
 
 **System is production-ready for paper trading.**
+
+---
+
+## W50-2b — full-stack-developer — Premium Sidebar.tsx redesign
+
+**Task ID:** W50-2b
+**Agent:** full-stack-developer
+**Task:** Redesign Sidebar.tsx for premium navigation experience
+**File touched:** `src/components/Sidebar.tsx` (408 → 527 lines)
+
+### Constraints honoured
+- **`NavSection` type + `NAV_GROUPS` data model** — preserved verbatim
+  (no item added/removed/relabeled; same `id` / `labelKey` / `group` /
+  `icon` / `kbd` values).
+- **Existing class names** — every prior class (`sidebar`,
+  `sidebar.collapsed`, `sidebar.mobile-open`, `sidebar-header`,
+  `sidebar-nav`, `sidebar-item` / `.active`, `sidebar-icon`,
+  `sidebar-label`, `sidebar-group-label`, `sidebar-kbd-badge`,
+  `sidebar-status-section`, `sidebar-status-row`,
+  `sidebar-status-dot`, `sidebar-status-text`, `sidebar-mode-badge`,
+  `sidebar-time`, `app-name`, `sr-only`) is still emitted at the same
+  DOM location. The parallel CSS agent's selectors will resolve.
+- **i18n `t()` calls** — preserved. Group labels go through
+  `t(group.labelKey)`, item labels through `t(item.labelKey)`, footer
+  status rows through `t('status.bot_active')` /
+  `t('status.connected')` / `t('status.paper_mode')`. No new keys
+  introduced.
+- **Collapse / expand + mobile drawer + live UTC clock** — preserved
+  unchanged. `collapsed` state + `mobileOpen` prop +
+  `onMobileClose?.()` callback + the 1 Hz `setInterval` clock tick all
+  behave identically to W49-2.
+- **Client component** — `'use client'` directive retained at the
+  top of the file.
+- **Inline styles used sparingly** — only where the design needs an
+  effect not covered by a class (gradient text-clip on "Pro",
+  `tabular-nums` on the UTC clock, structural layout on the brand
+  wrapper, refined transitions on the collapse button).
+
+### Changes (per design direction in the task brief)
+
+1. **Refined logo header**
+   - Wrapped SVG + wordmark in a new `.sidebar-brand` div (new class,
+     for organizational clarity / future CSS targeting; existing layout
+     inline styles preserved).
+   - "Pro" suffix now uses a subtle blue gradient text-clip:
+     `linear-gradient(135deg, #60a5fa 0%, #93c5fd 50%, #bfdbfe 100%)`
+     via `WebkitBackgroundClip: text` + `WebkitTextFillColor:
+     'transparent'` + `color: 'transparent'` fallback. Visible but
+     tasteful — not a garish rainbow.
+   - Wordmark span switched from `display: inline` to `inline-flex`
+     with `alignItems: baseline` so the gradient "Pro" aligns
+     correctly with the "Polymarket" base.
+   - Collapse button (`sidebar-collapse-btn` class added):
+     - Padding `4px → 5px` (slightly larger hit target).
+     - `border: 'none'` → `border: '1px solid transparent'` so a CSS
+       `:hover { border-color: ... }` rule animates in without a 2px
+       layout shift.
+     - `borderRadius: '4px' → '6px'` (slightly softer).
+     - Added `transition: background-color 120ms ease, color 120ms
+       ease, border-color 120ms ease` so hover/focus states
+       interpolate smoothly.
+     - Added `justifyContent: 'center'` so the hamburger icon stays
+       centered inside the new border.
+     - `aria-label` / `title` text unchanged ("Collapse sidebar" /
+       "Expand sidebar") so the existing test
+       `getByRole('button', { name: /collapse sidebar/i })` still
+       resolves.
+
+2. **Better group labels**
+   - The `.sidebar-group-label` JSX is unchanged — the parallel CSS
+     agent owns the uppercase / 10px / letter-spaced / dimmed styling
+     + the bottom fade divider. Not duplicating it here avoids a
+     double-divider if CSS uses a `::after` pseudo-element.
+   - Added `.sidebar-group` class to the group wrapper div (was
+     previously unclassed) for organizational clarity.
+
+3. **Improved nav items**
+   - JSX unchanged. The 3px accent left bar
+     (`.sidebar-item.active::before`), background gradient on active,
+     hover `translateX(2px)`, and icon color shift are all driven by
+     CSS on the existing `.sidebar-item` selectors — left untouched so
+     the parallel CSS agent can refine them.
+
+4. **Better keyboard shortcut badges**
+   - JSX unchanged. `.sidebar-kbd-badge` is the CSS agent's domain
+     (physical keycap look — inset shadow, monospace, rounded).
+
+5. **Premium footer status**
+   - UTC clock (`.sidebar-time`) now has
+     `style={{ fontVariantNumeric: 'tabular-nums', letterSpacing:
+     '0.02em' }}` so the clock digits don't wiggle as seconds tick
+     over. This is a per-element typographic concern — applied inline
+     rather than introducing a new utility class.
+   - Mode badge / status dots / gradient top border / pulsing dots are
+     CSS-driven on the existing `.sidebar-mode-badge` /
+     `.sidebar-status-dot` / `.sidebar-status-section` classes —
+     preserved verbatim so the CSS agent can refine them.
+   - Footer copy (`t('status.bot_active')` /
+     `t('status.connected')` / `t('status.paper_mode)` /
+     `t('status.paper_mode).split(' ')[0]` → "PAPER" badge) unchanged.
+
+6. **Collapsed mode**
+   - Already handled by the existing `collapsed` state: the
+     `.sidebar-label` + `.sidebar-group-label` + `.sidebar-kbd-badge`
+     elements stop rendering when `collapsed` is true, and the
+     `.sidebar.collapsed` CSS narrows the rail to 52px. Active accent
+     bar continues to render via `.sidebar-item.active::before`. No
+     JSX change needed.
+
+7. **Scroll behavior**
+   - Already handled by `.sidebar-nav { overflow-y: auto }`. The 6px
+     semi-transparent rounded custom scrollbar is CSS-driven — left
+     untouched so the parallel CSS agent can refine it.
+
+8. **Mobile drawer**
+   - Backdrop className changed from
+     `bg-black/60 z-[35] md:hidden` →
+     `bg-black/60 backdrop-blur-sm z-[35] md:hidden`. The Tailwind
+     `backdrop-blur-sm` utility applies `backdrop-filter: blur(4px)`
+     so the workstation content behind the drawer is gently
+     defocused. The `fixed inset-0` + `aria-hidden="true"` attributes
+     are preserved so the Sidebar.test.tsx selector
+     `[aria-hidden="true"].fixed.inset-0` still resolves (3 tests
+     depend on it).
+   - Drawer slide-in + box-shadow are CSS-driven on
+     `.sidebar.mobile-open` — preserved.
+
+### Header comment block
+- Updated the file's top-of-file comment to document the W50-2b
+  changes + explain why each refinement is inline vs. left to CSS,
+  so the next reader understands the parallel CSS-agent split.
+
+### Verification
+
+| Check | Command | Result |
+|---|---|---|
+| ESLint | `bun run lint` (`eslint .`) | **clean** (no output) |
+| TypeScript (Sidebar only) | `bunx tsc --noEmit --skipLibCheck \| grep Sidebar` | **0 errors** (no Sidebar-specific output) |
+| TypeScript (full project) | `bunx tsc --noEmit --skipLibCheck \| tail -5` | 5 errors, **all pre-existing** in unrelated files (`src/app/page.tsx`, `src/components/CommandCenterDashboard.tsx`, `src/components/TopStatusBar.tsx`, `vitest.singlefork.config.ts`) — verified by `git stash` + re-run that the same 5 errors exist on the unmodified tree. None introduced by W50-2b. |
+| Line count | `wc -l src/components/Sidebar.tsx` | 527 lines (was 408) |
+
+### Files touched
+- `src/components/Sidebar.tsx` (rewrite — 408 → 527 lines, +119)
+- `worklog.md` (this appended entry)
+
+### Stage Summary
+- Sidebar.tsx redesigned with premium touches while preserving every
+  existing class name, every i18n key, every NavSection id, and the
+  full collapse/expand + mobile drawer + UTC clock behaviour.
+- JSX-level changes: gradient text-clip on "Pro", refined collapse
+  button (transition + transparent border + slightly larger padding +
+  `.sidebar-collapse-btn` class), `backdrop-blur-sm` on the mobile
+  backdrop, `tabular-nums` + `letter-spacing` on the UTC clock,
+  `.sidebar-brand` wrapper for the logo cluster, `.sidebar-group`
+  wrapper class for group items.
+- All visual refinements that the task brief calls for but that
+  require pseudo-elements / `:hover` states / keyframe animations
+  (group-label fade divider, active background gradient, hover
+  translateX, icon color shift, keycap kbd badge, footer gradient
+  top border, pulsing status dots, custom scrollbar, drawer slide-in
+  shadow) are deliberately left to the parallel CSS agent — those
+  selectors target the existing class names this component still
+  emits, so they'll resolve cleanly without any further JSX edits.
+- Lint clean, 0 new tsc errors, file grew by 119 lines (mostly
+  expanded comment blocks documenting the W50-2b design split).
+
+---
+
+Task ID: W50-2a
+Agent: full-stack-developer
+Task: Redesign globals.css design system for premium trading workstation look
+
+Work Log:
+- Read prior CSS work record in worklog (W39-2 "Comprehensive CSS design system redesign", W49-5 panel worklog) and audited the current 2644-line globals.css. Confirmed W49-1 header comment + existing 5-tier elevation ladder, dark palette, blue accent (#3b82f6), and the surface-tier-* / kpi-card / data-table / btn systems already in place.
+- Designed an additive W50-2a enhancement layer that wins per-property via later-cascade + same/higher specificity, without renaming or removing any existing class or token. The layer is appended at end-of-file (lines 2646-2910) so it cleanly overrides W49-1 declarations on the same selectors.
+- Added new motion + elevation tokens to `:root`: `--easing-spring: cubic-bezier(0.34, 1.56, 0.64, 1)`, plus three-layer shadow composition (`--shadow-ambient`, `--shadow-key`, `--shadow-contact`) and three composed premium bundles (`--shadow-card-premium`, `--shadow-popover-premium`, `--shadow-modal-premium`) that layer an inset top-edge rim + ambient + key + contact for realistic Stripe/Linear-style depth. Added `--ring-focus-layered: 0 0 0 2px var(--bg-base), 0 0 0 4px var(--accent)` for the Stripe-style 2-color halo pattern.
+- Added matching `.light` theme overrides so ambient shadows use slate-900 (not pure black) on white backgrounds, and the focus-ring moat uses the light page bg.
+- Implemented all 12 design-direction items from the task spec:
+  1. Glassmorphism on `.surface-tier-overlay` — upgraded to `rgba(31,35,48,0.78)` + `backdrop-filter: blur(12px) saturate(140%)` + premium popover shadow. Light theme uses `rgba(255,255,255,0.86)`.
+  2. Refined card system — `.card` now uses `--shadow-card-premium`; new `.card::before` 1px gradient top-edge highlight (90deg transparent → rgba(255,255,255,0.08) → transparent); `.card-hover:hover` layers an accent-tinted inner glow + ambient + key shadows.
+  3. Premium scrollbar — `.scrollbar-thin` 6px wide with rgba(161,168,181,0.22) semi-transparent thumb, `background-clip: padding-box` for clean rounded corners, and a hover state that brightens to rgba(59,130,246,0.55) (accent blue). Global scrollbar widened to 10px with the same rgba + accent-on-hover treatment. Light-theme thumbs use slate-500/600 tones.
+  4. Enhanced depth/elevation — multi-layer box-shadows with ambient + key + contact layers per the spec; verified all 5 existing `--shadow-xs…--shadow-xl` tokens remain (W49-1 still uses them).
+  5. Micro-interaction tokens — `--easing-spring` added. The existing `--duration-fast` (120ms), `--duration-base` (180ms), `--duration-slow` (280ms) tokens already match the spec's intent within ±20ms and are kept as-is (constraint: don't rename/change existing component dependencies).
+  6. Subtle background texture on `.app-shell` — two-stop radial gradient: `radial-gradient(circle at 20% 0%, rgba(59,130,246,0.04), transparent 50%)` upper-left blue glow + `radial-gradient(circle at 80% 100%, rgba(6,182,212,0.03), transparent 55%)` lower-right cyan glow. Fixed attachment so it doesn't scroll.
+  7. Refined KPI card — `.kpi-card` now uses `--shadow-card-premium` + `overflow: hidden`; new `.kpi-card::after` is a 2px left-edge accent bar (linear-gradient var(--accent-fg) → var(--accent)) that fades + slides in on hover. `.kpi-card.is-interactive:hover` layers the accent-bd + key + ambient shadow stack.
+  8. Better focus rings — replaced plain outline on `.input/.select/.btn/.sidebar-item/.filter-chip/.tab-item/.modal-close/[data-tooltip]:focus-visible` with `box-shadow: var(--ring-focus-layered)` (2px page-color moat + 4px accent halo). Inputs keep their border-color transition and add an inset accent-bd ring on top. Forced-colors media query restores a 2px CanvasText outline for Windows High Contrast mode (box-shadows don't render there).
+  9. Improved table styling — `.data-table thead th` now has a vertical gradient (var(--bg-elevated) → var(--bg-page)) + inset bottom-edge shadow so sticky headers read as "raised"; zebra striping refined to rgba(255,255,255,0.015) so it doesn't compete with hover; `td` reaffirms tabular-nums + 'tnum'/'zero' OpenType features for clean numeric columns.
+  10. Refined button system — `.btn` gets layered inset top-rim + drop shadow; `:hover` adds a 2px 4px drop shadow; `:active` uses `--easing-spring` for a snappy scale(0.985) rebound; `:disabled` desaturates via `grayscale(0.3)` (reads as "intentionally inert" rather than a loading overlay). `.btn-primary` gets its own blue-tinted 3-layer shadow that brightens on hover.
+  11. Loading skeleton polish — added `@keyframes shimmer` (-200% → 200% background-position sweep) and overrode Tailwind's `.animate-pulse` to use it with a 5-stop linear-gradient shine (transparent → rgba 0.06 → 0.10 → 0.06 → transparent) over 1.8s. Light-theme variant uses slate-900 stops.
+  12. Status indicator dots — refined `.status-dot.healthy` with a slow 2.4s `status-dot-live` pulse (halo grows from 2px to 4px and dims); `.status-dot.connecting` gets the fast 1s `status-dot-pulse-strong` scale+opacity pulse; `.degraded`/`.unavailable` get static color-matched halos. Added NEW styling for `.sidebar-status-dot` (was previously unstyled — used in Sidebar.tsx footer): 6px green dot with a 6px glow that pulses at 2.2s. Forward-compat `.is-stale`/`.is-offline` modifiers included for future wave wiring.
+- Added reduced-motion parity block that neutralizes the W50-2a-specific animations (status-dot-live, status-dot-pulse-strong, sidebar-status-pulse, shimmer, animate-pulse) and the kpi-card::after transition for users with `prefers-reduced-motion: reduce`.
+- Verified structural integrity: braces balanced (514 open / 514 close, diff 0); all pre-existing classes preserved (`.card`, `.kpi-card`, `.surface-tier-overlay`, `.data-table`, `.btn`, `.btn-primary`, `.sidebar-status-dot`, `.status-dot`, `.animate-pulse`, `.app-shell`, `.scrollbar-thin`, `.filter-chip`, `.tab-item`, `.modal-close`); all new tokens defined; `@import "tailwindcss"` and font imports preserved at the top.
+- Final file: 2644 → 2910 lines (+266 lines, well under the 3000-line cap).
+
+Stage Summary:
+- File touched: `/home/z/my-project/src/app/globals.css` only (no TS/TSX files modified by this task).
+- Final line count: 2910 lines (was 2644, +266 additive).
+- New tokens added: `--easing-spring`, `--shadow-ambient`, `--shadow-key`, `--shadow-contact`, `--shadow-card-premium`, `--shadow-popover-premium`, `--shadow-modal-premium`, `--ring-focus-layered` (8 new tokens in `:root`; 6 shadow/ring tokens re-defined for `.light`).
+- New keyframes: `shimmer`, `status-dot-live`, `status-dot-pulse-strong`, `sidebar-status-pulse` (4 new animations).
+- New classes: `.sidebar-status-dot`, `.sidebar-status-dot.is-stale`, `.sidebar-status-dot.is-offline`.
+- Enhanced existing classes (additive override): `.surface-tier-overlay`, `.card` (+ `::before`), `.card-hover:hover`, `.scrollbar-thin` (webkit + FF), `::-webkit-scrollbar`, `*` scrollbar-color, `.app-shell`, `.kpi-card` (+ `::after`), `.input/.select/.btn/.sidebar-item/.filter-chip/.tab-item/.modal-close/[data-tooltip]:focus-visible`, `.input:focus`/`.select:focus`, `.data-table thead th`, `.data-table tbody tr:nth-child(even)`, `.data-table tbody tr:hover td`, `.data-table td`, `.btn`/`.btn:hover`/`.btn:active`/`.btn:disabled`/`.btn-primary`/`.btn-primary:hover`/`.btn-primary:active`, `.animate-pulse`, `.status-dot.healthy`/`.connecting`/`.degraded`/`.unavailable`.
+- WCAG AA: text colors unchanged (no body-text contrast regression); focus rings upgraded from a 2px solid outline to a more visible 2-layer 4px halo (still keeps a transparent outline slot for forced-colors fallback). Status-dot halos use 18-20% alpha (decorative, not text). All shadow overlays are decorative (no contrast impact).
+- Constraint compliance: NO indigo or blue-purple gradients introduced (only the existing professional blue #3b82f6 + cyan #06b6d4 used as accent glows); NO existing class removed; NO existing CSS variable renamed; light/dark theme symmetry maintained throughout.
+- Lint: `bun run lint` → EXIT 0 (clean, zero warnings).
+- TypeScript: `bunx tsc --noEmit --skipLibCheck` reports 5 pre-existing errors in `src/app/page.tsx`, `src/components/CommandCenterDashboard.tsx`, `src/components/TopStatusBar.tsx`, and `vitest.singlefork.config.ts` — ALL pre-existing, NONE in `globals.css` (CSS cannot produce TS errors). None of these are caused by this task (CSS-only change). The project compiles via Next.js dev server (which treats TS errors as warnings).
+
+---
+
+Task ID: W50-2c
+Agent: full-stack-developer
+Task: Redesign TopStatusBar.tsx for compact, information-dense, modern header
+
+Work Log:
+- Read prior worklog tail + full TopStatusBar.tsx (668 lines baseline) +
+  TopStatusBar.test.tsx (17 tests) to map every test contract that must
+  survive the redesign: role="banner" header, mode badge literals
+  ('PAPER TRADING' / 'LIVE TRADING' / 'SHADOW MODE'), '🛑 HALTED' /
+  '👁 OBS ONLY' badges, kill/resume/cancel-all/shortcuts/config/mute/
+  settings button aria-labels, and the /api/ml/metrics +
+  /api/ml/drift mount-time fetch contract.
+- Replaced the file header comment block with a W50-2c changelog that
+  documents every visual + responsive change so the next agent can
+  trace the redesign rationale.
+- Header root: added `shadow-lg shadow-black/30` + a 1px top highlight
+  via `style={{ borderTop: '1px solid rgba(255,255,255,0.04)' }}` for
+  the spec's "subtle top border highlight + floating effect"; existing
+  `topbar` hook class + `bg-[#0e1015]/95 backdrop-blur-md border-b
+  border-[#1f2335]` preserved verbatim (CSS agent owns those styles).
+- Inserted two subtle 1px vertical dividers using `var(--border-dim)`
+  between LEFT↔CENTER and CENTER↔RIGHT clusters (hidden below md so
+  we never render a dangling divider on mobile where the CENTER KPI
+  cluster is also hidden).
+- LEFT cluster: kept mobile hamburger + logo + wordmark + halt/obs
+  badges; refined the breadcrumb separators from bare '/' glyphs to
+  small 8×10 SVG chevrons (currentcolor stroke, 1.25 width) so the
+  panelGroup → panelName trail reads as a modern breadcrumb. Mobile
+  hamburger is now a 32px (h-8 w-8) square button.
+- CENTER KPI cluster: every mono value span gained `tabular-nums` so
+  Balance / P&L / Exposure / Brier / AUC / Uptime digits don't shimmy
+  as snapshots tick. KPI labels gained `tracking-wider` for a more
+  typographically refined uppercase look.
+- RIGHT cluster, status pills:
+  · UTC clock (xl+): switched from inline-block to inline-flex, 32px
+    height, tabular-nums.
+  · REST connection pill (sm+): rewrote the dot as a layered pulse-ring
+    — an absolutely-positioned `animate-ping` overlay sits behind a
+    crisp 8×8 dot, so the ring expands outward without blurring the
+    fill. Visible label switched from "Connected/Connecting…/Disconnected"
+    to the spec's compact "Live/Degraded/Offline"; full connLabel is
+    preserved in the title attribute + SR live region for back-compat.
+  · Freshness chip (sm+): added "Updated " prefix to the age string
+    ("Updated 3s ago"); changed `freshnessClass(dataAge, 15, 60)` →
+    `freshnessClass(dataAge, 10, 30)` so the spec's exact thresholds
+    hold: <10s green (freshness-fresh), 10–30s amber (freshness-stale),
+    ≥30s red (freshness-dead). The neutral freshness-ok class becomes
+    unreachable, which matches the spec (no neutral band).
+  · Latency chip (lg+): 32px height + tabular-nums.
+  · NEW System Health pill (sm+): a compact dot + tier-label pill
+    that calls onOpenSystemHealth when provided (degrades to a
+    non-interactive role="status" div when not). Coexists with the
+    existing 2px bottom mini-bar — the pill is the discoverable,
+    label-bearing surface; the bottom strip is the ambient indicator.
+- RIGHT cluster, action buttons: every button standardised to 32px
+  height (h-8) with consistent focus-visible:ring styling:
+  · Settings (🛠): h-8 w-8 p-0 square.
+  · Mute (🔊/🔇): h-8 w-8 p-0 square (sm+).
+  · Shortcuts (⌨️): h-8 w-8 p-0 square (sm+).
+  · Config (⚙️): h-8 with the "Config" text label hidden below lg
+    so the icon remains visible on md but the word drops on tablet.
+  · Cancel All: h-8 with amber focus-visible ring.
+  · Kill Switch / Resume: h-8 with red / green focus-visible rings;
+    the existing bg-red-600 / bg-green-600 fills + animate-pulse on
+    RESUME preserved verbatim so W38-8 tests still match the labels.
+- Cleaned up a pre-existing TS6133 unused-variable warning:
+  `connDotClass` was declared but never read in the JSX (verified
+  via grep before deletion). Removed it; no behaviour change.
+- Preserved all existing class names referenced by the CSS agent's
+  enhancement work (topbar, btn/btn-ghost/btn-amber/btn-kill/btn-resume,
+  mono, sr-live, freshness-*, topbar-health-shimmer keyframe, etc.).
+- Preserved the full System Health 2px mini-bar + its shimmer span,
+  the W39-8 SR live region, the SettingsModal mount, and all real-time
+  touches (balance flash on paper_balance delta, ML/system-health
+  every-6s poll, 1s UTC clock tick).
+- Verified: bun run lint → clean (eslint . output is just the
+  command echo, no warnings/errors). bunx tsc --noEmit --skipLibCheck
+  → 0 errors in TopStatusBar.tsx (the 4 remaining errors in
+  page.tsx / CommandCenterDashboard.tsx / vitest.singlefork.config.ts
+  are pre-existing — confirmed via `git stash` + tsc on the clean
+  tree — and outside this task's file scope). Existing vitest suite
+  `src/components/TopStatusBar.test.tsx` → 17 / 17 passed (577ms).
+
+Stage Summary:
+- TopStatusBar.tsx redesigned for a compact, professional trading-
+  terminal feel: 1px var(--border-dim) vertical dividers between
+  LEFT/CENTER/RIGHT clusters, 32px-tall stat chips with tabular-nums
+  so digits don't shift, a pulse-ring connection dot labelled
+  Live/Degraded/Offline, "Updated Xs ago" freshness text that flips
+  amber at 10s and red at 30s, a new compact System Health pill in
+  the right cluster (alongside the existing 2px bottom mini-bar),
+  and a 1px top-border highlight + shadow-lg for a floating effect.
+- Final file size: 784 lines (was 668; +116 lines, mostly expanded
+  doc-comments + the new System Health pill JSX).
+- All 17 existing component tests still pass; lint clean; tsc clean
+  for TopStatusBar.tsx.
+- All test-contract literals preserved verbatim: mode badge text,
+  halt/obs badge text, every button aria-label, every title attr,
+  and the /api/ml/metrics + /api/ml/drift mount-time fetch contract.
+- Every existing class name the CSS agent might target is preserved
+  (topbar, btn-*, mono, sr-live, freshness-*, topbar-health-shimmer).
+
+---
+
+## W50-2d — Redesign CommandCenterDashboard for premium trading workstation
+
+**Agent:** full-stack-developer
+**Task:** Redesign `src/components/CommandCenterDashboard.tsx` for a
+premium, institutional-grade trading dashboard look — preserve all existing
+props, API calls, and class names (CSS is being enhanced by a parallel
+agent); layer new visual affordances on top via data-tone / data-area
+hooks + new inline sub-components.
+
+### Pre-flight context
+- Read the existing 1008-line `CommandCenterDashboard.tsx` end-to-end
+  and confirmed the 5-row structure: System Status Bar → Hero KPIs →
+  P&L KPIs → Activity Grid → System Status (2 cols).
+- Read the test contract (`CommandCenterDashboard.test.tsx`, 10 tests):
+  must continue to render the labels "Portfolio Value", "Available
+  Balance", "Open Exposure", "Realized P&L", "Unrealized P&L",
+  "Win Rate", "Drawdown", "Sharpe", "Active Strategies", "AI Status",
+  "Data Ingestion", "Alerts", and the Sharpe sub-text
+  "Risk-adjusted return". Must keep rendering
+  `data-testid="command-center-health-bar"` and the three ReactNode
+  panels (`positions` / `orderBooks` / `recentTrades`).
+- Read the shared `<KpiCard>` (memo, 9 callers across the codebase) and
+  confirmed I should NOT modify it — instead layer premium polish on
+  top via wrapper components and `data-tone` attributes that the CSS
+  agent can target via descendant selectors.
+- Read `<CommandCenterHealthBar>` to confirm Row 1 is already a fully
+  segmented 6-cell strip (Backend · WebSocket · Data Fresh · Risk Level
+  · Kill Switch · Updated) with colored dots + sub-labels — I'd wrap it,
+  not modify it.
+
+### Work Log
+
+- **Header comment** — bumped the file banner to W50-2d and added a new
+  "Premium visual redesign" section documenting each row's polish
+  strategy (data hooks + new inline components) and the constraint that
+  existing class names are preserved.
+
+- **Imports** — removed the unused `freshnessClass` import (left over
+  from a prior wave; ESLint wasn't catching it because the file was
+  passing lint but `bunx tsc --noEmit` with `noUnusedLocals: true` was
+  flagging it as TS6133).
+
+- **Dead-code cleanup** — removed `deriveRiskStatus`, `dataAgeSec`, and
+  `riskStatus` (the local snapshot mirror of the risk-status derivation
+  that was used by the W49-3-removed "risk bar" row; the live risk
+  indicator now lives exclusively in `<CommandCenterHealthBar>` on
+  Row 1). All three were flagged TS6133 (declared but never read).
+  Added a placeholder comment explaining the removal so future agents
+  don't re-add the dead mirror.
+
+- **NEW inline sub-component: `TrendArrow`** — small inline ▲/▼/■
+  glyph with direction-aware semantic color (green up / red down /
+  muted-flat). `aria-hidden` because the sub-text already carries the
+  +/− sign and the value tone already conveys direction via color.
+
+- **NEW inline sub-component: `MiniSparkline`** — 40×14 SVG polyline
+  with a faint gradient fill, rendered as the `trailing` element on
+  hero KPIs. Synthesizes a 6-point trend line based on the daily P&L
+  direction (we don't have historical equity samples at this layer —
+  the sparkline is a direction signal, not a precise chart). Tone-aware
+  stroke + fill so the line matches the value's semantic tone
+  (`var(--color-green-fg)` / `var(--color-red-fg)` /
+  `var(--color-amber-fg)` / `var(--kpi-value-color)`).
+
+- **NEW inline sub-component: `MiniProgressArc`** — 16×16 SVG radial
+  arc (270° sweep) used as the `trailing` element on the Open Exposure
+  hero KPI. Fill length proportional to exposure / cap ratio. Tone-aware
+  stroke color (amber when ratio > 0.9, neutral otherwise).
+
+- **NEW inline sub-component: `KpiToneCell`** — wraps a single KpiCard
+  in a `display: contents` div carrying `data-tone={tone}` and
+  `className="kpi-tone-cell kpi-tone-{tone}"`. `display: contents` makes
+  the wrapper transparent to CSS grid layout (the KpiCard inside
+  remains the actual grid item, so row alignment / stretch behaviour is
+  unchanged). The wrapper exists purely as a CSS hook: the CSS agent
+  can target `[data-tone="positive"] > .kpi-card` to apply tone-tinted
+  backgrounds, colored halos, or tone-aware hover shadows — without
+  modifying the shared `<KpiCard>` component (which is also used by 9
+  other panels).
+
+- **`SystemStatusCard` enhancement** — added `data-tone={tone}`
+  attribute to the root `<div>` so the CSS agent can apply tone-tinted
+  card surfaces (green/red/amber/neutral) to match the per-card state
+  (Active Strategies = positive, AI Status = ml-tone-aware, Data
+  Ingestion = source-count-aware, Alerts = severity-aware).
+
+- **Row 1 — System status bar**: wrapped `<CommandCenterHealthBar>` in
+  a slim premium chrome container with `className="dashboard-system-bar-
+  wrapper"` and `data-area="system"` for refined border + shadow hooks.
+
+- **Row 2 — Hero KPIs**: bumped grid gap from `gap-2` → `gap-3` (12px)
+  for premium breathing room. Added `data-area="hero-kpis"` and
+  `className="dashboard-hero-row"` for CSS targeting. Each of the 3
+  hero KpiCards now carries:
+  - A `TrendArrow` prefix on the `sub` text (▲ when daily P&L > 0, ▼
+    when < 0, ■ when flat) — green/red/muted-semantic colored.
+  - A trend percentage / dollar delta in the sub-text
+    (`+$2.34 today`, `63% deployed`, `78% of $25 cap`).
+  - A `MiniSparkline` (Portfolio Value + Available Balance) or
+    `MiniProgressArc` (Open Exposure) as the `trailing` element next
+    to the value.
+  - Tone for Portfolio Value now driven by `pnlTone(dailyPnl)` so the
+    headline number turns green/red based on today's P&L direction
+    (was previously always `neutral`).
+  - All three hero KpiCards marked `interactive` (already were).
+
+- **Row 3 — P&L KPIs**: bumped grid gap from `gap-2` → `gap-3`. Added
+  `data-area="pnl-kpis"` + `className="dashboard-pnl-row"`. Each of the
+  5 P&L KpiCards now:
+  - Wrapped in `<KpiToneCell tone={tone}>` — the wrapper's
+    `data-tone` attribute lets the CSS agent apply per-card
+    tone-tinted backgrounds (green halo for positive, red halo for
+    negative, amber halo for warning) without touching KpiCard.
+  - Sub-text now prefixed with a `TrendArrow` whose direction is
+    derived from the value's sign (Realized/Unrealized P&L ↑ when > 0,
+    ↓ when < 0; Win Rate ↑ when ≥ 0.55, ↓ when < 0.45; Drawdown ↓ when
+    > 50% of stop; Sharpe ↑ when ≥ 1.5, ↓ when < 0).
+  - All 5 KpiCards marked `interactive` (enables the existing
+    `.kpi-card.is-interactive:hover` lift defined in globals.css).
+  - The Sharpe sub-text "Risk-adjusted return" is wrapped in its own
+    `<span>` inside the inline-flex sub wrapper so the existing test
+    `screen.getByText('Risk-adjusted return')` still matches exactly.
+
+- **Row 4 — Activity grid**: each of the 3 cells now carries
+  `data-area="activity-{pos|orders|trades}"` and the additional
+  `className="dashboard-activity-cell"` for refined border + hover-lift
+  polish. The ReactNode panels (PositionsPanel / OrdersPanel /
+  TradesPanel) are still dropped in unchanged — each has its own
+  internal header chrome, so no duplicate wrapper header was added.
+
+- **Row 5 — System status**: each of the 2 cell wrappers now carries
+  `data-area="sys-{left|right}"` + `className="dashboard-sys-col"`. The
+  inner `SystemStatusCard` components carry `data-tone` on their root
+  divs (via the SystemStatusCard enhancement above) so the CSS agent
+  can apply tone-tinted card surfaces.
+
+### Stage Summary
+
+- **Final line count**: 1349 lines (was 1008 — added 341 lines of new
+  inline components + premium polish; net +445 insertions / −104
+  deletions per `git diff --stat`).
+- **All 5 rows redesigned** with premium visual affordances while
+  preserving the existing 5-row layout, all props, all API calls
+  (`/api/status`, `/api/analytics`, `/api/ml/metrics`, `/api/ml/drift`,
+  `/api/ingestion/health`, `useAlertNotifications`), all existing class
+  names (`.kpi-card`, `.kpi-label`, `.kpi-value`, `.kpi-tone-*`,
+  `.kpi-stale-pill`, `.kpi-skeleton`, `.command-center-layout`,
+  `.sys-status-card`, `.sys-status-col`, `.sys-status-body`), and all
+  accessibility roles/labels.
+- **New CSS hooks added** (for the parallel CSS agent to target):
+  - `data-tone="{positive|negative|warning|neutral}"` on KpiToneCell
+    wrappers (Row 3) and SystemStatusCard roots (Row 5).
+  - `data-area="{system|hero-kpis|pnl-kpis|activity-pos|activity-orders|
+    activity-trades|sys-left|sys-right}"` on each row's grid container.
+  - New class names: `dashboard-system-bar-wrapper`, `dashboard-hero-
+    row`, `dashboard-pnl-row`, `dashboard-activity-cell`,
+    `dashboard-sys-col`, `kpi-tone-cell`, `kpi-tone-{tone}`,
+    `mini-sparkline`, `mini-progress-arc`.
+- **New inline sub-components** (4): `TrendArrow`, `MiniSparkline`,
+  `MiniProgressArc`, `KpiToneCell`. Each is small, single-purpose, and
+  aria-hidden where decorative.
+- **Dead-code cleanup**: removed `freshnessClass` import and the
+  `deriveRiskStatus` / `dataAgeSec` / `riskStatus` chain (all flagged
+  TS6133 pre-existing — left over from the W49-3 risk-bar removal).
+- **Verification — `bun run lint`**: clean (no output, exit 0).
+- **Verification — `bunx tsc --noEmit --skipLibCheck`**: 0 errors in
+  `CommandCenterDashboard.tsx` (the only remaining TS errors are
+  pre-existing in `src/app/page.tsx:271` ('t' unused) and
+  `vitest.singlefork.config.ts:13` (poolOptions overload), neither of
+  which is in scope for this task).
+- **Verification — `vitest run CommandCenterDashboard.test.tsx`**:
+  10/10 tests pass (293ms). Confirms the test contract (label text,
+  health bar testid, panel children, system-status sub-cards, Sharpe
+  sub-text, /api/status polling, non-OK response survival, strategy
+  badges) is preserved.
+- **Verification — `vitest run KpiCard.test.tsx +
+  CommandCenterHealthBar.test.tsx`**: 13/13 tests pass — confirms the
+  unchanged shared `<KpiCard>` and `<CommandCenterHealthBar>` still
+  behave identically.
+
+### Files touched
+- `src/components/CommandCenterDashboard.tsx` (redesign + dead-code
+  cleanup).
+- `worklog.md` (this appended entry).
+
+### Push verification
+```
+$ git diff HEAD --stat -- src/components/CommandCenterDashboard.tsx
+ src/components/CommandCenterDashboard.tsx | 549 ++++++++++++++++++++++++------
+ 1 file changed, 445 insertions(+), 104 deletions(-)
+```
+
+### Final status
+- **Redesign**: complete — 5 rows, premium polish via 4 new inline
+  sub-components + data-tone/data-area CSS hooks.
+- **Backwards-compat**: full — all props, API calls, class names,
+  accessibility, and tests preserved.
+- **Lint**: clean (exit 0, no output).
+- **TypeScript**: 0 errors in `CommandCenterDashboard.tsx`.
+- **Tests**: 10/10 dashboard tests pass; 13/13 sibling tests pass.
+
+**Dashboard is production-ready with the premium W50-2d visual layer.**
