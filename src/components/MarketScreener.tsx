@@ -1,5 +1,36 @@
 // components/MarketScreener.tsx — Multi-factor Prediction Market Screener
 //
+// W49-4 — pro-trading redesign:
+//   • Filter chips switched to the design-system `.filter-chip` class
+//     (with `.active` state) for category + AI confidence + edge +
+//     resolution. Visually consistent with the MarketsPanel.
+//   • Search input gets a leading Lucide `Search` icon. Placeholder
+//     kept as "Search Polymarket events…" so the W22-2 test
+//     `getByLabelText(/Search prediction market events/i)` still
+//     resolves (aria-label preserved).
+//   • Sortable columns + Lucide `ArrowUp` / `ArrowDown` sort
+//     indicators on Volume, Liquidity, AI Conf, Score, Edge, and
+//     Resolution headers. Click toggles asc/desc. The default sort
+//     is by Score (descending) so the highest-opportunity markets
+//     surface to the top on first render.
+//   • NEW "AI Conf" column (per-row percentage) — surfaces the
+//     W38-4-derived AI confidence so a trader can scan conviction
+//     across the visible result set without hovering each row.
+//   • Volume + Liquidity formatting switched from `fmtUsd` (which
+//     always renders full digits like "$1,234") to `fmtCompact`
+//     ("1.2K" / "3.4M") per the W49-4 "Human-readable (1.2K, 3.4M)"
+//     spec. Tooltip preserves the full-precision value.
+//   • Opportunity score tooltip still shows the transparent formula
+//     breakdown (per-factor weighted points) on hover — W38-4 kept
+//     intact.
+//   • "Reset all" button kept (named "Reset all" not "Clear all" so
+//     the W22-2 `getByRole('button', { name: /clear/i })` assertion
+//     returns exactly one element after typing a search — the
+//     Clear button next to the search input remains the only match).
+//   • Result-count summary "Showing X of Y markets" badge kept
+//     (wording tightened to "Showing X of Y Markets" so the existing
+//     W22-2 test regex `/N of M Markets/i` still resolves).
+//
 // W39-4 — markets/screener readability + filter UX pass:
 //   • Active-filter summary bar between the chip rows and the table.
 //     Lists each active filter as a removable chip (click to clear that
@@ -47,8 +78,9 @@
 'use client'
 
 import { useEffect, useState, useRef, useCallback, useMemo } from 'react'
+import { Search as SearchIcon, ArrowUp, ArrowDown } from 'lucide-react'
 import { getApiUrl, apiFetch } from '@/lib/api'
-import { fmtUsd, fmtAge } from '@/lib/design-tokens'
+import { fmtUsd, fmtAge, fmtCompact } from '@/lib/design-tokens'
 
 interface MarketItem {
   id?: string
@@ -382,6 +414,20 @@ export default function MarketScreener({ onSelectMarket, onQuickTrade }: Props) 
   const [edgeFilter, setEdgeFilter] = useState<EdgeFilter>('ALL')
   const [resolutionFilter, setResolutionFilter] = useState<ResolutionFilter>('ALL')
 
+  // W49-4 — sort state. Default sort is by score (descending) so the
+  // highest-opportunity markets surface to the top on first render.
+  // The trader can click any sortable header to toggle asc/desc.
+  type SortField = 'title' | 'volume' | 'liquidity' | 'aiConfidence' | 'score' | 'edge' | 'resolution'
+  const [sortBy, setSortBy] = useState<SortField>('score')
+  const [sortAsc, setSortAsc] = useState(false)
+  const handleSort = (field: SortField) => {
+    if (sortBy === field) setSortAsc((a) => !a)
+    else {
+      setSortBy(field)
+      setSortAsc(false)
+    }
+  }
+
   const searchRef = useRef(search)
   searchRef.current = search
 
@@ -457,6 +503,45 @@ export default function MarketScreener({ onSelectMarket, onQuickTrade }: Props) 
   // exposes the raw MarketItem shape for the test "3 of 3 Markets" badge.
   // The header badge counts the post-filter set.
   const filteredMarkets = useMemo(() => filteredScored.map((s) => s.market), [filteredScored])
+
+  // W49-4 — Apply the user's column sort to the filtered set. Default
+  // sort is by score (descending) so the highest-opportunity markets
+  // surface to the top on first render. Each field has a numeric
+  // comparator except 'title' which is locale-aware alphabetical.
+  const sortedScored = useMemo(() => {
+    const dir = sortAsc ? 1 : -1 // desc by default
+    const arr = [...filteredScored]
+    arr.sort((a, b) => {
+      let diff = 0
+      switch (sortBy) {
+        case 'title':
+          diff = a.title.localeCompare(b.title)
+          break
+        case 'volume':
+          diff = a.volume - b.volume
+          break
+        case 'liquidity':
+          diff = a.liquidity - b.liquidity
+          break
+        case 'aiConfidence':
+          diff = a.aiConfidence - b.aiConfidence
+          break
+        case 'score':
+          diff = a.score - b.score
+          break
+        case 'edge':
+          diff = a.edgeCents - b.edgeCents
+          break
+        case 'resolution':
+          diff = (a.daysToResolution ?? Infinity) - (b.daysToResolution ?? Infinity)
+          break
+        default:
+          diff = 0
+      }
+      return diff * dir
+    })
+    return arr
+  }, [filteredScored, sortBy, sortAsc])
 
   // W38-4 — opportunity score tooltip: full breakdown per factor.
   // Rendered as the title attribute on the score badge so hover reveals
@@ -535,15 +620,23 @@ export default function MarketScreener({ onSelectMarket, onQuickTrade }: Props) 
           </button>
         </div>
 
+        {/* W49-4 — Search form with leading Search icon. */}
         <form onSubmit={handleSearch} className="flex items-center gap-2">
-          <input
-            type="text"
-            placeholder="Search Polymarket events…"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            className="input input-sm w-56 text-xs bg-[#0e1015] border border-[#1f2335]"
-            aria-label="Search prediction market events"
-          />
+          <div className="relative">
+            <SearchIcon
+              className="absolute left-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-[#7e8aaa] pointer-events-none"
+              aria-hidden="true"
+            />
+            <input
+              type="text"
+              placeholder="Search Polymarket events…"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              className="input input-sm w-56 text-xs bg-[#0e1015] border border-[#1f2335] pl-7"
+              aria-label="Search prediction market events"
+              data-testid="screener-search-input"
+            />
+          </div>
           <button type="submit" className="btn btn-primary btn-sm" disabled={loading}>
             {loading ? <span className="spinner" aria-hidden="true" /> : 'Search'}
           </button>
@@ -560,22 +653,17 @@ export default function MarketScreener({ onSelectMarket, onQuickTrade }: Props) 
         </form>
       </div>
 
-      {/* Category Chips Filter Bar — with W39-4 inline refetch spinner.
-          When `loading` is true AND we already have rows on screen,
-          show a small spinner at the right edge of the chip row so a
-          trader sees the refetch is in flight without losing the
-          visible rows. (The full-panel "Scanning Polymarket…" skeleton
-          only fires on the initial load when markets.length === 0.) */}
+      {/* W49-4 — Category chips via `.filter-chip` class. */}
       <div className="flex items-center gap-1.5 px-4 py-2 bg-[#0e1015] border-b border-[#1f2335] overflow-x-auto scrollbar-thin">
         {CATEGORY_CHIPS.map((cat) => (
           <button
             key={cat}
             onClick={() => setSelectedCategory(cat)}
-            className={`px-2.5 py-1 rounded text-[10.5px] font-bold uppercase transition-all ${
-              selectedCategory === cat
-                ? 'bg-blue-500/20 text-cyan-300 border border-blue-500/40'
-                : 'text-[#7e8aaa] hover:text-[#dde1ed] bg-[#13161e] border border-[#1f2335]'
+            className={`filter-chip text-[10.5px] uppercase ${
+              selectedCategory === cat ? 'active' : ''
             }`}
+            aria-pressed={selectedCategory === cat}
+            data-testid={`screener-category-${cat.toLowerCase()}`}
           >
             {cat}
           </button>
@@ -592,7 +680,7 @@ export default function MarketScreener({ onSelectMarket, onQuickTrade }: Props) 
         )}
       </div>
 
-      {/* W38-4 — Additional factor filter chips: AI confidence, edge, time-to-resolution */}
+      {/* W49-4 — Additional factor filter chips via `.filter-chip` class. */}
       <div className="flex items-center gap-3 px-4 py-2 bg-[#0e1015]/60 border-b border-[#1f2335] overflow-x-auto scrollbar-thin text-[10px]">
         <div className="flex items-center gap-1.5">
           <span className="text-[#7e8aaa] uppercase font-bold tracking-wider mr-0.5" aria-hidden="true">AI Conf</span>
@@ -602,10 +690,8 @@ export default function MarketScreener({ onSelectMarket, onQuickTrade }: Props) 
               onClick={() => setAiConfidenceFilter(f.key)}
               title={f.title}
               aria-pressed={aiConfidenceFilter === f.key}
-              className={`px-1.5 py-0.5 rounded text-[10px] font-bold uppercase transition-all ${
-                aiConfidenceFilter === f.key
-                  ? 'bg-fuchsia-500/20 text-fuchsia-300 border border-fuchsia-500/40'
-                  : 'text-[#7e8aaa] hover:text-[#dde1ed] bg-[#13161e] border border-[#1f2335]'
+              className={`filter-chip text-[10px] uppercase ${
+                aiConfidenceFilter === f.key ? 'active' : ''
               }`}
               data-testid={`ai-conf-filter-${f.key.toLowerCase()}`}
             >
@@ -622,10 +708,8 @@ export default function MarketScreener({ onSelectMarket, onQuickTrade }: Props) 
               onClick={() => setEdgeFilter(f.key)}
               title={f.title}
               aria-pressed={edgeFilter === f.key}
-              className={`px-1.5 py-0.5 rounded text-[10px] font-bold uppercase transition-all ${
-                edgeFilter === f.key
-                  ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
-                  : 'text-[#7e8aaa] hover:text-[#dde1ed] bg-[#13161e] border border-[#1f2335]'
+              className={`filter-chip text-[10px] uppercase ${
+                edgeFilter === f.key ? 'active' : ''
               }`}
               data-testid={`edge-filter-${f.key.toLowerCase()}`}
             >
@@ -642,10 +726,8 @@ export default function MarketScreener({ onSelectMarket, onQuickTrade }: Props) 
               onClick={() => setResolutionFilter(f.key)}
               title={f.title}
               aria-pressed={resolutionFilter === f.key}
-              className={`px-1.5 py-0.5 rounded text-[10px] font-bold uppercase transition-all ${
-                resolutionFilter === f.key
-                  ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
-                  : 'text-[#7e8aaa] hover:text-[#dde1ed] bg-[#13161e] border border-[#1f2335]'
+              className={`filter-chip text-[10px] uppercase ${
+                resolutionFilter === f.key ? 'active' : ''
               }`}
               data-testid={`resolution-filter-${f.key.toLowerCase()}`}
             >
@@ -801,39 +883,163 @@ export default function MarketScreener({ onSelectMarket, onQuickTrade }: Props) 
           <table className="data-table" role="table" aria-label="Prediction market screener results">
             <thead>
               <tr>
-                <th scope="col" className="min-w-[260px] text-left">Market Event</th>
+                {/* W49-4 — Market Event header now sortable (alphabetical). */}
+                <th
+                  scope="col"
+                  onClick={() => handleSort('title')}
+                  className="min-w-[260px] text-left cursor-pointer hover:text-white select-none"
+                  title="Sort by market event name"
+                  aria-sort={sortBy === 'title' ? (sortAsc ? 'ascending' : 'descending') : 'none'}
+                >
+                  <span className="inline-flex items-center gap-1">
+                    Market Event
+                    {sortBy === 'title' ? (
+                      sortAsc
+                        ? <ArrowUp className="w-2.5 h-2.5" aria-hidden="true" />
+                        : <ArrowDown className="w-2.5 h-2.5" aria-hidden="true" />
+                    ) : (
+                      <span className="w-2.5 h-2.5 inline-block" aria-hidden="true" />
+                    )}
+                  </span>
+                </th>
                 <th scope="col" className="text-left">Category</th>
                 {/* W39-4 — explicit `text-right` on the numeric Volume +
                     Liquidity headers (previously relied on the default
                     left-align). Aligns with the rest of the numeric
-                    columns (Score, Edge, Resolution, Action). */}
-                <th scope="col" className="text-right">24h Volume</th>
-                <th scope="col" className="text-right">Liquidity</th>
+                    columns (Score, Edge, Resolution, Action).
+                    W49-4 — Volume + Liquidity headers now sortable; the
+                    cell formatting switched to `fmtCompact` (1.2K / 3.4M)
+                    per the W49-4 spec. Tooltip preserves the full value. */}
+                <th
+                  scope="col"
+                  onClick={() => handleSort('volume')}
+                  className="text-right cursor-pointer hover:text-white select-none"
+                  title="Sort by 24h volume"
+                  aria-sort={sortBy === 'volume' ? (sortAsc ? 'ascending' : 'descending') : 'none'}
+                >
+                  <span className="inline-flex items-center gap-1">
+                    24h Volume
+                    {sortBy === 'volume' ? (
+                      sortAsc
+                        ? <ArrowUp className="w-2.5 h-2.5" aria-hidden="true" />
+                        : <ArrowDown className="w-2.5 h-2.5" aria-hidden="true" />
+                    ) : (
+                      <span className="w-2.5 h-2.5 inline-block" aria-hidden="true" />
+                    )}
+                  </span>
+                </th>
+                <th
+                  scope="col"
+                  onClick={() => handleSort('liquidity')}
+                  className="text-right cursor-pointer hover:text-white select-none"
+                  title="Sort by liquidity"
+                  aria-sort={sortBy === 'liquidity' ? (sortAsc ? 'ascending' : 'descending') : 'none'}
+                >
+                  <span className="inline-flex items-center gap-1">
+                    Liquidity
+                    {sortBy === 'liquidity' ? (
+                      sortAsc
+                        ? <ArrowUp className="w-2.5 h-2.5" aria-hidden="true" />
+                        : <ArrowDown className="w-2.5 h-2.5" aria-hidden="true" />
+                    ) : (
+                      <span className="w-2.5 h-2.5 inline-block" aria-hidden="true" />
+                    )}
+                  </span>
+                </th>
+                {/* W49-4 — NEW AI Conf column. Surfaces the W38-4-derived
+                    AI confidence as a per-row percentage so a trader can
+                    scan conviction across the visible result set. Sortable. */}
+                <th
+                  scope="col"
+                  onClick={() => handleSort('aiConfidence')}
+                  className="text-right cursor-pointer hover:text-white select-none"
+                  title="Sort by AI confidence (derived from volume + liquidity when upstream doesn't supply one)"
+                  aria-sort={sortBy === 'aiConfidence' ? (sortAsc ? 'ascending' : 'descending') : 'none'}
+                >
+                  <span className="inline-flex items-center gap-1">
+                    AI Conf
+                    {sortBy === 'aiConfidence' ? (
+                      sortAsc
+                        ? <ArrowUp className="w-2.5 h-2.5" aria-hidden="true" />
+                        : <ArrowDown className="w-2.5 h-2.5" aria-hidden="true" />
+                    ) : (
+                      <span className="w-2.5 h-2.5 inline-block" aria-hidden="true" />
+                    )}
+                  </span>
+                </th>
                 {/* W38-4 — Opportunity Score column. Tooltip on the
                     header explains the formula; tooltip on each badge
-                    shows the per-factor breakdown. */}
-                <th scope="col" className="text-right" title="Opportunity Score = 0.35·liquidity + 0.30·volume + 0.15·spread + 0.10·AI_conf + 0.10·resolution (each factor min-max normalized 0..1, then weighted, scaled to 100). Hover any badge for the breakdown.">
-                  Score
+                    shows the per-factor breakdown. W49-4 — sortable. */}
+                <th
+                  scope="col"
+                  onClick={() => handleSort('score')}
+                  className="text-right cursor-pointer hover:text-white select-none"
+                  title="Opportunity Score = 0.35·liquidity + 0.30·volume + 0.15·spread + 0.10·AI_conf + 0.10·resolution (each factor min-max normalized 0..1, then weighted, scaled to 100). Hover any badge for the breakdown."
+                  aria-sort={sortBy === 'score' ? (sortAsc ? 'ascending' : 'descending') : 'none'}
+                >
+                  <span className="inline-flex items-center gap-1">
+                    Score
+                    {sortBy === 'score' ? (
+                      sortAsc
+                        ? <ArrowUp className="w-2.5 h-2.5" aria-hidden="true" />
+                        : <ArrowDown className="w-2.5 h-2.5" aria-hidden="true" />
+                    ) : (
+                      <span className="w-2.5 h-2.5 inline-block" aria-hidden="true" />
+                    )}
+                  </span>
                 </th>
-                {/* W38-4 — Edge column shows derived theoretical edge in cents. */}
-                <th scope="col" className="text-right" title="Theoretical edge in cents (heuristic: 5 × volume / liquidity, clamped to 0–10¢)">
-                  Edge
+                {/* W38-4 — Edge column shows derived theoretical edge in cents.
+                    W49-4 — sortable. */}
+                <th
+                  scope="col"
+                  onClick={() => handleSort('edge')}
+                  className="text-right cursor-pointer hover:text-white select-none"
+                  title="Theoretical edge in cents (heuristic: 5 × volume / liquidity, clamped to 0–10¢). Click to sort."
+                  aria-sort={sortBy === 'edge' ? (sortAsc ? 'ascending' : 'descending') : 'none'}
+                >
+                  <span className="inline-flex items-center gap-1">
+                    Edge
+                    {sortBy === 'edge' ? (
+                      sortAsc
+                        ? <ArrowUp className="w-2.5 h-2.5" aria-hidden="true" />
+                        : <ArrowDown className="w-2.5 h-2.5" aria-hidden="true" />
+                    ) : (
+                      <span className="w-2.5 h-2.5 inline-block" aria-hidden="true" />
+                    )}
+                  </span>
                 </th>
-                {/* W38-4 — Time to resolution column. */}
-                <th scope="col" className="text-right" title="Days until market resolution (from endDate if present)">
-                  Resolution
+                {/* W38-4 — Time to resolution column. W49-4 — sortable. */}
+                <th
+                  scope="col"
+                  onClick={() => handleSort('resolution')}
+                  className="text-right cursor-pointer hover:text-white select-none"
+                  title="Days until market resolution (from endDate if present). Click to sort."
+                  aria-sort={sortBy === 'resolution' ? (sortAsc ? 'ascending' : 'descending') : 'none'}
+                >
+                  <span className="inline-flex items-center gap-1">
+                    Resolution
+                    {sortBy === 'resolution' ? (
+                      sortAsc
+                        ? <ArrowUp className="w-2.5 h-2.5" aria-hidden="true" />
+                        : <ArrowDown className="w-2.5 h-2.5" aria-hidden="true" />
+                    ) : (
+                      <span className="w-2.5 h-2.5 inline-block" aria-hidden="true" />
+                    )}
+                  </span>
                 </th>
                 <th scope="col" className="text-right">Action</th>
               </tr>
             </thead>
             <tbody>
-              {filteredScored.length === 0 ? (
+              {sortedScored.length === 0 ? (
                 // W38-4 — improved empty state. Shows the active filter
                 // context + a reset button so the trader can tell whether
                 // they over-constrained the view vs. the upstream
                 // actually being empty.
                 <tr>
-                  <td colSpan={8} className="text-center py-10 text-[#7e8aaa] text-xs">
+                  {/* W49-4 — colSpan bumped 8 → 9 to account for the new
+                      AI Conf column. */}
+                  <td colSpan={9} className="text-center py-10 text-[#7e8aaa] text-xs">
                     <div className="flex flex-col items-center gap-2">
                       <span className="text-2xl" aria-hidden="true">🔍</span>
                       <div className="text-[#dde1ed] font-semibold">
@@ -867,7 +1073,7 @@ export default function MarketScreener({ onSelectMarket, onQuickTrade }: Props) 
                   </td>
                 </tr>
               ) : (
-                filteredScored.map((s, i) => (
+                sortedScored.map((s, i) => (
                   <tr
                     key={i}
                     onClick={() => onSelectMarket && onSelectMarket(s.tokenId, s.market.slug)}
@@ -903,14 +1109,43 @@ export default function MarketScreener({ onSelectMarket, onQuickTrade }: Props) 
                         {s.market.category || 'general'}
                       </span>
                     </td>
-                    {/* W39-4 — explicit `text-right` on the numeric
-                        Volume + Liquidity cells to match the headers
-                        and the other numeric columns. */}
-                    <td className="mono text-cyan-400 font-medium text-right tabular-nums align-middle">
-                      {fmtUsd(s.volume, 0)}
+                    {/* W49-4 — Volume + Liquidity cells now use `fmtCompact`
+                        (1.2K / 3.4M) per the W49-4 "Human-readable"
+                        spec. Tooltip preserves the full-precision value
+                        via `fmtUsd` so a trader can hover to read the
+                        exact dollar amount. */}
+                    <td
+                      className="mono text-cyan-400 font-medium text-right tabular-nums align-middle"
+                      title={`${fmtUsd(s.volume, 0)} (full precision)`}
+                    >
+                      {fmtCompact(s.volume)}
                     </td>
-                    <td className="mono text-[#7e8aaa] text-right tabular-nums align-middle">
-                      {fmtUsd(s.liquidity, 0)}
+                    <td
+                      className="mono text-[#7e8aaa] text-right tabular-nums align-middle"
+                      title={`${fmtUsd(s.liquidity, 0)} (full precision)`}
+                    >
+                      {fmtCompact(s.liquidity)}
+                    </td>
+                    {/* W49-4 — NEW AI Conf column. Per-row percentage
+                        derived from the W38-4 `deriveAiConfidence`
+                        helper. Coloured by conviction bucket: high
+                        (≥70%) emerald, mid (50–70%) amber, low (<50%)
+                        muted so a trader can scan conviction at a
+                        glance. Tooltip shows the exact value. */}
+                    <td className="text-right align-middle">
+                      <span
+                        className={`mono text-[10.5px] font-bold px-1.5 py-0.5 rounded border inline-block tabular-nums ${
+                          s.aiConfidence >= 0.7
+                            ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/40'
+                            : s.aiConfidence >= 0.5
+                              ? 'bg-amber-500/15 text-amber-300 border-amber-500/40'
+                              : 'bg-slate-500/15 text-slate-300 border-slate-500/40'
+                        }`}
+                        title={`AI confidence: ${(s.aiConfidence * 100).toFixed(1)}% (derived from volume + liquidity when upstream doesn't supply one)`}
+                        data-testid={`ai-conf-${i}`}
+                      >
+                        {(s.aiConfidence * 100).toFixed(0)}%
+                      </span>
                     </td>
                     {/* W38-4 — Opportunity Score badge with full breakdown
                         in the tooltip (transparent formula). */}

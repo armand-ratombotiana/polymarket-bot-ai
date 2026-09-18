@@ -1,22 +1,37 @@
 // components/ConfirmationDialog.tsx — Reusable confirmation dialog
 // Required for all destructive financial actions.
 //
-// W39-5 — Redesigned to meet the "every destructive action shows" checklist:
-//   • Clear warning icon (per-severity: 🛑 danger / ⚠️ warning / ℹ️ info)
-//   • Action description in plain language (e.g., "Close position for BTC-YES?")
-//   • Impact summary banner (e.g., "Size: 10 shares, Estimated proceeds: $5.50")
-//   • Optional risk warning (additional banner above the actions footer)
-//   • Cancel + Confirm buttons with severity-tinted confirm
-//   • Loading state during action (existing `loading` prop OR internal
-//     pending state when `onConfirm` returns a Promise)
-//   • Success/error feedback (inline banner after the action resolves;
-//     auto-dismisses on success after 1.2s)
+// W49-5 — Operational-clarity polish on top of the W39-5 redesign.
+// The W39-5 redesign introduced the impact-summary + risk-warning +
+// success/error banner system. W49-5 makes three small refinements
+// without changing the prop surface or any test contract:
 //
-// Backwards-compat: every existing prop (open, severity, title, description,
-// impact, confirmLabel, cancelLabel, onConfirm, onCancel, loading) keeps the
-// same shape + behaviour. Existing tests pass unchanged — `onConfirm` may
-// return a Promise OR void; when sync, the wrapper still resolves a
-// synthetic microtask so the "called exactly once" assertion holds.
+//   • Impact banner no longer duplicates the severity icon — the
+//     header already shows the per-severity icon (🛑 / ⚠️ / ℹ️) at
+//     larger size; rendering the same glyph a second time in the
+//     impact banner is visually noisy. Replaced with a small bold
+//     "IMPACT" label so the trader reads "IMPACT: Size: 10 shares…"
+//     instead of "🛑 Size: 10 shares…" (which collides with the
+//     header's "🛑 Close Position?"). The impact text remains a leaf
+//     text node (wrapped in its own <span>) so the existing test
+//     `getByText('This will cancel 5 open orders')` keeps matching.
+//
+//   • Risk warning banner tightened — now uses an explicit "⚠ RISK:"
+//     label (the previous "Risk:" label was visually weak). The
+//     warning text is wrapped in its own <span> for the same
+//     test-contract reason.
+//
+//   • Header accent border — the dialog header now has a 2px-tall
+//     severity-tinted accent stripe under the title block so the
+//     dialog's gravity is unambiguous (danger = red, warning =
+//     amber, info = blue). Purely cosmetic — no behavioural change.
+//
+// W39-5 (unchanged behaviour) — every existing prop (open, severity,
+// title, description, impact, confirmLabel, cancelLabel, onConfirm,
+// onCancel, loading) keeps the same shape + behaviour. Existing tests
+// pass unchanged — `onConfirm` may return a Promise OR void; when
+// sync, the wrapper still resolves a synthetic microtask so the
+// "called exactly once" assertion holds.
 'use client'
 
 import { useCallback, useEffect, useRef, useState } from 'react'
@@ -33,10 +48,11 @@ interface ConfirmationDialogProps {
   /** Optional impact summary (e.g., "This will cancel 5 open orders") */
   impact?: string
   /**
-   * W39-5 — optional secondary risk warning rendered above the action
-   * footer. Use this to surface non-obvious downsides the trader should
-   * weigh before confirming (e.g., "Cancelling this order may forfeit
-   * queue priority on a thin book").
+   * W39-5/W49-5 — optional secondary risk warning rendered above the
+   * action footer. Use this to surface non-obvious downsides the trader
+   * should weigh before confirming (e.g., "This action cannot be
+   * undone. Cancelling a partial-fill order forfeits queue priority
+   * on a thin book").
    */
   riskWarning?: string
   confirmLabel?: string
@@ -70,6 +86,15 @@ const CONFIRM_COLORS: Record<Severity, string> = {
   danger:  'btn-danger',
   warning: 'btn-amber',
   info:    'btn-primary',
+}
+
+// W49-5 — header accent stripe color per severity. A 2px-tall div
+// rendered under the title block to give the dialog unambiguous
+// gravity (red for danger, amber for warning, blue for info).
+const ACCENT_STRIPE_CLASS: Record<Severity, string> = {
+  danger:  'bg-red-500/60',
+  warning: 'bg-amber-500/60',
+  info:    'bg-blue-500/60',
 }
 
 const RESULT_ICON: Record<ResultStatus, string> = {
@@ -264,7 +289,21 @@ export default function ConfirmationDialog({
           </div>
         </div>
 
-        {/* Impact summary */}
+        {/* W49-5 — severity-tinted accent stripe under the header.
+            Purely cosmetic: gives the dialog unambiguous gravity
+            (red for danger, amber for warning, blue for info). */}
+        <div
+          className={`h-0.5 w-full ${ACCENT_STRIPE_CLASS[severity]}`}
+          aria-hidden="true"
+        />
+
+        {/* Impact summary. W49-5: replaced the duplicated severity
+            icon (which collided with the header's icon and was
+            visually noisy) with a small bold "IMPACT" label. The
+            impact text is wrapped in its own <span> so the existing
+            test `getByText('This will cancel 5 open orders')` keeps
+            matching — the span's textContent is exactly the impact
+            string with no prefix/suffix. */}
         {impact && (
           <div className="modal-body" style={{ paddingTop: '12px', paddingBottom: '12px' }}>
             <div
@@ -272,15 +311,21 @@ export default function ConfirmationDialog({
               style={{ fontSize: '12.5px' }}
               role="note"
             >
-              <span aria-hidden="true">{ICONS[severity]}</span>
-              {impact}
+              <strong className="font-bold uppercase text-[10px] tracking-wider mr-1.5" aria-hidden="true">
+                Impact
+              </strong>
+              <span>{impact}</span>
             </div>
           </div>
         )}
 
-        {/* W39-5 — optional risk warning. Rendered ABOVE the action
-            footer so the trader reads the impact summary first, then
-            the explicit risk callout, then the action buttons. */}
+        {/* W39-5/W49-5 — optional risk warning. Rendered ABOVE the
+            action footer so the trader reads the impact summary
+            first, then the explicit risk callout, then the action
+            buttons. W49-5 tightens the label from "Risk:" to
+            "⚠ RISK:" for stronger visual weight. The warning text
+            is wrapped in its own <span> so it remains a leaf text
+            node. */}
         {riskWarning && (
           <div
             className="modal-body"
@@ -293,7 +338,8 @@ export default function ConfirmationDialog({
             >
               <span aria-hidden="true">⚠️</span>
               <span>
-                <strong style={{ fontWeight: 700 }}>Risk:</strong> {riskWarning}
+                <strong style={{ fontWeight: 700 }}>RISK:</strong>{' '}
+                <span>{riskWarning}</span>
               </span>
             </div>
           </div>

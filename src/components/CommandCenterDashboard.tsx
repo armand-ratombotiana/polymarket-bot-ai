@@ -1,47 +1,71 @@
-// components/CommandCenterDashboard.tsx — W39-3 Redesigned Command Center
+// components/CommandCenterDashboard.tsx — W39-3 / W49-3 Professional Trading
+// Dashboard.
 //
-// Replaces the prior single-strip metrics layout with a clear, professional
-// five-row trading dashboard hierarchy:
+// Replaces the prior five-row panel-grid assembly (which interleaved a
+// 3-KPI "risk bar" with a sidebar of EquityCurve + Analytics + ML) with
+// a clean, professional trading dashboard hierarchy:
 //
 //   ┌───────────────────────────────────────────────────────────────────────┐
-//   │ 1. System status bar (Backend · WS · Fresh · Risk · Kill · AI · TS)   │
+//   │ 1. System status bar (Backend · WS · Data Fresh · Risk · Kill · Time)  │
 //   ├───────────────────────────────────────────────────────────────────────┤
-//   │ 2. Top bar — Balance  ·  Available  ·  Exposure      (3 large KPIs)   │
+//   │ 2. Top bar — Portfolio Value  ·  Available Balance  ·  Open Exposure   │
+//   │     (3 large hero KPIs with trend sub-text + stale pills)             │
 //   ├───────────────────────────────────────────────────────────────────────┤
-//   │ 3. P&L row — Realized · Unrealized · Daily · Win % · DD (5 med KPIs)  │
-//   ├───────────────────────────────────────────────────────────────────────┤
-//   │ 4. Risk bar — Risk status · Kill switch · Max exposure used           │
-//   ├───────────────────┬───────────────────┬───────────────┬───────────────┤
-//   │ 5. Main grid      │                   │               │               │
-//   │   Active Positions │   Order Books     │ Recent Trades │  Sidebar:     │
-//   │   (left)          │   (center)         │ (right)       │  EquityCurve  │
-//   │                   │                   │               │  Analytics    │
-//   │                   │                   │               │  MLPanel      │
-//   └───────────────────┴───────────────────┴───────────────┴───────────────┘
+//   │ 3. P&L row — Realized · Unrealized · Win Rate · Drawdown · Sharpe     │
+//   │     (5 medium KPIs with color tones + loading skeletons)              │
+//   ├───────────────────────┬───────────────────────┬───────────────────────┤
+//   │ 4. Activity grid      │                       │                       │
+//   │   Active Positions    │   Order Books         │   Recent Trades       │
+//   │   (mini table)        │   (mini list)         │   (mini list)         │
+//   ├───────────────────────┴───────────────────────┴───────────────────────┤
+//   │ 5. System status (2 columns)                                          │
+//   │   Left:  Active Strategies  +  AI Status                               │
+//   │   Right: Data Ingestion   +  Alerts                                   │
+//   └───────────────────────────────────────────────────────────────────────┘
 //
-// Each KPI card uses the new <KpiCard> primitive — label (uppercase, small,
+// Each KPI card uses the <KpiCard> primitive — label (uppercase, small,
 // dimmed), value (large bold tabular-nums), sub-text (trend %, timestamp,
 // context), color tone (green/red/amber), loading skeleton, and stale
 // indicator all live in CSS utility classes declared in globals.css.
 //
 // Data sources:
-//   * `snapshot` prop — paper_balance, positions, daily_pnl, kill_switch
-//     (driven by the parent useBot hook).
+//   * `snapshot` prop — paper_balance, positions, daily_pnl, kill_switch,
+//     strategies (driven by the parent useBot hook).
 //   * `/api/status` — total_exposure, max_total_exposure, daily_loss_limit,
 //     drawdown_dollars, max_drawdown_limit.
 //   * `/api/analytics` — realized_pnl, unrealized_pnl, win_rate, total_trades,
-//     max_drawdown_pct.
+//     max_drawdown_pct, sharpe_ratio.
+//   * `/api/ml/metrics` — model_ready, brier_score, roc_auc, ece.
+//   * `/api/ml/drift` — drift PSI + status (drives AI Status tone).
+//   * `/api/ingestion/health` — source connection status + freshness.
+//   * `useAlertNotifications` — recent alert feed (drives Alerts list).
 //
-// The main-grid panels (MarketsPanel, PositionsPanel, TradesPanel, sidebar)
-// are received as ReactNode props so the parent page.tsx retains ownership
-// of the per-panel event handlers (cancel order, close position, open chart)
+// The activity-grid panels (PositionsPanel, MarketsPanel, TradesPanel) are
+// received as ReactNode props so the parent page.tsx retains ownership of
+// the per-panel event handlers (cancel order, close position, open chart)
 // and the panels' own useRealtimeData WS subscriptions stay singletons.
+//
+// W49-3 — Removed the third "risk bar" row (Risk Status · Kill Switch ·
+// Max Exposure) and the right-hand sidebar (EquityCurve + Analytics + ML).
+// The kill switch is already surfaced on Row 1 and on the TopStatusBar
+// above the dashboard; EquityCurve / Analytics / ML have their own
+// dedicated sidebar-nav sections. Row 5 replaces the sidebar with two
+// compact system-status columns so the trader can see strategy + AI
+// health + ingestion + alert state in a single glance.
 'use client'
 
-import { memo, useEffect, useMemo, useState, type CSSProperties, type ReactNode } from 'react'
-import { BotSnapshot, ConnectionStatus } from '@/hooks/useBot'
+import { memo, useEffect, useMemo, useState, type ReactNode } from 'react'
+import { BotSnapshot, ConnectionStatus, type MLState } from '@/hooks/useBot'
+import { useAlertNotifications, type Alert } from '@/hooks/useAlertNotifications'
 import { apiFetch } from '@/lib/api'
-import { fmtUsd, fmtPnl, fmtPct, fmtInt } from '@/lib/design-tokens'
+import {
+  fmtUsd,
+  fmtPnl,
+  fmtPct,
+  fmtInt,
+  fmtAge,
+  freshnessClass,
+} from '@/lib/design-tokens'
 import { KpiCard, type KpiTone } from '@/components/KpiCard'
 import CommandCenterHealthBar from '@/components/CommandCenterHealthBar'
 
@@ -66,6 +90,37 @@ interface AnalyticsPayload {
   max_drawdown_pct?: number
   peak_equity?: number
   sharpe_ratio?: number | null
+  active_strategies?: string[]
+}
+
+interface MLMetricsPayload {
+  model_ready?: boolean
+  brier_score?: number
+  roc_auc?: number
+  ece?: number
+  n_online_updates?: number
+}
+
+interface DriftPayload {
+  status?: string
+  psi?: number
+}
+
+interface IngestionSource {
+  id: string
+  name: string
+  status: 'connected' | 'disconnected' | 'reconnecting'
+  last_event_at: number | null
+}
+
+interface IngestionHealthPayload {
+  sources?: IngestionSource[]
+  metrics?: {
+    data_freshness_seconds?: number
+    events_per_minute?: number
+    avg_latency_ms?: number
+  }
+  generated_at?: number
 }
 
 // ── Polling hook ──────────────────────────────────────────────────────────
@@ -140,8 +195,39 @@ function staleFor(fetchedAt: number | null, threshMs = 30_000): boolean {
   return Date.now() - fetchedAt > threshMs
 }
 
+function fmtSharpe(v: number | null | undefined): string {
+  if (v == null || !Number.isFinite(v)) return '—'
+  return v.toFixed(2)
+}
+
+function sharpeTone(v: number | null | undefined): KpiTone {
+  if (v == null || !Number.isFinite(v)) return 'neutral'
+  if (v >= 1.5) return 'positive'
+  if (v < 0) return 'negative'
+  if (v < 0.5) return 'warning'
+  return 'neutral'
+}
+
+function mlToneFor(ready: boolean, driftStatus: string): KpiTone {
+  if (!ready) return 'warning'
+  if (driftStatus && driftStatus.toUpperCase() !== 'HEALTHY') return 'negative'
+  return 'positive'
+}
+
+function sourceTone(s: IngestionSource): KpiTone {
+  if (s.status === 'connected') return 'positive'
+  if (s.status === 'reconnecting') return 'warning'
+  return 'negative'
+}
+
+function severityTone(a: Alert): KpiTone {
+  if (a.severity === 'critical') return 'negative'
+  if (a.severity === 'error' || a.severity === 'warning') return 'warning'
+  return 'neutral'
+}
+
 // Risk-posture derivation — mirrors the CommandCenterHealthBar's logic so
-// the risk bar's "Risk Status" KPI matches the system status bar's Risk
+// the System Status row's risk KPI matches the system status bar's Risk
 // Level indicator.
 function deriveRiskStatus(
   snapshot: BotSnapshot,
@@ -162,54 +248,68 @@ function deriveRiskStatus(
   return { label: 'Normal', tone: 'positive', sub: 'Trading enabled' }
 }
 
-// ── Inline sub-component: Max Exposure card (with progress bar) ──────────
-// Uses the same KpiCard shell (.kpi-card / .kpi-label / .kpi-value / .kpi-sub
-// CSS classes) but layers a thin progress bar beneath the value so the
-// trader can see at a glance how close we are to the configured exposure cap.
-function MaxExposureCard({
-  used,
-  cap,
-  loading,
-  error,
-  stale,
+// ── Inline sub-component: SystemStatusCard ──────────────────────────────────
+// The two columns of Row 5 (System Status) are each a stack of compact
+// "system status" cards. A SystemStatusCard is the visual sibling of a
+// KpiCard — same surface treatment (card bg, 8px radius, subtle shadow)
+// — but its body is a free-form ReactNode instead of a single value.
+// That keeps the visual rhythm of the dashboard consistent while letting
+// each card host a list (strategies, alerts, ingestion sources) rather
+// than a single number.
+function SystemStatusCard({
+  label,
+  count,
+  tone = 'neutral',
+  stale = false,
+  loading = false,
+  error = null,
+  children,
+  title,
 }: {
-  used: number
-  cap: number
-  loading: boolean
-  error: string | null
-  stale: boolean
+  label: string
+  /** Optional count chip rendered next to the label (e.g. "3 active"). */
+  count?: string
+  tone?: KpiTone
+  stale?: boolean
+  loading?: boolean
+  error?: string | null
+  children?: ReactNode
+  title?: string
 }) {
-  const pct = cap > 0 ? Math.min(100, (used / cap) * 100) : 0
-  const tone: KpiTone =
-    pct > 90 ? 'negative' : pct > 70 ? 'warning' : 'neutral'
-  const barClass =
-    tone === 'negative'
+  const dotClass =
+    tone === 'positive'
+      ? 'bg-green-400'
+      : tone === 'negative'
       ? 'bg-red-400'
       : tone === 'warning'
       ? 'bg-amber-400'
-      : 'bg-green-400'
+      : 'bg-[#5a637a]'
   return (
     <div
-      className="kpi-card"
-      data-testid="kpi-max-exposure"
-      data-kpi-id="max-exposure"
+      className="kpi-card sys-status-card"
+      data-testid={`sys-status-${label.toLowerCase().replace(/\s+/g, '-')}`}
+      title={title}
       role="group"
-      aria-label="Max exposure used"
-      title={`Used ${fmtUsd(used)} of ${fmtUsd(cap)} cap (${pct.toFixed(0)}%)`}
+      aria-label={label}
     >
       <div className="kpi-label">
-        <span className="truncate">Max Exposure</span>
+        <span
+          className={`inline-block w-1.5 h-1.5 rounded-full shrink-0 ${dotClass}`}
+          aria-hidden="true"
+        />
+        <span className="truncate">{label}</span>
+        {count && (
+          <span className="ml-auto text-[10px] mono font-bold text-[#dde1ed] tabular-nums">
+            {count}
+          </span>
+        )}
         {stale && !loading && !error && (
           <span className="kpi-stale-pill" aria-label="stale">
             stale
           </span>
         )}
         {error && !loading && (
-          <span
-            className="kpi-error-pill"
-            title={error}
-            aria-label="error"
-          >
+          <span className="kpi-error-pill" title={error} aria-label="error">
             err
           </span>
         )}
@@ -219,36 +319,286 @@ function MaxExposureCard({
           className="kpi-skeleton kpi-skeleton-md"
           role="status"
           aria-live="polite"
+          aria-label="loading"
         />
       ) : error ? (
-        <span className="kpi-value kpi-value-md kpi-tone-negative">—</span>
+        <span className="text-[11px] text-[#7e8aaa] italic">unavailable</span>
       ) : (
-        <>
-          <span
-            className={`kpi-value kpi-value-md ${
-              tone === 'negative'
-                ? 'kpi-tone-negative'
-                : tone === 'warning'
-                ? 'kpi-tone-warning'
-                : 'kpi-tone-neutral'
-            }`}
-          >
-            {fmtUsd(used)}
-          </span>
-          <div className="kpi-sub">
-            <div className="flex-1 h-1 bg-[#1f2335] rounded-full overflow-hidden min-w-[40px]">
-              <div
-                className={`h-full rounded-full transition-all ${barClass}`}
-                style={{ width: `${pct}%` }}
-              />
-            </div>
-            <span>
-              {pct.toFixed(0)}% of {fmtUsd(cap, 0)}
-            </span>
-          </div>
-        </>
+        <div className="sys-status-body scrollbar-thin">{children}</div>
       )}
     </div>
+  )
+}
+
+// ── Inline sub-component: StrategiesList ────────────────────────────────────
+// Renders the active-strategy names from snapshot.strategies as a compact
+// badge list. Falls back to an "empty" hint when no strategies are running.
+function StrategiesList({
+  strategies,
+  activeFromAnalytics,
+}: {
+  strategies: string[]
+  activeFromAnalytics?: string[]
+}) {
+  const list = useMemo(() => {
+    if (strategies.length > 0) return strategies
+    if (activeFromAnalytics && activeFromAnalytics.length > 0) {
+      return activeFromAnalytics
+    }
+    return []
+  }, [strategies, activeFromAnalytics])
+
+  if (list.length === 0) {
+    return (
+      <span className="text-[11px] text-[#7e8aaa] italic">
+        No active strategies
+      </span>
+    )
+  }
+
+  return (
+    <ul
+      className="flex flex-wrap gap-1 m-0 p-0 list-none"
+      aria-label="Active strategies"
+    >
+      {list.slice(0, 8).map((s) => (
+        <li
+          key={s}
+          className="inline-flex items-center text-[10.5px] mono font-semibold text-[#dde1ed] bg-[#1a1f2e] border border-[#2d3450] rounded-md px-1.5 py-0.5 max-w-[160px] truncate"
+          title={s}
+        >
+          {s}
+        </li>
+      ))}
+      {list.length > 8 && (
+        <li className="inline-flex items-center text-[10px] text-[#7e8aaa] px-1 py-0.5">
+          +{list.length - 8} more
+        </li>
+      )}
+    </ul>
+  )
+}
+
+// ── Inline sub-component: AIStatusBody ──────────────────────────────────────
+// Renders the AI Status card body — model readiness + brier + drift PSI.
+// Pulled from snapshot.ml with overrides from /api/ml/metrics + /api/ml/drift
+// (when those polls succeed).
+function AIStatusBody({
+  ml,
+  mlMetrics,
+  drift,
+}: {
+  ml: MLState | undefined
+  mlMetrics: MLMetricsPayload | null
+  drift: DriftPayload | null
+}) {
+  const ready = mlMetrics?.model_ready ?? ml?.model_ready ?? false
+  const brier = mlMetrics?.brier_score ?? ml?.brier_score ?? null
+  const driftStatus = drift?.status ?? ml?.drift_status ?? 'HEALTHY'
+  const driftPsi = drift?.psi ?? ml?.drift_psi ?? 0
+
+  const rows: Array<{ label: string; value: string; tone: KpiTone }> = [
+    {
+      label: 'Model',
+      value: ready ? 'Ready' : 'Warming',
+      tone: ready ? 'positive' : 'warning',
+    },
+    {
+      label: 'Brier',
+      value:
+        brier != null && Number.isFinite(brier) ? brier.toFixed(3) : '—',
+      tone:
+        brier == null
+          ? 'neutral'
+          : brier <= 0.2
+          ? 'positive'
+          : brier <= 0.25
+          ? 'warning'
+          : 'negative',
+    },
+    {
+      label: 'Drift',
+      value: `${driftStatus}`,
+      tone:
+        driftStatus.toUpperCase() === 'HEALTHY'
+          ? 'positive'
+          : driftStatus.toUpperCase() === 'WARNING'
+          ? 'warning'
+          : 'negative',
+    },
+    {
+      label: 'PSI',
+      value:
+        driftPsi != null && Number.isFinite(driftPsi)
+          ? driftPsi.toFixed(3)
+          : '—',
+      tone:
+        driftPsi == null
+          ? 'neutral'
+          : driftPsi < 0.1
+          ? 'positive'
+          : driftPsi < 0.25
+          ? 'warning'
+          : 'negative',
+    },
+  ]
+
+  return (
+    <dl
+      className="grid grid-cols-2 gap-x-3 gap-y-1 m-0"
+      aria-label="AI status summary"
+    >
+      {rows.map((r) => (
+        <div
+          key={r.label}
+          className="flex items-center justify-between gap-2 min-w-0"
+        >
+          <dt className="text-[10px] uppercase tracking-wider text-[#7e8aaa] font-semibold truncate">
+            {r.label}
+          </dt>
+          <dd
+            className={`text-[11px] mono font-bold tabular-nums truncate ${
+              r.tone === 'positive'
+                ? 'kpi-tone-positive'
+                : r.tone === 'negative'
+                ? 'kpi-tone-negative'
+                : r.tone === 'warning'
+                ? 'kpi-tone-warning'
+                : 'text-[#dde1ed]'
+            }`}
+          >
+            {r.value}
+          </dd>
+        </div>
+      ))}
+    </dl>
+  )
+}
+
+// ── Inline sub-component: IngestionBody ─────────────────────────────────────
+// Renders the Data Ingestion card body — list of connector sources with
+// their connection state + last-event age.
+function IngestionBody({
+  data,
+  error,
+  loading,
+}: {
+  data: IngestionHealthPayload | null
+  error: string | null
+  loading: boolean
+}) {
+  if (loading && !data) {
+    return (
+      <span className="text-[11px] text-[#7e8aaa] italic">loading…</span>
+    )
+  }
+  if (error && !data) {
+    return <span className="text-[11px] text-[#f87171] italic">unavailable</span>
+  }
+  const sources = data?.sources ?? []
+  if (sources.length === 0) {
+    return (
+      <span className="text-[11px] text-[#7e8aaa] italic">no sources</span>
+    )
+  }
+  return (
+    <ul
+      className="flex flex-col gap-0.5 m-0 p-0 list-none"
+      aria-label="Ingestion sources"
+    >
+      {sources.slice(0, 6).map((s) => {
+        const tone = sourceTone(s)
+        const dotClass =
+          tone === 'positive'
+            ? 'bg-green-400'
+            : tone === 'negative'
+            ? 'bg-red-400'
+            : 'bg-amber-400'
+        return (
+          <li
+            key={s.id}
+            className="flex items-center gap-1.5 text-[11px] min-w-0"
+            title={`${s.name}: ${s.status}${
+              s.last_event_at ? ` · last ${fmtAge(s.last_event_at)}` : ''
+            }`}
+          >
+            <span
+              className={`w-1.5 h-1.5 rounded-full shrink-0 ${dotClass}`}
+              aria-hidden="true"
+            />
+            <span className="text-[#dde1ed] font-semibold truncate flex-1 min-w-0">
+              {s.name}
+            </span>
+            <span className="text-[#7e8aaa] text-[10px] truncate shrink-0">
+              {s.last_event_at ? fmtAge(s.last_event_at) : '—'}
+            </span>
+          </li>
+        )
+      })}
+      {sources.length > 6 && (
+        <li className="text-[10px] text-[#7e8aaa] mt-0.5">
+          +{sources.length - 6} more
+        </li>
+      )}
+    </ul>
+  )
+}
+
+// ── Inline sub-component: AlertsBody ────────────────────────────────────────
+// Renders the Alerts card body — most-recent-first list of alert pills.
+// Pulled from the useAlertNotifications hook (WS-pushed alerts).
+function AlertsBody({
+  alerts,
+  isConnected,
+}: {
+  alerts: Alert[]
+  isConnected: boolean
+}) {
+  if (alerts.length === 0) {
+    return (
+      <span className="text-[11px] text-[#7e8aaa] italic">
+        {isConnected ? 'no active alerts' : 'disconnected'}
+      </span>
+    )
+  }
+  return (
+    <ul
+      className="flex flex-col gap-0.5 m-0 p-0 list-none"
+      aria-label="Recent alerts"
+    >
+      {alerts.slice(0, 6).map((a) => {
+        const tone = severityTone(a)
+        const dotClass =
+          tone === 'negative'
+            ? 'bg-red-400'
+            : tone === 'warning'
+            ? 'bg-amber-400'
+            : 'bg-[#5a637a]'
+        return (
+          <li
+            key={a.alert_id}
+            className="flex items-center gap-1.5 text-[11px] min-w-0"
+            title={a.message}
+          >
+            <span
+              className={`w-1.5 h-1.5 rounded-full shrink-0 ${dotClass}`}
+              aria-hidden="true"
+            />
+            <span className="text-[#dde1ed] font-semibold truncate flex-1 min-w-0">
+              {a.name}
+            </span>
+            <span className="text-[#7e8aaa] text-[10px] tabular-nums shrink-0">
+              {fmtAge(a.timestamp)}
+            </span>
+          </li>
+        )
+      })}
+      {alerts.length > 6 && (
+        <li className="text-[10px] text-[#7e8aaa] mt-0.5">
+          +{alerts.length - 6} more
+        </li>
+      )}
+    </ul>
   )
 }
 
@@ -257,16 +607,12 @@ export interface CommandCenterDashboardProps {
   snapshot: BotSnapshot
   status: ConnectionStatus
   wsConnected: boolean
-  /** Click handler for the kill switch KPI in the risk bar. */
-  onKillSwitch?: () => void
-  /** Active positions panel — rendered in the main grid left column. */
+  /** Active positions panel — rendered in the activity grid left column. */
   positions: ReactNode
-  /** Order books panel — rendered in the main grid center column. */
+  /** Order books panel — rendered in the activity grid center column. */
   orderBooks: ReactNode
-  /** Recent trades panel — rendered in the main grid right column. */
+  /** Recent trades panel — rendered in the activity grid right column. */
   recentTrades: ReactNode
-  /** Sidebar stack — EquityCurve + Analytics + ML panel. */
-  sidebar: ReactNode
 }
 
 // ── Main component ────────────────────────────────────────────────────────
@@ -274,15 +620,22 @@ function CommandCenterDashboardImpl({
   snapshot,
   status,
   wsConnected,
-  onKillSwitch,
   positions,
   orderBooks,
   recentTrades,
-  sidebar,
 }: CommandCenterDashboardProps) {
   // ── Polled backend aggregates ──────────────────────────────────────────
   const statusData = usePolled<StatusPayload>('/api/status', 3000)
   const analytics = usePolled<AnalyticsPayload>('/api/analytics', 8000)
+  const mlMetrics = usePolled<MLMetricsPayload>('/api/ml/metrics', 10000)
+  const drift = usePolled<DriftPayload>('/api/ml/drift', 10000)
+  const ingest = usePolled<IngestionHealthPayload>('/api/ingestion/health', 10000)
+
+  // W49-3 — Alert feed (WS-pushed). Composed here instead of in
+  // CommandCenterMetricsStrip so the System Status row owns the alert
+  // state alongside the other system signals.
+  const { alerts, unreadCount, isConnected: alertsConnected } =
+    useAlertNotifications()
 
   // Re-render every 5s so "Xs ago" sub-labels stay fresh.
   const [, setTick] = useState(0)
@@ -296,6 +649,7 @@ function CommandCenterDashboardImpl({
   const openOrders = snapshot.open_orders ?? []
   const trades = snapshot.recent_trades ?? []
   const strategies = snapshot.strategies ?? []
+  const mlState = snapshot.ml
 
   // Mark-to-mid exposure from open positions.
   const openExposure = positionsArr.reduce((sum, p) => {
@@ -326,7 +680,7 @@ function CommandCenterDashboardImpl({
   const availableBalance = snapshot.paper_balance ?? 0
   const totalPortfolioValue = availableBalance + openExposure
 
-  // ── Risk metrics ─────────────────────────────────────────────────────────
+  // ── Risk metrics (used to derive exposure + risk-status tone) ────────────
   const totalExposure = statusData.data?.total_exposure ?? openExposure
   const maxExposure = statusData.data?.max_total_exposure ?? 25
   const expPct = maxExposure > 0 ? totalExposure / maxExposure : null
@@ -344,17 +698,6 @@ function CommandCenterDashboardImpl({
       ? 'negative'
       : Math.abs(drawdownDollars) > maxDrawdownLimit * 0.5
       ? 'warning'
-      : 'neutral'
-
-  const dailyPnl = snapshot.daily_pnl ?? statusData.data?.daily_pnl ?? 0
-  const dailyLossLimit = statusData.data?.daily_loss_limit ?? 2
-  const dailyPnlTone: KpiTone =
-    dailyPnl > 0
-      ? 'positive'
-      : dailyPnl < 0
-      ? dailyPnl <= -dailyLossLimit * 0.8
-        ? 'negative'
-        : 'warning'
       : 'neutral'
 
   // ── Risk-status derivation (mirrors health bar) ─────────────────────────
@@ -375,20 +718,13 @@ function CommandCenterDashboardImpl({
         : 'neutral'
       : 'neutral'
 
+  // ── Sharpe (from analytics) ──────────────────────────────────────────────
+  const sharpe = analytics.data?.sharpe_ratio ?? null
+
   // ── Cell wrappers (consistent styling + grid-area routing) ─────────────
   const cellClass = 'min-h-0 min-w-0 overflow-hidden'
-  const sidebarStyle: CSSProperties = {
-    gridArea: 'sidebar',
-    minHeight: 0,
-    overflow: 'auto',
-    display: 'flex',
-    flexDirection: 'column',
-    gap: 'var(--space-2)',
-  }
 
   // ── Stats summary for context (also surfaces counts to screen readers) ──
-  // Computed once per render; values are tiny (counts of arrays already in
-  // memory) so the cost is negligible.
   const summaryCounts = useMemo(() => {
     return {
       positions: positionsArr.length,
@@ -397,6 +733,34 @@ function CommandCenterDashboardImpl({
       strategies: strategies.length,
     }
   }, [positionsArr, openOrders, trades, strategies])
+
+  // ── AI / ingestion / alerts derived state ──────────────────────────────
+  const aiReady =
+    mlMetrics.data?.model_ready ?? mlState?.model_ready ?? false
+  const aiDriftStatus =
+    drift.data?.status ?? mlState?.drift_status ?? 'HEALTHY'
+  const aiTone = mlToneFor(aiReady, aiDriftStatus)
+
+  const ingestSources = ingest.data?.sources ?? []
+  const connectedSources = ingestSources.filter(
+    (s) => s.status === 'connected',
+  ).length
+  const ingestFreshSec = ingest.data?.metrics?.data_freshness_seconds ?? null
+  const ingestTone: KpiTone =
+    ingestSources.length === 0
+      ? 'neutral'
+      : connectedSources === ingestSources.length
+      ? 'positive'
+      : connectedSources === 0
+      ? 'negative'
+      : 'warning'
+
+  const alertsTone: KpiTone =
+    alerts.some((a) => a.severity === 'critical')
+      ? 'negative'
+      : alerts.some((a) => a.severity === 'warning' || a.severity === 'error')
+      ? 'warning'
+      : 'neutral'
 
   return (
     <div className="command-center-layout">
@@ -417,19 +781,19 @@ function CommandCenterDashboardImpl({
         aria-label="Top bar — portfolio headline metrics"
       >
         <KpiCard
-          id="balance"
+          id="portfolio-value"
           size="lg"
-          label="Balance"
+          label="Portfolio Value"
           value={fmtUsd(totalPortfolioValue)}
           tone="neutral"
-          sub={`Cash ${fmtUsd(availableBalance)}`}
+          sub={`Cash ${fmtUsd(availableBalance)} · Exposure ${fmtUsd(openExposure, 0)}`}
           title="Total portfolio value = available cash + open position market value"
           interactive
         />
         <KpiCard
-          id="available"
+          id="available-balance"
           size="lg"
-          label="Available"
+          label="Available Balance"
           value={fmtUsd(snapshot.paper_balance)}
           tone="neutral"
           sub="Deployable cash"
@@ -437,9 +801,9 @@ function CommandCenterDashboardImpl({
           interactive
         />
         <KpiCard
-          id="exposure"
+          id="open-exposure"
           size="lg"
-          label="Exposure"
+          label="Open Exposure"
           value={fmtUsd(openExposure)}
           tone={exposureTone}
           sub={
@@ -457,7 +821,7 @@ function CommandCenterDashboardImpl({
         style={{ gridArea: 'pnl', minHeight: 0 }}
         className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2"
         role="region"
-        aria-label="P&L row — realized, unrealized, daily, win rate, drawdown"
+        aria-label="P&L row — realized, unrealized, win rate, drawdown, sharpe"
       >
         <KpiCard
           id="realized-pnl"
@@ -480,14 +844,6 @@ function CommandCenterDashboardImpl({
           error={analytics.error}
           stale={staleFor(analytics.fetchedAt)}
           title="Sum of open positions' unrealized P&L"
-        />
-        <KpiCard
-          id="daily-pnl"
-          label="Daily P&L"
-          value={fmtPnl(dailyPnl)}
-          tone={dailyPnlTone}
-          sub={`Stop −$${Math.abs(dailyLossLimit).toFixed(2)}`}
-          title="Intraday realized + unrealized P&L vs the configured daily loss stop"
         />
         <KpiCard
           id="win-rate"
@@ -515,90 +871,20 @@ function CommandCenterDashboardImpl({
           stale={staleFor(statusData.fetchedAt)}
           title="Current drawdown from peak equity vs hard stop"
         />
-      </div>
-
-      {/* ── 4. Risk bar — 3 KPIs (risk status, kill switch, max exposure) */}
-      <div
-        style={{ gridArea: 'risk', minHeight: 0 }}
-        className="grid grid-cols-1 sm:grid-cols-3 gap-2"
-        role="region"
-        aria-label="Risk bar — status, kill switch, max exposure"
-      >
         <KpiCard
-          id="risk-status"
-          label="Risk Status"
-          value={riskStatus.label}
-          tone={riskStatus.tone}
-          sub={riskStatus.sub}
-          title="Composite risk posture derived from kill switch, observation mode, daily P&L and data freshness"
-        />
-        {/* Kill switch is interactive — when onKillSwitch is provided, the
-            card becomes a clickable affordance to toggle the switch. We wrap
-            the KpiCard in a <button> so the semantics + keyboard nav are
-            preserved without leaking interactivity into the presentational
-            KpiCard primitive. */}
-        {onKillSwitch ? (
-          <button
-            type="button"
-            onClick={onKillSwitch}
-            className="text-left p-0 bg-transparent border-0 cursor-pointer focus-visible:outline-2 focus-visible:outline-[var(--border-focus)] focus-visible:outline-offset-2 rounded-lg"
-            aria-label={
-              snapshot.kill_switch
-                ? 'Resume trading — deactivate kill switch'
-                : 'Halt trading — activate kill switch'
-            }
-            title={
-              snapshot.kill_switch
-                ? 'Click to resume trading'
-                : 'Click to halt trading'
-            }
-          >
-            <KpiCard
-              id="kill-switch"
-              label="Kill Switch"
-              value={snapshot.kill_switch ? 'ON' : 'Off'}
-              tone={snapshot.kill_switch ? 'negative' : 'positive'}
-              sub={
-                snapshot.kill_switch_durable
-                  ? 'Durable — held across restarts'
-                  : 'Volatile — clears on restart'
-              }
-              interactive
-              title={
-                snapshot.kill_switch
-                  ? 'Kill switch active — click to resume trading'
-                  : 'Kill switch inactive — click to halt trading'
-              }
-            />
-          </button>
-        ) : (
-          <KpiCard
-            id="kill-switch"
-            label="Kill Switch"
-            value={snapshot.kill_switch ? 'ON' : 'Off'}
-            tone={snapshot.kill_switch ? 'negative' : 'positive'}
-            sub={
-              snapshot.kill_switch_durable
-                ? 'Durable — held across restarts'
-                : 'Volatile — clears on restart'
-            }
-            title={
-              snapshot.kill_switch
-                ? 'Kill switch active — all trading halted'
-                : 'Kill switch inactive — trading enabled'
-            }
-          />
-        )}
-        <MaxExposureCard
-          used={totalExposure}
-          cap={maxExposure}
-          loading={statusData.loading && !statusData.data}
-          error={statusData.error}
-          stale={staleFor(statusData.fetchedAt)}
+          id="sharpe"
+          label="Sharpe"
+          value={fmtSharpe(sharpe)}
+          tone={sharpeTone(sharpe)}
+          sub="Risk-adjusted return"
+          loading={analytics.loading && !analytics.data}
+          error={analytics.error}
+          stale={staleFor(analytics.fetchedAt)}
+          title="Sharpe ratio — annualized risk-adjusted return (higher is better)"
         />
       </div>
 
-      {/* ── 5. Main grid — positions | order books | trades | sidebar ──── */}
+      {/* ── 4. Activity grid — positions | order books | trades ────────── */}
       <div
         style={{ gridArea: 'pos' }}
         className={cellClass}
@@ -623,13 +909,90 @@ function CommandCenterDashboardImpl({
       >
         {recentTrades}
       </div>
+
+      {/* ── 5. System status — 2 columns ───────────────────────────────── */}
       <div
-        style={sidebarStyle}
-        className="scrollbar-thin"
+        style={{ gridArea: 'sysleft' }}
+        className={cellClass}
         role="region"
-        aria-label="Analytics sidebar — equity curve, analytics, ML"
+        aria-label="System status — strategies and AI"
       >
-        {sidebar}
+        <div className="sys-status-col">
+          <SystemStatusCard
+            label="Active Strategies"
+            count={`${summaryCounts.strategies} active`}
+            tone={summaryCounts.strategies > 0 ? 'positive' : 'warning'}
+            title={`Strategies currently running on the bot (${summaryCounts.strategies})`}
+          >
+            <StrategiesList
+              strategies={strategies}
+              activeFromAnalytics={analytics.data?.active_strategies}
+            />
+          </SystemStatusCard>
+          <SystemStatusCard
+            label="AI Status"
+            tone={aiTone}
+            title={
+              aiReady
+                ? `ML model ready${
+                    mlMetrics.data?.brier_score != null
+                      ? ` · brier ${mlMetrics.data.brier_score.toFixed(3)}`
+                      : ''
+                  }`
+                : 'ML model warming up — predictions may be unreliable'
+            }
+          >
+            <AIStatusBody
+              ml={mlState}
+              mlMetrics={mlMetrics.data}
+              drift={drift.data}
+            />
+          </SystemStatusCard>
+        </div>
+      </div>
+      <div
+        style={{ gridArea: 'sysright' }}
+        className={cellClass}
+        role="region"
+        aria-label="System status — ingestion and alerts"
+      >
+        <div className="sys-status-col">
+          <SystemStatusCard
+            label="Data Ingestion"
+            count={`${connectedSources}/${ingestSources.length || 0} sources`}
+            tone={ingestTone}
+            loading={ingest.loading && !ingest.data}
+            error={ingest.error}
+            stale={staleFor(ingest.fetchedAt)}
+            title="Per-source ingestion health (CLOB / Gamma / WS) — last event age"
+          >
+            <IngestionBody
+              data={ingest.data}
+              error={ingest.error}
+              loading={ingest.loading}
+            />
+            {ingestFreshSec != null && (
+              <div className="text-[10px] text-[#7e8aaa] mt-1 tabular-nums">
+                fresh {ingestFreshSec.toFixed(0)}s
+              </div>
+            )}
+          </SystemStatusCard>
+          <SystemStatusCard
+            label="Alerts"
+            count={
+              unreadCount > 0
+                ? `${unreadCount} unread`
+                : `${alerts.length} total`
+            }
+            tone={alertsTone}
+            stale={!alertsConnected}
+            title={`Recent alert feed${
+              !alertsConnected ? ' (WS disconnected — feed may be stale)' : ''
+            }`}
+          >
+            <AlertsBody alerts={alerts} isConnected={alertsConnected} />
+          </SystemStatusCard>
+        </div>
       </div>
     </div>
   )
@@ -637,8 +1000,9 @@ function CommandCenterDashboardImpl({
 
 // Wrap in `memo` so the parent's 2s snapshot re-renders don't cascade into
 // dashboard re-renders when the displayed values haven't actually changed.
-// ReactNode props (positions, orderBooks, etc.) are compared by reference —
-// the parent should keep them stable (wrapped in their own `memo` panels).
+// ReactNode props (positions, orderBooks, recentTrades) are compared by
+// reference — the parent should keep them stable (wrapped in their own
+// `memo` panels).
 export const CommandCenterDashboard = memo(CommandCenterDashboardImpl)
 
 export default CommandCenterDashboard

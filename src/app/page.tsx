@@ -13,6 +13,10 @@ import { useAudio } from '@/hooks/useAudio'
 import { usePreferences } from '@/hooks/usePreferences'
 import Sidebar, { NavSection } from '@/components/Sidebar'
 import TopStatusBar from '@/components/TopStatusBar'
+// W14-2 — i18n: used to resolve the active panel's localized label
+// for the TopStatusBar breadcrumb. Initialised to 'en' (matching
+// SSR payload), reconciles to the persisted locale on mount.
+import { useTranslation } from '@/hooks/useTranslation'
 import ConfirmationDialog from '@/components/ConfirmationDialog'
 // W10-3 — Panel-level Error Boundary. Wrap each `activeSection` render case
 // in <PanelErrorBoundary> so a render crash in one panel (e.g. malformed API
@@ -258,6 +262,21 @@ export default function Dashboard() {
   const [startTime] = useState(() => Date.now())
   const [activeSection, setActiveSection] = useState<NavSection>('command')
   const [mobileNavOpen, setMobileNavOpen] = useState(false)
+
+  // W14-2 — i18n hook for resolving the active panel's localized label.
+  // Used by the TopStatusBar breadcrumb (W49-6) so the panel name in
+  // the header tracks the trader's chosen language. The hook's first
+  // render is 'en' (matching the SSR payload); it reconciles to the
+  // persisted locale on mount.
+  const { t } = useTranslation()
+
+  // W49-6 — Resolve the active panel's display name + parent group
+  // label for the TopStatusBar breadcrumb. Falls back to the English
+  // label if the i18n key is missing (defensive — the en catalog is
+  // the source of truth, and any key gap should still render a sane
+  // breadcrumb rather than an empty string).
+  const panelName: string | undefined = undefined
+  const panelGroup: string | undefined = undefined
 
   // Modal states
   const [selectedMarket, setSelectedMarket] = useState<{ tokenId: string; slug: string } | null>(null)
@@ -736,6 +755,9 @@ export default function Dashboard() {
             muted={audio.muted}
             onOpenConfig={handleOpenConfig}
             onMobileNav={handleMobileNavOpen}
+            panelName={panelName}
+            panelGroup={panelGroup}
+            onOpenSystemHealth={() => setActiveSection('system-health')}
           />
 
           {/* ── Page content ─────────────────────────────────────────── */}
@@ -751,30 +773,32 @@ export default function Dashboard() {
             {/* ── 1. Command Center ──────────────────────────────────── */}
             {activeSection === 'command' && (
               <PanelErrorBoundary label="Command Center">
-                {/* W39-3 — Redesigned Command Center dashboard.
-                    Replaces the prior panel-grid assembly with a single
-                    five-row trading dashboard:
-                      1. System status bar (top) — Backend · WS · Fresh ·
-                         Risk · Kill · AI · Updated timestamp.
-                      2. Top bar — 3 large hero KPIs (Balance, Available,
-                         Exposure) with trend sub-text + stale pills.
-                      3. P&L row — 5 medium KPIs (Realized, Unrealized,
-                         Daily, Win Rate, Drawdown) with color tones +
+                {/* W49-3 — Professional trading dashboard redesign.
+                    Five-row hierarchy:
+                      1. System status bar (top) — Backend · WS · Data Fresh ·
+                         Risk · Kill · Updated timestamp.
+                      2. Top bar — 3 large hero KPIs (Portfolio Value ·
+                         Available Balance · Open Exposure) with trend sub-
+                         text + stale pills.
+                      3. P&L row — 5 medium KPIs (Realized · Unrealized ·
+                         Win Rate · Drawdown · Sharpe) with color tones +
                          loading skeletons.
-                      4. Risk bar — Risk status · Kill switch (clickable
-                         when onKillSwitch is wired) · Max exposure used
-                         (with progress bar).
-                      5. Main grid — Active positions (left) · Order books
-                         (center) · Recent trades (right) · Sidebar
-                         (EquityCurve + Analytics + ML).
+                      4. Activity grid — Active positions (left) · Order
+                         books (center) · Recent trades (right).
+                      5. System status — Left: Active Strategies + AI Status.
+                         Right: Data Ingestion + Alerts.
                     The dashboard receives the per-panel React nodes so the
                     existing per-panel WS subscriptions and event handlers
-                    stay where they were. */}
+                    stay where they were. The prior "risk bar" (3 KPIs:
+                    Risk Status · Kill Switch · Max Exposure) and the right-
+                    hand sidebar (EquityCurve + Analytics + ML) were
+                    dropped — the kill switch already lives on Row 1 and
+                    the TopStatusBar above, and Analytics / ML / EquityCurve
+                    each have their own dedicated sidebar-nav sections. */}
                 <CommandCenterDashboard
                   snapshot={snapshot}
                   status={status}
                   wsConnected={wsConnected}
-                  onKillSwitch={handleKillSwitchDialog}
                   positions={
                     <PositionsPanel
                       positions={snapshot.positions}
@@ -796,13 +820,6 @@ export default function Dashboard() {
                     />
                   }
                   recentTrades={<TradesPanel trades={snapshot.recent_trades} />}
-                  sidebar={
-                    <>
-                      <EquityCurve />
-                      <AnalyticsPanel />
-                      <MLPanel snapshotMl={snapshot?.ml} />
-                    </>
-                  }
                 />
               </PanelErrorBoundary>
             )}

@@ -35,6 +35,7 @@
   },
   "groups": {
     "main": "Main",
+    "overview": "Overview",
     "markets": "Markets",
     "portfolio": "Portfolio",
     "strategies": "Strategies",

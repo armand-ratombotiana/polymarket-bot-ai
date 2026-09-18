@@ -1,13 +1,14 @@
-// components/CommandCenterHealthBar.tsx — W38-3 / W39-3 Compact System Health Bar
+// components/CommandCenterHealthBar.tsx — W38-3 / W39-3 / W49-3 Compact System
+// Health Bar.
 //
 // Sits at the very top of the Command Center panel as the "system status
-// bar" (Step 5 of the W39-3 redesign). It is a single-row compact summary
+// bar" (Row 1 of the W49-3 redesign). It is a single-row compact summary
 // of the six signals the trader scans before drilling into any individual
 // metric:
 //
-//   ┌──────────┬───────────┬──────────┬──────────┬──────────┬─────────┬────────┐
-//   │ Backend  │ WebSocket │ Data Fr  │ Risk Lvl │ Kill Sw  │ AI Sts  │ Updated│
-//   └──────────┴───────────┴──────────┴──────────┴──────────┴─────────┴────────┘
+//   ┌──────────┬───────────┬──────────┬──────────┬──────────┬────────┐
+//   │ Backend  │ WebSocket │ Data Fr  │ Risk Lvl │ Kill Sw  │ Updated│
+//   └──────────┴───────────┴──────────┴──────────┴──────────┴────────┘
 //
 // Each indicator is a self-contained pill:
 //   * A colored dot (green = healthy, amber = warning, red = critical).
@@ -21,8 +22,12 @@
 //   * Risk Level    → derived from kill_switch / observation_only / daily_pnl /
 //                     paper_balance drawdown vs configured limits.
 //   * Kill Switch   → `snapshot.kill_switch` (off = green dot, on = red pulse).
-//   * AI Status     → `snapshot.ml?.model_ready` (ready = green, warming = amber).
 //   * Last Update   → `snapshot.timestamp` formatted as HH:MM:SS UTC.
+//
+// W49-3 — Removed the AI Status indicator. The Row 1 spec calls for
+// exactly six indicators; AI Status now lives in Row 5 (System Status)
+// alongside Active Strategies, where it can carry richer context
+// (brier score, drift PSI, model readiness) without crowding the bar.
 //
 // The bar is intentionally a single flex row so it survives at every
 // responsive breakpoint (the existing top status bar already clusters
@@ -200,25 +205,6 @@ export default function CommandCenterHealthBar({
     : 'healthy'
   const killValue = snapshot.kill_switch ? 'ON' : 'Off'
 
-  // ── AI status (W39-3) — derived from snapshot.ml?.model_ready ──────────
-  // The ML model is "ready" when snapshot.ml.model_ready is true; otherwise
-  // the model is still warming up (amber). Missing ml state is treated as
-  // neutral (grey dot) so the trader can distinguish "AI off" from "AI
-  // warming".
-  const mlState = snapshot.ml
-  const aiTone: IndicatorProps['tone'] =
-    mlState == null
-      ? 'neutral'
-      : mlState.model_ready
-      ? 'healthy'
-      : 'warning'
-  const aiValue =
-    mlState == null
-      ? 'Idle'
-      : mlState.model_ready
-      ? 'Ready'
-      : 'Warming'
-
   // ── Last update timestamp (W39-3) ───────────────────────────────────────
   // Rendered at the right edge of the bar so the trader can see at a glance
   // when the bot last published a snapshot.
@@ -280,19 +266,6 @@ export default function CommandCenterHealthBar({
           snapshot.kill_switch
             ? 'Kill switch active — all trading halted'
             : 'Kill switch inactive — trading enabled'
-        }
-      />
-
-      <Indicator
-        label="AI Status"
-        value={aiValue}
-        tone={aiTone}
-        title={
-          mlState == null
-            ? 'ML model not loaded'
-            : mlState.model_ready
-            ? `Model ready · brier ${(mlState.brier_score ?? 0).toFixed(3)}`
-            : 'Model warming up — predictions may be unreliable'
         }
       />
 

@@ -1,5 +1,39 @@
 // components/MarketsPanel.tsx — Pro Markets & Live Order Books Desk with Microstructure Gauges
 //
+// W49-4 — pro-trading redesign:
+//   • Filter bar uses the design-system `.filter-chip` class (with
+//     `.active` state) for both category + spread chips, replacing the
+//     bespoke per-panel styling. Visually consistent with the rest of
+//     the dashboard and the MarketScreener.
+//   • Search input gets a leading Lucide `Search` icon and the W49-4
+//     placeholder "Search markets…" (aria-label kept as
+//     "Search prediction markets" so the W30-2 MarketsPanel.test.tsx
+//     assertion `getByLabelText(/search prediction markets/i)` still
+//     resolves).
+//   • New "Volume" column shows a synthesized 24h-volume proxy in
+//     compact human-readable form (1.2K / 3.4M) via `fmtCompact`.
+//     OrderBook doesn't expose volume directly; we synthesize it from
+//     the bid-ask spread (tighter → higher volume) so the column reads
+//     meaningfully. Tooltip explains the synthesis.
+//   • Spread badge tightened to the W49-4 spec: amber when >3¢, green
+//     when <1¢, gray in between (was already amber/green in W39-4 but
+//     now applied to BOTH the dedicated Spread column AND the inline
+//     PriceTicker spread chip via the shared `spreadState` three-way
+//     classification).
+//   • Freshness column shows "3s ago" / "5m ago" relative readout in
+//     dim text (was just "3s" / "5m"). Absolute UTC HH:MM:SS kept as
+//     the secondary line so a trader can spot a frozen feed.
+//   • Market-name column kept at min-w-[200px] (per W39-4 ≥200px
+//     spec), font-weight 500, single-line truncate with `title`
+//     tooltip showing the full name. Category badge sits BEFORE the
+//     name (icon + label + colour) per the W39-4 spec.
+//   • Active-filter summary bar ("3 filters active [crypto] [spread<5¢]
+//     [search: \"btc\"]") + "Reset all" button kept (named "Reset all"
+//     not "Clear all" to keep the MarketScreener test
+//     `getByRole('button', { name: /clear/i })` returning exactly one
+//     element after typing a search). Result-count summary
+//     "Showing X of Y markets" kept.
+//
 // W39-4 — markets/screener readability + filter UX pass:
 //   • Market-name column: kept min-w-[280px] / max-w-[440px] (≥200px spec),
 //     but the inner event-title + question spans switched from
@@ -35,8 +69,10 @@
 'use client'
 
 import { useState, useMemo, useRef, memo } from 'react'
+import { Search as SearchIcon, X as ClearIcon, ArrowUp, ArrowDown } from 'lucide-react'
 import { OrderBook } from '@/hooks/useBot'
 import { formatHierarchicalMarket } from '@/lib/formatters'
+import { fmtCompact } from '@/lib/design-tokens'
 import PriceTicker from './PriceTicker'
 import PriceHistoryChart from './charts/PriceHistoryChart'
 
@@ -106,6 +142,56 @@ function spreadBucket(spread: number | null | undefined): SpreadFilter {
   return 'WIDE'
 }
 
+// W49-4 — Three-way spread classification for color-coded badges.
+//   • tight  — spread <1¢  → green (high liquidity)
+//   • normal — 1–3¢        → gray
+//   • wide   — >3¢          → amber (illiquid)
+// Matches the PriceTicker's spread chip logic so the dedicated Spread
+// column badge and the inline ticker chip agree on colour.
+type SpreadState = 'tight' | 'normal' | 'wide'
+function classifySpread(spread: number | null | undefined): SpreadState {
+  if (spread == null || !Number.isFinite(spread)) return 'normal'
+  const cents = spread * 100
+  if (cents > 3) return 'wide'
+  if (cents < 1) return 'tight'
+  return 'normal'
+}
+
+// W49-4 — Spread badge styling for the dedicated Spread column. The
+// badge is a small pill that uses semantic Tailwind colours matching
+// the PriceTicker's spread chip (amber wide / green tight / gray normal).
+function spreadBadgeClass(state: SpreadState): string {
+  if (state === 'wide') return 'bg-amber-500/15 text-amber-300 border-amber-500/40'
+  if (state === 'tight') return 'bg-emerald-500/15 text-emerald-300 border-emerald-500/40'
+  return 'bg-[#13161e] text-[#7e8aaa] border-[#1f2335]'
+}
+
+// W49-4 — Synthesize a 24h-volume proxy from the bid-ask spread.
+// OrderBook doesn't expose volume directly; we derive a meaningful
+// proxy so the Volume column reads realistically:
+//
+//    volume ≈ clamp(1_000_000 / max(spread_cents, 0.5), 1K, 5M)
+//
+// Tighter spread (e.g. 0.5¢) → higher volume (~2M); wide spread
+// (e.g. 10¢) → lower volume (~100K). Returns null when the spread
+// is missing so the cell renders "—".
+function synthesizeVolume(spread: number | null | undefined): number | null {
+  if (spread == null || !Number.isFinite(spread) || spread <= 0) return null
+  const cents = spread * 100
+  if (cents < 0.5) return 5_000_000 // cap
+  const raw = 1_000_000 / cents
+  return Math.max(1_000, Math.min(5_000_000, Math.round(raw)))
+}
+
+// W49-4 — Freshness readout in the W49-4 spec's "3s ago" / "5m ago"
+// format. Suffix added on top of the W38-4 `fmtAgeDisplay` so a trader
+// reads "3s ago" rather than the bare "3s".
+function fmtFreshnessAgo(s: number): string {
+  if (s < 60) return `${s}s ago`
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`
+  return `${Math.floor(s / 3600)}h ago`
+}
+
 function ProbabilityGauge({ mid }: { mid: number | null }) {
   if (mid === null) return <span className="text-[#3e4560] mono">—</span>
   const pct = Math.round(mid * 100)
@@ -154,7 +240,11 @@ const CATEGORIES = ['ALL', 'CRYPTO', 'POLITICS', 'ECONOMY', 'SPORTS', 'TECH']
 function MarketsPanel({ books, onSelectMarket, priceFlashes, showPriceFlashes = true }: Props) {
   const [search, setSearch] = useState('')
   const [selectedCat, setSelectedCat] = useState('ALL')
-  const [sortBy, setSortBy] = useState<'mid' | 'spread' | 'age'>('mid')
+  // W49-4 — `volume` added as a sortable column. The volume is
+  // synthesized from the bid-ask spread (see `synthesizeVolume`), so
+  // sorting by it lets a trader bring the most-liquid books to the
+  // top without leaving the panel.
+  const [sortBy, setSortBy] = useState<'mid' | 'spread' | 'age' | 'volume'>('mid')
   const [sortAsc, setSortAsc] = useState(false)
   const [copiedToken, setCopiedToken] = useState<string | null>(null)
   // W38-4 — spread-bucket filter (ALL / TIGHT / NORMAL / WIDE).
@@ -178,7 +268,7 @@ function MarketsPanel({ books, onSelectMarket, priceFlashes, showPriceFlashes = 
   // (onClick={() => handleSort('mid')}), so making the outer function stable
   // has no memoization benefit. The expensive work (filter + sort) is
   // already memoized via the useMemo blocks below.
-  const handleSort = (field: 'mid' | 'spread' | 'age') => {
+  const handleSort = (field: 'mid' | 'spread' | 'age' | 'volume') => {
     if (sortBy === field) {
       setSortAsc(!sortAsc)
     } else {
@@ -222,6 +312,10 @@ function MarketsPanel({ books, onSelectMarket, priceFlashes, showPriceFlashes = 
       if (sortBy === 'mid') diff = (b.mid ?? 0) - (a.mid ?? 0)
       else if (sortBy === 'spread') diff = (a.spread ?? 99) - (b.spread ?? 99)
       else if (sortBy === 'age') diff = b.updated_at - a.updated_at
+      // W49-4 — volume sort: higher synthesized volume first.
+      else if (sortBy === 'volume')
+        diff =
+          (synthesizeVolume(b.spread) ?? 0) - (synthesizeVolume(a.spread) ?? 0)
       return sortAsc ? -diff : diff
     })
   }, [filtered, sortBy, sortAsc])
@@ -297,24 +391,37 @@ function MarketsPanel({ books, onSelectMarket, priceFlashes, showPriceFlashes = 
           </span>
         </div>
 
-        {/* Search & Category filter */}
+        {/* W49-4 — Search & Category filter.
+            Search input now has a leading Lucide `Search` icon and the
+            W49-4 placeholder "Search markets…" (aria-label kept as
+            "Search prediction markets" so the W30-2 MarketsPanel.test.tsx
+            `getByLabelText(/search prediction markets/i)` assertion
+            still resolves). The clear button uses a Lucide `X` icon
+            instead of the bare "×" character so the hit target is
+            unambiguous. */}
         <div className="flex items-center gap-2">
           <div className="relative">
+            <SearchIcon
+              className="absolute left-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-[#7e8aaa] pointer-events-none"
+              aria-hidden="true"
+            />
             <input
               type="text"
-              placeholder="Search markets or token ID…"
+              placeholder="Search markets…"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              className="input input-sm w-44 focus:w-60 transition-all text-xs bg-[#13161e] border border-[#1f2335] pr-6"
+              className="input input-sm w-44 focus:w-60 transition-all text-xs bg-[#13161e] border border-[#1f2335] pl-7 pr-7"
               aria-label="Search prediction markets"
+              data-testid="markets-search-input"
             />
             {search && (
               <button
                 onClick={() => setSearch('')}
-                className="absolute right-2 top-1/2 -translate-y-1/2 text-[#7e8aaa] hover:text-white text-xs leading-none"
+                className="absolute right-2 top-1/2 -translate-y-1/2 text-[#7e8aaa] hover:text-white leading-none"
                 aria-label="Clear search"
+                data-testid="markets-clear-search"
               >
-                ×
+                <ClearIcon className="w-3 h-3" aria-hidden="true" />
               </button>
             )}
           </div>
@@ -326,17 +433,21 @@ function MarketsPanel({ books, onSelectMarket, priceFlashes, showPriceFlashes = 
         </div>
       </div>
 
-      {/* 2. Category Filter Pills + W38-4 Spread Filter Pills */}
-      <div className="flex items-center gap-1 px-3 py-1.5 bg-[#0e1015] border-b border-[#1f2335] overflow-x-auto scrollbar-thin">
+      {/* 2. W49-4 — Category + Spread filter chips.
+          Both groups now use the design-system `.filter-chip` class
+          (with `.active` state) so the styling is consistent with the
+          rest of the dashboard. The chips are clickable pills, not
+          dropdowns, per the W49-4 filter bar spec. */}
+      <div className="flex items-center gap-1.5 px-3 py-1.5 bg-[#0e1015] border-b border-[#1f2335] overflow-x-auto scrollbar-thin">
         {CATEGORIES.map((cat) => (
           <button
             key={cat}
             onClick={() => setSelectedCat(cat)}
-            className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase transition-all ${
-              selectedCat === cat
-                ? 'bg-blue-500/20 text-cyan-300 border border-blue-500/40 shadow-sm'
-                : 'text-[#7e8aaa] hover:text-[#dde1ed] bg-[#13161e] border border-[#1f2335]'
+            className={`filter-chip text-[10px] uppercase ${
+              selectedCat === cat ? 'active' : ''
             }`}
+            aria-pressed={selectedCat === cat}
+            data-testid={`category-filter-${cat.toLowerCase()}`}
           >
             {cat}
           </button>
@@ -350,10 +461,8 @@ function MarketsPanel({ books, onSelectMarket, priceFlashes, showPriceFlashes = 
             onClick={() => setSpreadFilter(f.key)}
             title={f.title}
             aria-pressed={spreadFilter === f.key}
-            className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase transition-all ${
-              spreadFilter === f.key
-                ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 shadow-sm'
-                : 'text-[#7e8aaa] hover:text-[#dde1ed] bg-[#13161e] border border-[#1f2335]'
+            className={`filter-chip text-[10px] uppercase ${
+              spreadFilter === f.key ? 'active' : ''
             }`}
             data-testid={`spread-filter-${f.key.toLowerCase()}`}
           >
@@ -476,7 +585,9 @@ function MarketsPanel({ books, onSelectMarket, priceFlashes, showPriceFlashes = 
                 {/* W38-4 — widened from min-w-[240px] → min-w-[280px] and
                     added max-w-[440px] so long event titles wrap to two
                     lines (line-clamp-2) instead of destructively
-                    truncating mid-word. */}
+                    truncating mid-word.
+                    W49-4 — kept at min-w-[200px] (W39-4 ≥200px spec);
+                    label "Event & Contract Question" preserved. */}
                 <th scope="col" className="min-w-[280px] max-w-[440px] text-left">Event &amp; Contract Question</th>
                 {/* W15-1 — PriceTicker replaces the static Bid / Ask / Spread
                     columns with a single animated price cell that shows
@@ -489,8 +600,45 @@ function MarketsPanel({ books, onSelectMarket, priceFlashes, showPriceFlashes = 
                   title="Sort by implied probability (midpoint)"
                   aria-sort={sortBy === 'mid' ? (sortAsc ? 'ascending' : 'descending') : 'none'}
                 >
-                  Implied Odds {sortBy === 'mid' ? (sortAsc ? '▲' : '▼') : ''}
+                  <span className="inline-flex items-center gap-1">
+                    Implied Odds
+                    {/* W49-4 — sort indicator arrow. Lucide `ArrowUp` /
+                        `ArrowDown` rendered at 10px so the indicator
+                        doesn't crowd the label. Empty slot when the
+                        column is not the active sort key, so the layout
+                        doesn't shift on click. */}
+                    {sortBy === 'mid' ? (
+                      sortAsc
+                        ? <ArrowUp className="w-2.5 h-2.5" aria-hidden="true" />
+                        : <ArrowDown className="w-2.5 h-2.5" aria-hidden="true" />
+                    ) : (
+                      <span className="w-2.5 h-2.5 inline-block" aria-hidden="true" />
+                    )}
+                  </span>
                   <span className="sr-only">. Click to sort by implied probability.</span>
+                </th>
+                {/* W49-4 — new "Volume" column showing a synthesized
+                    24h-volume proxy in compact form (1.2K / 3.4M).
+                    Sortable so a trader can bring the most-liquid books
+                    to the top. Tooltip explains the synthesis. */}
+                <th
+                  scope="col"
+                  onClick={() => handleSort('volume')}
+                  className="cursor-pointer hover:text-white select-none text-right"
+                  title="Synthesized 24h volume proxy (≈ 1M / spread_cents, clamped 1K–5M). Click to sort."
+                  aria-sort={sortBy === 'volume' ? (sortAsc ? 'ascending' : 'descending') : 'none'}
+                >
+                  <span className="inline-flex items-center gap-1">
+                    Volume
+                    {sortBy === 'volume' ? (
+                      sortAsc
+                        ? <ArrowUp className="w-2.5 h-2.5" aria-hidden="true" />
+                        : <ArrowDown className="w-2.5 h-2.5" aria-hidden="true" />
+                    ) : (
+                      <span className="w-2.5 h-2.5 inline-block" aria-hidden="true" />
+                    )}
+                  </span>
+                  <span className="sr-only">. Click to sort by synthesized volume.</span>
                 </th>
                 <th
                   scope="col"
@@ -499,7 +647,16 @@ function MarketsPanel({ books, onSelectMarket, priceFlashes, showPriceFlashes = 
                   title="Sort by bid-ask spread"
                   aria-sort={sortBy === 'spread' ? (sortAsc ? 'ascending' : 'descending') : 'none'}
                 >
-                  Spread {sortBy === 'spread' ? (sortAsc ? '▲' : '▼') : ''}
+                  <span className="inline-flex items-center gap-1">
+                    Spread
+                    {sortBy === 'spread' ? (
+                      sortAsc
+                        ? <ArrowUp className="w-2.5 h-2.5" aria-hidden="true" />
+                        : <ArrowDown className="w-2.5 h-2.5" aria-hidden="true" />
+                    ) : (
+                      <span className="w-2.5 h-2.5 inline-block" aria-hidden="true" />
+                    )}
+                  </span>
                   <span className="sr-only">. Click to sort by bid-ask spread.</span>
                 </th>
                 <th
@@ -509,7 +666,16 @@ function MarketsPanel({ books, onSelectMarket, priceFlashes, showPriceFlashes = 
                   title="Sort by data age"
                   aria-sort={sortBy === 'age' ? (sortAsc ? 'ascending' : 'descending') : 'none'}
                 >
-                  Freshness {sortBy === 'age' ? (sortAsc ? '▲' : '▼') : ''}
+                  <span className="inline-flex items-center gap-1">
+                    Freshness
+                    {sortBy === 'age' ? (
+                      sortAsc
+                        ? <ArrowUp className="w-2.5 h-2.5" aria-hidden="true" />
+                        : <ArrowDown className="w-2.5 h-2.5" aria-hidden="true" />
+                    ) : (
+                      <span className="w-2.5 h-2.5 inline-block" aria-hidden="true" />
+                    )}
+                  </span>
                   <span className="sr-only">. Click to sort by data freshness.</span>
                 </th>
                 <th scope="col" className="text-right">Actions</th>
@@ -658,16 +824,56 @@ function MarketsPanel({ books, onSelectMarket, priceFlashes, showPriceFlashes = 
                       <ProbabilityGauge mid={b.mid} />
                     </td>
 
-                    {/* Spread Cents */}
-                    <td className="text-[#dde1ed] mono text-right font-medium">
-                      {b.spread != null ? `${(b.spread * 100).toFixed(1)}¢` : '—'}
+                    {/* W49-4 — Volume column. Synthesized 24h-volume proxy
+                        rendered in compact human-readable form (1.2K /
+                        3.4M) via `fmtCompact`. Tooltip explains the
+                        synthesis so a trader understands the column is
+                        a liquidity proxy, not raw exchange volume. */}
+                    <td className="text-right">
+                      <span
+                        className="mono text-[11px] text-cyan-300 tabular-nums font-medium"
+                        title={`Synthesized 24h volume proxy ≈ clamp(1M / spread_cents, 1K, 5M).\nSpread: ${b.spread != null ? `${(b.spread * 100).toFixed(2)}¢` : 'n/a'}`}
+                        data-testid={`volume-${b.token_id}`}
+                      >
+                        {(() => {
+                          const v = synthesizeVolume(b.spread)
+                          return v == null ? '—' : fmtCompact(v)
+                        })()}
+                      </span>
+                    </td>
+
+                    {/* W49-4 — Spread cell. Now renders a coloured badge
+                        using the shared `classifySpread` three-way
+                        classification so the dedicated Spread column
+                        badge and the inline PriceTicker spread chip
+                        agree on colour (amber wide / green tight /
+                        gray normal). */}
+                    <td className="text-right">
+                      {(() => {
+                        const state = classifySpread(b.spread)
+                        const cents = b.spread != null ? b.spread * 100 : null
+                        return (
+                          <span
+                            className={`mono text-[10.5px] font-bold px-1.5 py-0.5 rounded border inline-block tabular-nums ${spreadBadgeClass(state)}`}
+                            title={`Bid-Ask Spread: ${cents != null ? `${cents.toFixed(2)}¢` : 'n/a'} (${state})`}
+                            data-testid={`spread-${b.token_id}`}
+                            data-spread-state={state}
+                          >
+                            {cents != null ? `${cents.toFixed(1)}¢` : '—'}
+                          </span>
+                        )
+                      })()}
                     </td>
 
                     {/* W38-4 — Freshness cell: now shows BOTH the relative age
                         AND the absolute last-updated timestamp (HH:MM:SS UTC)
                         so a trader can spot a frozen feed even when the
                         relative timer is misleading. Buckets: fresh <10s green,
-                        ok <60s neutral, stale 60–120s amber, dead >120s red. */}
+                        ok <60s neutral, stale 60–120s amber, dead >120s red.
+                        W49-4 — relative readout now uses "3s ago" / "5m ago"
+                        format (via `fmtFreshnessAgo`) so the freshness
+                        intent is self-documenting. The dim absolute UTC
+                        timestamp stays as the secondary line. */}
                     <td className="text-center">
                       <div
                         className="flex flex-col items-center gap-0.5"
@@ -697,7 +903,7 @@ function MarketsPanel({ books, onSelectMarket, priceFlashes, showPriceFlashes = 
                             }`}
                             aria-hidden="true"
                           />
-                          {fmtAgeDisplay(age)}
+                          {fmtFreshnessAgo(age)}
                         </span>
                         <span className="mono text-[9px] text-[#3e4560] tabular-nums">
                           {fmtLastUpdatedUTC(b.updated_at)}

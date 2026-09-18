@@ -1,53 +1,69 @@
 // components/PositionsPanel.tsx — Active Portfolio Positions, Real-Time P&L & Exposure Governance
 //
-// W15-5 — Migrated from `useBot`'s 2-second REST polling to the hybrid
-// `useRealtimeData` hook. The panel now:
-//   1. On mount, REST-prefetches /api/positions to populate state without
-//      a flash of empty content.
-//   2. In parallel, opens a WebSocket and subscribes to the `positions`
-//      channel — when a message arrives with `msg.channel === 'positions'`,
-//      the data state is swapped in atomically (sub-millisecond vs. the
-//      previous 2s poll lag).
-//   3. If the WS is not connected (handshaking / mid-reconnect / permanently
-//      failed), falls back to polling /api/positions every 5s.
-//   4. The header renders a "● Live" badge while the WS is connected, and
-//      a "⟳ Polling" badge while it isn't — so the trader can tell at a
-//      glance whether the displayed positions are real-time or lagged.
+// W49-5 — Operational-clarity redesign of the active-positions table.
+//   The previous W39-5 redesign moved the table from a 2-second REST
+//   poll onto the hybrid `useRealtimeData` (REST prefetch + WS push)
+//   pipeline. W49-5 keeps that transport intact and rebuilds the table
+//   surface for trading-operations clarity:
 //
-// W39-5 — Redesigned for trading-operations clarity:
-//   • Right-aligned numeric columns (Shares, Avg Entry, Mark, Cost Basis,
-//     Realized P&L, Unrealized).
-//   • Color-coded P&L (green positive, red negative) — already present,
-//     re-affirmed.
-//   • Strategy badge in the Market Contract cell (when `position.strategy`
-//     is provided by the snapshot).
-//   • Risk status indicator dot (green/amber/red) next to the outcome
-//     badge. When `position.risk_status` is provided it wins; otherwise
-//     the panel derives a status from the unrealized P&L magnitude:
-//     green when positive or zero, amber when the loss is < 10% of cost
-//     basis, red when ≥ 10%.
-//   • "Time held" column with human-readable "3h 24m" formatting, derived
-//     from `position.opened_at` (when provided). Hidden when no position
-//     in the visible set exposes an `opened_at` timestamp.
-//   • Close Position button restyled as an explicitly destructive action —
-//     filled red background, "✕ Close" copy, and (when the new
-//     `requireConfirmation` prop is true) opens an inline ConfirmationDialog
-//     before invoking `onClosePosition`, with a position-specific impact
-//     summary ("Size: 10 shares, Mark: $0.55, Est. proceeds: $5.50") +
-//     risk warning.
+//   • Header — "💼 ACTIVE POSITIONS (N)" + Live/Polling badge + a 3-cell
+//     KPI strip (Exposure, Realized, Daily PnL). The KPI strip is now
+//     rendered as a visually distinct right-aligned cluster so the
+//     trader can scan portfolio health without parsing the table.
+//
+//   • Direction arrows — every P&L cell now prepends ↑ (profit) / ↓
+//     (loss) so the trader can read direction by shape alone, not just
+//     colour. The arrow is in its own <span> so `getByText('+$5.00')`
+//     still matches the value span exactly (preserves the existing
+//     test contract).
+//
+//   • P&L (%) column added — the existing "Unrealized" column was
+//     dollar-only; the redesign surfaces the percentage return
+//     (unrealized_pnl / total_invested) as an adjacent column so the
+//     trader can read both the dollar magnitude and the relative
+//     return. Color-coded identically to the dollar column. Falls
+//     back to "—" when `unrealized_pnl` isn't published.
+//
+//   • Dedicated Strategy column — the strategy badge previously lived
+//     inline inside the Market Contract cell (W39-5); W49-5 moves it
+//     to its own column so the trader can scan "which strategy opened
+//     each position" at a glance and sort/filter on it downstream.
+//     The badge is rendered blue (per the spec) when the strategy is
+//     a known algorithm; "manual" is rendered purple to flag human
+//     overrides.
+//
+//   • Renamed "Time Held" → "Age" — the column header now matches the
+//     spec language ("Age: Human-readable '3h 24m'"); the underlying
+//     `fmtDurationHm` formatter is unchanged.
+//
+//   • Polished empty state — larger icon (text-4xl vs text-2xl), more
+//     breathing room, and the existing "Automated strategies…will
+//     populate live positions here" hint is preserved (the test
+//     asserts on it via regex).
+//
+//   • Close button — kept as a red ghost button (filled-red background
+//     with explicit "✕ Close" copy + destructive-action aria-label)
+//     and the confirmation-dialog flow (requireConfirmation prop)
+//     from W39-5 is preserved unchanged.
+//
+// W15-5 (unchanged transport) — the panel still:
+//   1. REST-prefetches /api/positions on mount.
+//   2. Opens a WebSocket and subscribes to the `positions` channel.
+//   3. Falls back to polling every 5s when the WS isn't connected.
+//   4. Renders "● Live" / "⟳ Polling" so the trader can tell at a
+//      glance whether the snapshot is real-time or lagged.
 //
 // Backwards-compat: callers MAY still pass `positions` as a prop (the
 // existing tests do this, and page.tsx still threads the prop through).
-// When provided, the prop overrides the fetched data — the WS subscription
-// still runs (so `isRealtime` stays accurate), but the rendered rows come
-// from the override. When omitted, the panel self-fetches via
-// useRealtimeData.
+// When provided, the prop overrides the fetched data — the WS
+// subscription still runs (so `isRealtime` stays accurate), but the
+// rendered rows come from the override.
 'use client'
 
 import { useState, useMemo, useCallback, memo } from 'react'
 import { Position } from '@/hooks/useBot'
 import { formatHierarchicalMarket } from '@/lib/formatters'
-import { fmtPnl, fmtUsd, fmtDurationHm, fmtTimeAbs, fmtPrice } from '@/lib/design-tokens'
+import { fmtPnl, fmtUsd, fmtDurationHm, fmtTimeAbs, fmtPrice, fmtPct } from '@/lib/design-tokens'
 import { useRealtimeData } from '@/hooks/useRealtimeData'
 import { useStaleAge } from '@/hooks/useStaleAge'
 import { Badge } from '@/components/ui/badge'
@@ -82,21 +98,23 @@ interface Props {
   showUnrealizedPnl?: boolean
   showPriceFlashes?: boolean
   /**
-   * W39-5 — when true, clicking the Close Position button opens an inline
-   * ConfirmationDialog before invoking `onClosePosition`. Defaults to
-   * `false` so existing tests (which pass onClosePosition and click
-   * Close directly) keep their direct-call behaviour; page.tsx opts in
-   * to confirmation for production safety.
+   * W39-5/W49-5 — when true, clicking the Close Position button opens
+   * an inline ConfirmationDialog before invoking `onClosePosition`.
+   * Defaults to `false` so existing tests (which pass onClosePosition
+   * and click Close directly) keep their direct-call behaviour;
+   * page.tsx opts in to confirmation for production safety.
    */
   requireConfirmation?: boolean
 }
 
-// W39-5 — derive a risk-status dot color from unrealized P&L + cost basis.
-// `risk_status` (when provided by the backend risk engine) wins; otherwise
-// we apply a conservative heuristic:
+// W49-5 — risk-status dot color. Same derivation as W39-5: when the
+// backend's risk engine publishes `position.risk_status`, that wins;
+// otherwise we apply a conservative heuristic from unrealized P&L:
 //   • green  — unrealized_pnl ≥ 0 (in profit, or breakeven)
-//   • amber  — loss < 10% of total_invested (small drawdown, within risk tolerance)
-//   • red    — loss ≥ 10% of total_invested (material drawdown, attention needed)
+//   • amber  — loss < 10% of total_invested (small drawdown, within
+//              risk tolerance)
+//   • red    — loss ≥ 10% of total_invested (material drawdown,
+//              attention needed)
 // When unrealized_pnl isn't published, we degrade gracefully to amber
 // (signalling "unmeasured" rather than falsely green).
 function deriveRiskStatus(p: Position): RiskStatus {
@@ -119,9 +137,11 @@ const RISK_DOT_TITLE: Record<RiskStatus, string> = {
   danger:  'Risk: Material drawdown — review exposure',
 }
 
-// W39-5 — Strategy badge class. The strategy string is rendered verbatim
-// (e.g. "mm_avellaneda_stoikov") inside a neutral chip. Trailing "manual"
-// (case-insensitive) is highlighted as a human override.
+// W49-5 — Strategy badge. The spec calls for a small blue badge. We
+// keep the W39-5 purple-for-manual differentiation (a human override
+// is operationally distinct from an algorithmic position and deserves
+// a different visual). The non-manual badge uses the design system's
+// blue token (per spec) rather than the W39-5 cyan.
 function StrategyBadge({ strategy }: { strategy: string }) {
   const isManual = /manual/i.test(strategy)
   return (
@@ -129,7 +149,7 @@ function StrategyBadge({ strategy }: { strategy: string }) {
       className={`inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-bold uppercase tracking-wide border ${
         isManual
           ? 'bg-purple-500/15 text-purple-300 border-purple-500/30'
-          : 'bg-cyan-500/10 text-cyan-300 border-cyan-500/30'
+          : 'bg-blue-500/15 text-blue-300 border-blue-500/30'
       }`}
       title={`Strategy: ${strategy}`}
     >
@@ -138,8 +158,21 @@ function StrategyBadge({ strategy }: { strategy: string }) {
   )
 }
 
-// W9-6 — wrapped in React.memo with a custom comparator. See the comment
-// at the bottom of the file for the full reasoning.
+// W49-5 — small ↑/↓ arrow prepended to a P&L value cell. Lives in its
+// own <span> so `getByText('+$5.00')` still matches the value span
+// exactly. The arrow's class is set by the parent cell's color class
+// (text-green-400 for ↑, text-red-400 for ↓) — the arrow inherits the
+// cell color, which is what the test asserts on the td.
+function PnlArrow({ isProfit }: { isProfit: boolean }) {
+  return (
+    <span aria-hidden="true" className="text-[10px] mr-0.5 leading-none">
+      {isProfit ? '↑' : '↓'}
+    </span>
+  )
+}
+
+// W9-6 — wrapped in React.memo with a custom comparator. See the
+// comment at the bottom of the file for the full reasoning.
 function PositionsPanel({
   positions: positionsOverride,
   dailyPnl,
@@ -154,8 +187,9 @@ function PositionsPanel({
   const [filterQuery, setFilterQuery] = useState('')
   const [outcomeFilter, setOutcomeFilter] = useState<'ALL' | 'YES' | 'NO'>('ALL')
   const [sortBy, setSortBy] = useState<'size' | 'pnl' | 'market'>('size')
-  // W39-5 — token id of the position the trader is currently confirming
-  // a Close on. When non-null, the inline ConfirmationDialog is rendered.
+  // W39-5/W49-5 — token id of the position the trader is currently
+  // confirming a Close on. When non-null, the inline
+  // ConfirmationDialog is rendered.
   const [confirmCloseTokenId, setConfirmCloseTokenId] = useState<string | null>(null)
 
   const {
@@ -174,10 +208,8 @@ function PositionsPanel({
   const isRealtime = isRealtimeOverride ?? wsIsRealtime
 
   // W41-3 — compute the data's age so we can surface a StaleIndicator
-  // in the header when the snapshot is older than 30s (stale) or 120s
-  // (dead). Skipped when the caller provides an override (the override
-  // doesn't expose a timestamp; the parent's snapshot freshness is its
-  // own concern).
+  // in the header when the snapshot is older than 30s (stale) or
+  // 120s (dead). Skipped when the caller provides an override.
   const age = useStaleAge(positionsOverride == null ? lastUpdated : null)
 
   const MAX_PER_MARKET = 3.0 // USD 3.00 institutional limit
@@ -207,18 +239,28 @@ function PositionsPanel({
       })
   }, [positions, filterQuery, outcomeFilter, sortBy])
 
-  // W39-5 — only render the "Time Held" column when at least one visible
-  // position exposes an `opened_at` timestamp. Hiding the column entirely
-  // when no row has data avoids an empty header in the paper-trading
-  // snapshot (which doesn't currently publish `opened_at`).
-  const showTimeHeldColumn = useMemo(
+  // W39-5/W49-5 — only render the "Age" column when at least one
+  // visible position exposes an `opened_at` timestamp. Hiding the
+  // column entirely when no row has data avoids an empty header in
+  // the paper-trading snapshot (which doesn't currently publish
+  // `opened_at`).
+  const showAgeColumn = useMemo(
     () => filteredPositions.some((p) => typeof p.opened_at === 'number'),
     [filteredPositions],
   )
 
-  // W39-5 — the position currently pending Close confirmation (when
-  // `requireConfirmation` is true). Looked up by token_id so the dialog
-  // can render a position-specific impact summary.
+  // W49-5 — only render the dedicated Strategy column when at least
+  // one visible position exposes a `strategy` field. Same rationale
+  // as the Age column: avoids an empty header in paper-trading
+  // snapshots that don't publish the field.
+  const showStrategyColumn = useMemo(
+    () => filteredPositions.some((p) => typeof p.strategy === 'string' && p.strategy.length > 0),
+    [filteredPositions],
+  )
+
+  // W39-5/W49-5 — the position currently pending Close confirmation
+  // (when `requireConfirmation` is true). Looked up by token_id so
+  // the dialog can render a position-specific impact summary.
   const confirmingPosition = useMemo(
     () => (confirmCloseTokenId ? positions.find((p) => p.token_id === confirmCloseTokenId) ?? null : null),
     [confirmCloseTokenId, positions],
@@ -250,11 +292,11 @@ function PositionsPanel({
 
   const portfolioExposurePct = Math.min((totalInvested / MAX_TOTAL_PORTFOLIO) * 100, 100)
 
-  // W39-5 — Close handler. When `requireConfirmation` is true, the click
-  // opens the inline ConfirmationDialog (which then calls onClosePosition
-  // on confirm). When false, the click calls onClosePosition directly —
-  // preserves the legacy direct-call behaviour that the existing tests
-  // assert against.
+  // W39-5/W49-5 — Close handler. When `requireConfirmation` is true,
+  // the click opens the inline ConfirmationDialog (which then calls
+  // onClosePosition on confirm). When false, the click calls
+  // onClosePosition directly — preserves the legacy direct-call
+  // behaviour that the existing tests assert against.
   const handleCloseClick = useCallback(
     (tokenId: string) => {
       if (requireConfirmation) {
@@ -277,9 +319,9 @@ function PositionsPanel({
     setConfirmCloseTokenId(null)
   }, [])
 
-  // W39-5 — pre-compute the impact summary string for the dialog so the
-  // trader sees exactly what closing will do before confirming. Falls back
-  // gracefully when mark price / shares aren't available.
+  // W39-5/W49-5 — pre-compute the impact summary string for the dialog
+  // so the trader sees exactly what closing will do before confirming.
+  // Falls back gracefully when mark price / shares aren't available.
   const confirmImpact = useMemo(() => {
     if (!confirmingPosition) return ''
     const shares = confirmingPosition.yes_shares > 0
@@ -308,7 +350,7 @@ function PositionsPanel({
 
   return (
     <div className="card h-full flex flex-col p-3 bg-[#13161e] border border-[#1f2335] shadow-xl">
-      {/* Header with Stats Strip */}
+      {/* Header — title + Live/Polling + KPI strip */}
       <div className="card-header pb-2 mb-2 border-b border-[#1f2335] flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-center gap-2">
           <div className="w-2 h-2 rounded-full bg-cyan-400 animate-pulse" />
@@ -329,7 +371,11 @@ function PositionsPanel({
           {age !== null && <StaleIndicator age={age} />}
         </div>
 
-        {/* Aggregate KPI Badges */}
+        {/* W49-5 — Aggregate KPI strip. Three cards (Exposure, Realized,
+            Daily PnL) clustered on the right side of the header so the
+            trader can scan portfolio health without parsing the table.
+            Each card has the same shape: tiny uppercase label + bold
+            color-coded value + (for Exposure) the % of cap. */}
         <div className="flex items-center gap-2 text-xs">
           <div className="bg-[#0e1015] border border-[#1f2335] px-2.5 py-1 rounded-md flex items-center gap-1.5" title="Total Invested / $25 Exposure Cap">
             <span className="text-[10px] text-[#7e8aaa] uppercase font-semibold">Exposure:</span>
@@ -425,12 +471,12 @@ function PositionsPanel({
 
           <select
             value={sortBy}
-            onChange={(e) => setSortBy(e.target.value as any)}
+            onChange={(e) => setSortBy(e.target.value as 'size' | 'pnl' | 'market')}
             aria-label="Sort positions by"
             className="bg-[#0e1015] border border-[#1f2335] text-[#7e8aaa] rounded text-[10px] font-semibold px-2 py-1 outline-none cursor-pointer"
           >
             <option value="size">Sort: Size ($)</option>
-            <option value="pnl">Sort: Realized P&L</option>
+            <option value="pnl">Sort: Realized P&amp;L</option>
             <option value="market">Sort: Market Name</option>
           </select>
         </div>
@@ -439,8 +485,12 @@ function PositionsPanel({
       {/* Positions Table */}
       <div className="overflow-auto scrollbar-thin flex-1 table-container">
         {filteredPositions.length === 0 ? (
-          <div className="empty-state">
-            <span className="empty-state-icon text-2xl" aria-hidden="true">💼</span>
+          // W49-5 — polished empty state. Larger icon (text-4xl), more
+          // generous vertical padding, and the existing hint copy is
+          // preserved (the test asserts on "Automated strategies...will
+          // populate live positions here" via regex).
+          <div className="empty-state py-10">
+            <span className="empty-state-icon text-4xl" aria-hidden="true">💼</span>
             <span className="empty-state-title text-sm font-semibold">No positions found</span>
             <span className="empty-state-desc text-xs max-w-sm text-center">
               {filterQuery || outcomeFilter !== 'ALL'
@@ -452,20 +502,35 @@ function PositionsPanel({
           <table className="data-table text-xs w-full" role="table" aria-label="Portfolio open positions">
             <thead>
               <tr className="border-b border-[#1f2335] text-[#7e8aaa] text-[10.5px]">
-                <th scope="col" className="min-w-[190px] py-1.5 text-left">Market Contract</th>
+                <th scope="col" className="min-w-[190px] py-1.5 text-left">Token</th>
                 <th scope="col" className="text-center">Risk</th>
-                <th scope="col" className="text-center">Outcome</th>
-                <th scope="col" className="text-right">Shares</th>
-                <th scope="col" className="text-right">Avg Entry</th>
-                <th scope="col" className="text-right">Mark</th>
+                <th scope="col" className="text-center">Side</th>
+                <th scope="col" className="text-right">Size</th>
+                <th scope="col" className="text-right">Entry</th>
+                <th scope="col" className="text-right">Current</th>
                 <th scope="col" className="text-right">Cost Basis</th>
                 <th scope="col" className="text-center min-w-[110px]">Cap Limit ($3 Max)</th>
-                <th scope="col" className="text-right">Realized P&amp;L</th>
+                {/* W49-5 — P&L ($) = unrealized dollar value with ↑/↓
+                    arrow icon. Color-coded green/red per the spec. */}
                 {showUnrealizedPnl && (
-                  <th scope="col" className="text-right">Unrealized</th>
+                  <th scope="col" className="text-right">P&amp;L ($)</th>
                 )}
-                {showTimeHeldColumn && (
-                  <th scope="col" className="text-right">Time Held</th>
+                {/* W49-5 — P&L (%) = unrealized percentage return.
+                    Color-coded identically to the dollar column. Falls
+                    back to "—" when unrealized_pnl isn't published. */}
+                {showUnrealizedPnl && (
+                  <th scope="col" className="text-right">P&amp;L (%)</th>
+                )}
+                <th scope="col" className="text-right">Realized</th>
+                {/* W49-5 — dedicated Strategy column (previously inline
+                    in the Token cell). Only rendered when at least one
+                    visible row exposes a strategy field. */}
+                {showStrategyColumn && (
+                  <th scope="col" className="text-center">Strategy</th>
+                )}
+                {/* W49-5 — renamed "Time Held" → "Age" per the spec. */}
+                {showAgeColumn && (
+                  <th scope="col" className="text-right">Age</th>
                 )}
                 <th scope="col" className="text-center">Action</th>
               </tr>
@@ -483,16 +548,28 @@ function PositionsPanel({
                     : showPriceFlashes && flashDir === 'down'
                       ? ' price-down'
                       : ''
-                // W39-5 — risk status dot derivation per row.
                 const riskStatus = deriveRiskStatus(p)
+                // W49-5 — pre-compute P&L arrow direction. The arrow is
+                // rendered in its own <span> so getByText('+$5.00')
+                // still matches the value span exactly.
+                const hasUnrealized = typeof p.unrealized_pnl === 'number'
+                const unrealizedProfit = hasUnrealized && (p.unrealized_pnl as number) >= 0
+                const realizedProfit = p.realised_pnl >= 0
+                // W49-5 — unrealized P&L percentage. Falls back to null
+                // when unrealized_pnl isn't published OR total_invested
+                // is zero (avoids div-by-zero).
+                const unrealizedPct = hasUnrealized && p.total_invested > 0
+                  ? (p.unrealized_pnl as number) / p.total_invested
+                  : null
 
                 return (
                   <tr
                     key={p.token_id}
                     className="hover:bg-blue-500/10 transition-colors group"
                   >
-                    {/* Market Title — includes the strategy badge when
-                        the snapshot provides one (W39-5). */}
+                    {/* Token — clickable to open depth chart + trade modal.
+                        The strategy badge no longer lives inline here
+                        (moved to its own column in W49-5). */}
                     <td
                       className="py-2.5 max-w-[240px]"
                     >
@@ -507,7 +584,6 @@ function PositionsPanel({
                             <span className="text-[9px] text-cyan-400 font-bold uppercase tracking-wider truncate">
                               {info.category.icon} {info.eventTitle}
                             </span>
-                            {p.strategy && <StrategyBadge strategy={p.strategy} />}
                           </div>
                           <span
                             className="text-[#dde1ed] group-hover:text-cyan-300 font-medium leading-snug text-xs block whitespace-normal transition-colors"
@@ -519,9 +595,7 @@ function PositionsPanel({
                       </button>
                     </td>
 
-                    {/* W39-5 — Risk status indicator dot. Title attribute
-                        exposes the human-readable risk classification to
-                        screen readers + hover tooltips. */}
+                    {/* W39-5/W49-5 — Risk status indicator dot. */}
                     <td className="text-center">
                       <span
                         className={`inline-block w-2.5 h-2.5 rounded-full ${RISK_DOT_CLASS[riskStatus]}`}
@@ -531,7 +605,12 @@ function PositionsPanel({
                       />
                     </td>
 
-                    {/* Outcome Badge */}
+                    {/* W49-5 — Side badge (YES/NO outcome). Green for
+                        YES (long-YES outcome), red for NO (short-YES
+                        outcome). The spec's "Green LONG / red SHORT"
+                        maps onto Polymarket's binary-outcome semantics:
+                        YES shares = LONG the YES outcome, NO shares =
+                        SHORT the YES outcome (equiv. LONG the NO). */}
                     <td className="text-center">
                       <span
                         className={`inline-block px-2 py-0.5 rounded text-[9.5px] font-bold uppercase tracking-wide ${
@@ -544,29 +623,29 @@ function PositionsPanel({
                       </span>
                     </td>
 
-                    {/* Shares */}
+                    {/* W49-5 — Size (Shares). */}
                     <td className="mono text-right font-semibold text-[#dde1ed]">
                       {p.yes_shares > 0 ? p.yes_shares.toFixed(1) : (p.no_shares ?? 0).toFixed(1)}
                     </td>
 
-                    {/* Avg Entry */}
+                    {/* W49-5 — Entry (Avg Entry). */}
                     <td className="mono text-right text-[#7e8aaa] text-xs">
                       ${p.avg_entry_price.toFixed(3)}
                     </td>
 
-                    {/* Mark */}
+                    {/* W49-5 — Current (Mark) with flash class. */}
                     <td className={`mono text-right text-[#dde1ed] text-xs${flashClass}`}>
                       {typeof p.current_price === 'number'
                         ? `$${p.current_price.toFixed(3)}`
                         : <span className="text-[#3e4560]">—</span>}
                     </td>
 
-                    {/* Cost Basis */}
+                    {/* Cost Basis. */}
                     <td className="mono text-right font-semibold text-cyan-300">
                       {fmtUsd(p.total_invested)}
                     </td>
 
-                    {/* Exposure Utilization Gauge */}
+                    {/* Exposure Utilization Gauge. */}
                     <td className="text-center px-2">
                       <div className="flex flex-col gap-1 items-center">
                         <div className="w-full bg-[#0e1015] border border-[#1f2335] h-1.5 rounded-full overflow-hidden">
@@ -583,42 +662,82 @@ function PositionsPanel({
                       </div>
                     </td>
 
-                    {/* Realized PnL */}
+                    {/* W49-5 — P&L ($) = Unrealized dollar PnL with
+                        direction arrow. The arrow lives in its own
+                        <span> so getByText('+$5.00') still matches
+                        the value span exactly (preserves the test
+                        contract for color-coded unrealized PnL). */}
+                    {showUnrealizedPnl && (
+                      <td
+                        className={`mono text-right font-bold text-xs ${
+                          hasUnrealized
+                            ? unrealizedProfit
+                              ? 'text-green-400'
+                              : 'text-red-400'
+                            : 'text-[#3e4560]'
+                        }`}
+                      >
+                        {hasUnrealized ? (
+                          <>
+                            <PnlArrow isProfit={unrealizedProfit} />
+                            <span>{fmtPnl(p.unrealized_pnl)}</span>
+                          </>
+                        ) : '—'}
+                      </td>
+                    )}
+
+                    {/* W49-5 — P&L (%) = Unrealized percentage return.
+                        Falls back to "—" when unrealized_pnl isn't
+                        published OR total_invested is zero. */}
+                    {showUnrealizedPnl && (
+                      <td
+                        className={`mono text-right font-bold text-xs ${
+                          unrealizedPct !== null
+                            ? unrealizedPct >= 0
+                              ? 'text-green-400'
+                              : 'text-red-400'
+                            : 'text-[#3e4560]'
+                        }`}
+                      >
+                        {unrealizedPct !== null ? (
+                          <>
+                            <PnlArrow isProfit={unrealizedPct >= 0} />
+                            <span>{fmtPct(unrealizedPct)}</span>
+                          </>
+                        ) : '—'}
+                      </td>
+                    )}
+
+                    {/* Realized P&L — also with direction arrow per
+                        the W49-5 spec ("P&L coloring with arrow"). */}
                     <td
                       className={`mono text-right font-bold text-xs ${
                         p.realised_pnl >= 0 ? 'text-green-400' : 'text-red-400'
                       }`}
                     >
-                      {fmtPnl(p.realised_pnl)}
+                      <PnlArrow isProfit={realizedProfit} />
+                      <span>{fmtPnl(p.realised_pnl)}</span>
                     </td>
 
-                    {/* S1 — Unrealized P&amp;L (mark-to-market). Color-coded
-                        green/red. Falls back to "—" when unrealized_pnl is
-                        not provided by the backend.
-                        W15-2 — the entire cell is hidden when the
-                        `showUnrealizedPnl` preference is false. */}
-                    {showUnrealizedPnl && (
-                      <td
-                        className={`mono text-right font-bold text-xs ${
-                          typeof p.unrealized_pnl === 'number'
-                            ? p.unrealized_pnl >= 0
-                              ? 'text-green-400'
-                              : 'text-red-400'
-                            : 'text-[#3e4560]'
-                        }`
-                        }
-                      >
-                        {typeof p.unrealized_pnl === 'number'
-                          ? fmtPnl(p.unrealized_pnl)
-                          : '—'}
+                    {/* W49-5 — dedicated Strategy column. Only rendered
+                        when at least one visible row exposes a
+                        strategy field. Renders "—" when this specific
+                        row doesn't have one (preserves the W39-5
+                        graceful-degradation contract). */}
+                    {showStrategyColumn && (
+                      <td className="text-center">
+                        {p.strategy ? (
+                          <StrategyBadge strategy={p.strategy} />
+                        ) : (
+                          <span className="text-[#3e4560]">—</span>
+                        )}
                       </td>
                     )}
 
-                    {/* W39-5 — Time Held column. Hidden entirely when no
-                        visible position exposes `opened_at`. The title
-                        attribute carries the absolute timestamp for hover
-                        tooltips + screen-reader context. */}
-                    {showTimeHeldColumn && (
+                    {/* W49-5 — Age (renamed from "Time Held"). The
+                        title attribute carries the absolute timestamp
+                        for hover tooltips + screen-reader context. */}
+                    {showAgeColumn && (
                       <td
                         className="mono text-right text-[#7e8aaa] text-[10.5px]"
                         title={typeof p.opened_at === 'number' ? fmtTimeAbs(p.opened_at) : undefined}
@@ -627,7 +746,7 @@ function PositionsPanel({
                       </td>
                     )}
 
-                    {/* Action Button */}
+                    {/* Action — Trade + Close buttons. */}
                     <td className="text-center">
                       <div className="flex items-center justify-center gap-1">
                         <button
@@ -637,12 +756,10 @@ function PositionsPanel({
                         >
                           Trade
                         </button>
-                        {/* W39-5 — Close Position button restyled as an
-                            explicitly destructive action. Filled red
-                            background (not just red text), explicit
-                            "✕" icon, and the destructive-action
-                            aria-label. When `requireConfirmation` is
-                            true, the click opens the ConfirmationDialog
+                        {/* W39-5/W49-5 — Close Position button styled
+                            as an explicitly destructive red ghost
+                            action. When `requireConfirmation` is true,
+                            the click opens the ConfirmationDialog
                             instead of calling onClosePosition directly. */}
                         <button
                           onClick={() => handleCloseClick(p.token_id)}
@@ -662,17 +779,17 @@ function PositionsPanel({
         )}
       </div>
 
-      {/* W39-5 — Close Position confirmation dialog. Rendered inline so
-          the panel can drive its own impact summary from the live
-          position snapshot (size + mark + estimated proceeds) without
-          threading every position through the parent. */}
+      {/* W39-5/W49-5 — Close Position confirmation dialog. Rendered
+          inline so the panel can drive its own impact summary from
+          the live position snapshot (size + mark + estimated proceeds)
+          without threading every position through the parent. */}
       <ConfirmationDialog
         open={confirmCloseTokenId !== null && confirmingPosition !== null}
         severity="danger"
         title="Close Position?"
         description={confirmDescription}
         impact={confirmImpact}
-        riskWarning="Market close executes immediately at the best available price. On thin books this may slip materially below the displayed mark — review the order book depth before confirming."
+        riskWarning="This action cannot be undone. Market close executes immediately at the best available price — on thin books this may slip materially below the displayed mark. Review the order book depth before confirming."
         confirmLabel="✕ Close Position"
         cancelLabel="Keep Position"
         onConfirm={handleConfirmClose}
@@ -682,10 +799,10 @@ function PositionsPanel({
   )
 }
 
-// W9-6 — React.memo with a custom comparator. See the original (pre-W39-5)
-// header comment for the full reasoning. The W39-5 additions are:
-//   • `requireConfirmation` is a primitive boolean, diffed inline so a
-//     parent flipping the confirmation preference re-renders the panel.
+// W9-6 — React.memo with a custom comparator. See the original
+// (pre-W39-5) header comment for the full reasoning. The W49-5
+// additions are non-behavioural (column renderings), so the comparator
+// is unchanged from W39-5.
 export default memo(PositionsPanel, (prev, next) => {
   if (prev.positions !== next.positions) return false
   if (prev.dailyPnl !== next.dailyPnl) return false

@@ -1,11 +1,19 @@
 // components/Sidebar.test.tsx — Navigation, accessibility & mobile behaviour.
+//
+// W49-2 — EXPECTED_GROUPS updated: the first group's visible label is
+// now "Overview" (was "Main"). The underlying group id is still `main`
+// (kept for back-compat with consumers reading NavItem.group), but the
+// i18n key `groups.overview` resolves to "Overview" in en.json. The
+// "AI Prediction Explainer" and "Performance" items are intentionally
+// absent from the visible sidebar per the redesign's tighter grouping —
+// they remain reachable via the command palette + the keyboard shortcut.
 import { describe, it, expect, vi } from 'vitest'
 import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import Sidebar from './Sidebar'
 
 const EXPECTED_GROUPS = [
-  'Main',
+  'Overview',
   'Markets',
   'Portfolio',
   'Capital',

@@ -143,3 +143,28 @@ export function fmtUptime(s: number): string {
   const sec = s % 60
   return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`
 }
+
+/**
+ * W49-4 — Format a raw numeric quantity as a compact human-readable
+ * string (1.2K / 3.4M / 5.6B). Used by the redesigned Markets and
+ * Screener panels for the Volume column — the existing `fmtUsd`
+ * always renders full digits ($1,234), but the W49-4 spec calls for
+ * "Human-readable (1.2K, 3.4M)" so a trader can scan a long table
+ * without their eye catching on the trailing zeros.
+ *
+ *   • |v| < 1_000         → "942"   (no suffix, integer-only)
+ *   • |v| < 1_000_000     → "1.2K"
+ *   • |v| < 1_000_000_000 → "3.4M"
+ *   • |v| ≥ 1_000_000_000 → "5.6B"
+ *
+ * Negative values preserve their leading minus sign. Null/NaN → "—".
+ */
+export function fmtCompact(v: number | null | undefined): string {
+  if (v == null || !Number.isFinite(v)) return '—'
+  const sign = v < 0 ? '−' : ''
+  const abs = Math.abs(v)
+  if (abs < 1_000) return `${sign}${Math.round(abs)}`
+  if (abs < 1_000_000) return `${sign}${(abs / 1_000).toFixed(1)}K`
+  if (abs < 1_000_000_000) return `${sign}${(abs / 1_000_000).toFixed(1)}M`
+  return `${sign}${(abs / 1_000_000_000).toFixed(1)}B`
+}

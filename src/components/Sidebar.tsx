@@ -1,4 +1,32 @@
 // components/Sidebar.tsx — Primary navigation sidebar
+//
+// W49-2 — Redesigned for a cleaner, more professional navigation
+// experience. Slimmer (200px / 48px collapsed), grouped by function,
+// with a live status footer (bot indicator, backend connection, paper/
+// live mode badge, UTC clock) and a polished active state (3px accent
+// left border + slightly elevated background).
+//
+// Group structure (functional, not feature-tile):
+//   Overview     — Command Center
+//   Markets      — Live Books, Screener, Order Flow
+//   Portfolio    — Positions, Orders, Trades
+//   Capital      — Capital Allocator
+//   Strategies   — Strategy Registry, Arbitrage, Performance
+//   Intelligence — Deep Analysis, AI / ML Engine, Copilot, Shadow, ML Validation
+//   Analytics    — Performance Report, Backtest, Attribution, Execution, Closed
+//   System       — Health, Data Explorer, Database, Ingestion, Observability,
+//                  Retention, Decisions, Safety, Rate Limits, Audit
+//
+// Notes:
+//  - The first group keeps `id: 'main'` and `group: 'main'` for back-
+//    compat with any consumer reading `NavItem.group` (e.g. CommandPalette
+//    filters). Its visible label is now "Overview" via `groups.overview`.
+//  - `intelligence-explainer` and `analytics-performance` are intentionally
+//    absent from the sidebar (per the task spec) but remain in the
+//    `NavSection` type so page.tsx + CommandPalette keep type-checking
+//    against them (they're still reachable via the keyboard shortcut 8
+//    and the command palette).
+
 'use client'
 
 import { useState, useEffect } from 'react'
@@ -59,8 +87,9 @@ interface NavItem {
 
 interface NavGroup {
   id: string
-  /** i18n key — e.g. `groups.main`. Capital group is `groups.capital_group`
-   *  (the bare `capital` key is reserved for the nav item label). */
+  /** i18n key — e.g. `groups.markets`. The first group uses
+   *  `groups.overview` (the bare `groups.main` key is still defined for
+   *  back-compat with consumers that read it). */
   labelKey: string
   label: string
   items: NavItem[]
@@ -69,8 +98,8 @@ interface NavGroup {
 const NAV_GROUPS: NavGroup[] = [
   {
     id: 'main',
-    labelKey: 'groups.main',
-    label: 'Main',
+    labelKey: 'groups.overview',
+    label: 'Overview',
     items: [
       { id: 'command', labelKey: 'nav.command', label: 'Command Center', shortLabel: 'Command', icon: '⊞', kbd: '1', group: 'main' },
     ],
@@ -112,8 +141,6 @@ const NAV_GROUPS: NavGroup[] = [
       { id: 'strategies-arbitrage', labelKey: 'nav.arbitrage', label: 'Arbitrage', shortLabel: 'Arbitrage', icon: '⇌', kbd: '6', group: 'strategies' },
       // W23-5 — Strategy Performance dashboard: per-strategy P&L, win rate,
       // Sharpe / Sortino / Calmar, equity overlay, and risk-adjusted ranking.
-      // Sits next to the Strategy Registry + Arbitrage so all strategy-side
-      // panels live under the same sidebar group.
       { id: 'strategies-performance', labelKey: 'nav.strategies_performance', label: 'Performance', shortLabel: 'Perf', icon: '◷', group: 'strategies' },
     ],
   },
@@ -124,12 +151,9 @@ const NAV_GROUPS: NavGroup[] = [
     items: [
       { id: 'intelligence-analysis', labelKey: 'nav.analysis', label: 'Deep Analysis', shortLabel: 'Analysis', icon: '⊘', kbd: '7', group: 'intelligence' },
       { id: 'intelligence-aiml', labelKey: 'nav.aiml', label: 'AI / ML Engine', shortLabel: 'AI/ML', icon: '⊛', group: 'intelligence' },
-      // W38-5 — Explainable AI / ML Prediction panel: trustworthy AI
-      // prediction surface with clear labeling, SHAP explainability, and
-      // prediction history. Sits next to AI/ML Engine so the trader can
-      // hop between the model telemetry (command center) and the
-      // per-prediction explainer without losing context.
-      { id: 'intelligence-explainer', labelKey: 'nav.explainer', label: 'AI Prediction Explainer', shortLabel: 'Explainer', icon: '◍', group: 'intelligence' },
+      // W49-2 — AI Prediction Explainer removed from the visible sidebar
+      // per the redesign's tighter Intelligence grouping. Still reachable
+      // via the command palette + the W38-5 panel in page.tsx.
       { id: 'intelligence-copilot', labelKey: 'nav.copilot', label: 'Copilot', shortLabel: 'Copilot', icon: '◈', group: 'intelligence' },
       { id: 'intelligence-shadow', labelKey: 'nav.shadow', label: 'Shadow Inference', shortLabel: 'Shadow', icon: '⬡', group: 'intelligence' },
       { id: 'intelligence-validation', labelKey: 'nav.validation', label: 'ML Validation', shortLabel: 'ML Valid', icon: '⊕', group: 'intelligence' },
@@ -140,10 +164,17 @@ const NAV_GROUPS: NavGroup[] = [
     labelKey: 'groups.analytics',
     label: 'Analytics',
     items: [
-      { id: 'analytics-performance', labelKey: 'nav.performance', label: 'Performance', shortLabel: 'Perf', icon: '◷', kbd: '8', group: 'analytics' },
-      // W26-2 — Honest Performance Report: dedicated per-category breakdown
-      // (backtest / walk-forward / paper / live) with confidence intervals,
-      // p-values, slippage + fees, and an always-on disclaimer banner.
+      // W49-2 — Performance (analytics-performance) removed from the
+      // visible sidebar in favour of the more comprehensive Performance
+      // Report (analytics-performance-report) — the latter already
+      // covers per-category breakdown with confidence intervals + p-values
+      // + slippage + fees. The keyboard shortcut 8 still routes to
+      // analytics-performance via page.tsx, so the panel remains
+      // reachable.
+      // W26-2 — Honest Performance Report: dedicated per-category
+      // breakdown (backtest / walk-forward / paper / live) with
+      // confidence intervals, p-values, slippage + fees, and an
+      // always-on disclaimer banner.
       { id: 'analytics-performance-report', labelKey: 'nav.performance_report', label: 'Performance Report', shortLabel: 'Honest', icon: '∉', group: 'analytics' },
       { id: 'analytics-backtest', labelKey: 'nav.backtest', label: 'Backtest Lab', shortLabel: 'Backtest', icon: '⊙', group: 'analytics' },
       { id: 'analytics-attribution', labelKey: 'nav.attribution', label: 'Attribution', shortLabel: 'Attrib', icon: '◫', group: 'analytics' },
@@ -159,16 +190,16 @@ const NAV_GROUPS: NavGroup[] = [
       { id: 'system-health', labelKey: 'nav.health', label: 'System Health', shortLabel: 'Health', icon: '⊜', group: 'system' },
       { id: 'system-database', labelKey: 'nav.database', label: 'Data Explorer', shortLabel: 'Data', icon: '⊞', group: 'system' },
       { id: 'system-database-status', labelKey: 'nav.database_status', label: 'Database', shortLabel: 'DB', icon: '🗄', group: 'system' },
+      // W31-5 — Data Ingestion: promoted up to sit next to the other
+      // data-source panels (Database / Data Explorer) so all ingestion-
+      // related surfaces cluster together instead of trailing the group.
+      { id: 'system-ingestion', labelKey: 'nav.ingestion', label: 'Data Ingestion', shortLabel: 'Ingest', icon: '⇶', group: 'system' },
       { id: 'system-observability', labelKey: 'nav.observability', label: 'Observability', shortLabel: 'Observ', icon: '◉', group: 'system' },
       { id: 'system-retention', labelKey: 'nav.retention', label: 'Retention', shortLabel: 'Retain', icon: '⌫', group: 'system' },
       { id: 'system-decisions', labelKey: 'nav.decisions', label: 'Decision Ledger', shortLabel: 'Ledger', icon: '↹', group: 'system' },
       { id: 'system-safety', labelKey: 'nav.safety', label: 'Safety Gate', shortLabel: 'Safety', icon: '🛡', group: 'system' },
       { id: 'system-rate-limit', labelKey: 'nav.rate_limits', label: 'Rate Limits', shortLabel: 'Limits', icon: '⏱', group: 'system' },
       { id: 'system-audit', labelKey: 'nav.audit', label: 'Audit Log', shortLabel: 'Audit', icon: '📋', group: 'system' },
-      // W31-5 — Data Ingestion health panel: source health grid, throughput /
-      // latency / freshness metrics, data-quality scores, dead-letter queue,
-      // gap timeline, market coverage. Polls /api/ingestion/* every 15s.
-      { id: 'system-ingestion', labelKey: 'nav.ingestion', label: 'Data Ingestion', shortLabel: 'Ingest', icon: '⇶', group: 'system' },
     ],
   },
 ]
@@ -180,22 +211,42 @@ interface SidebarProps {
   onMobileClose?: () => void
 }
 
+/** Format a Date as `HH:MM:SS` UTC. Done manually so the output is
+ *  locale-independent and stable under jsdom (no Intl dependency). */
+function formatUTC(d: Date): string {
+  const hh = String(d.getUTCHours()).padStart(2, '0')
+  const mm = String(d.getUTCMinutes()).padStart(2, '0')
+  const ss = String(d.getUTCSeconds()).padStart(2, '0')
+  return `${hh}:${mm}:${ss}`
+}
+
 export default function Sidebar({ active, onChange, mobileOpen, onMobileClose }: SidebarProps) {
   const [collapsed, setCollapsed] = useState(false)
+  // W49-2 — Live UTC clock for the footer status section. Updates every
+  // second so the trader can eyeball "is the bot's clock the same as
+  // mine" without leaving the sidebar. Cleared on unmount.
+  const [now, setNow] = useState<Date>(() => new Date())
   // W14-2 — i18n: `t()` resolves label keys at render. Initial render
   // uses 'en' (the SSR-payload match) so first paint matches the
   // server; the mount effect inside the hook reconciles to the
-  // persisted locale afterwards. We only need `t` here — `locale`
-  // and `setLocale` aren't used directly in this component.
+  // persisted locale afterwards.
   const { t } = useTranslation()
 
-  // Detect viewport for auto-collapse
+  // Detect viewport for auto-collapse on tablet/narrow desktop widths.
   useEffect(() => {
     const mq = window.matchMedia('(max-width: 1024px)')
     const handler = (e: MediaQueryListEvent) => setCollapsed(e.matches)
     setCollapsed(mq.matches)
     mq.addEventListener('change', handler)
     return () => mq.removeEventListener('change', handler)
+  }, [])
+
+  // Tick the footer clock once per second. The interval is created in
+  // an effect so SSR doesn't try to start a timer (window check via
+  // the effect body itself — effects don't run on the server).
+  useEffect(() => {
+    const id = window.setInterval(() => setNow(new Date()), 1000)
+    return () => window.clearInterval(id)
   }, [])
 
   const handleSelect = (id: NavSection) => {
@@ -268,15 +319,7 @@ export default function Sidebar({ active, onChange, mobileOpen, onMobileClose }:
           {NAV_GROUPS.map((group) => (
             <div key={group.id} role="listitem">
               {!collapsed && (
-                <div style={{
-                  fontSize: '9.5px',
-                  fontWeight: 700,
-                  textTransform: 'uppercase',
-                  letterSpacing: '0.1em',
-                  color: 'var(--text-dim)',
-                  padding: '10px 12px 4px',
-                  userSelect: 'none',
-                }}>
+                <div className="sidebar-group-label">
                   {t(group.labelKey)}
                 </div>
               )}
@@ -292,8 +335,7 @@ export default function Sidebar({ active, onChange, mobileOpen, onMobileClose }:
                   aria-current={active === item.id ? 'page' : undefined}
                   title={collapsed ? `${itemLabel}${item.kbd ? ` (${item.kbd})` : ''}` : undefined}
                 >
-                  <span className="sidebar-icon" aria-hidden="true"
-                    style={{ fontSize: '15px', fontFamily: 'system-ui, sans-serif' }}>
+                  <span className="sidebar-icon" aria-hidden="true">
                     {item.icon}
                   </span>
                   <span className="sidebar-label">{itemLabel}</span>
@@ -307,16 +349,7 @@ export default function Sidebar({ active, onChange, mobileOpen, onMobileClose }:
                     </span>
                   )}
                   {!collapsed && item.kbd && (
-                    <span style={{
-                      fontSize: '9px',
-                      color: 'var(--text-dim)',
-                      background: 'var(--bg-surface)',
-                      border: '1px solid var(--border)',
-                      borderRadius: '3px',
-                      padding: '1px 4px',
-                      fontFamily: 'JetBrains Mono, monospace',
-                      flexShrink: 0,
-                    }} aria-hidden="true">
+                    <span className="sidebar-kbd-badge" aria-hidden="true">
                       {item.kbd}
                     </span>
                   )}
@@ -327,14 +360,45 @@ export default function Sidebar({ active, onChange, mobileOpen, onMobileClose }:
           ))}
         </div>
 
-        {/* Footer */}
-        <div className="sidebar-footer">
-          <div style={{ padding: '4px 8px' }} role="status" aria-live="polite">
-            <div className="sidebar-item" style={{ opacity: 0.75, cursor: 'default', fontSize: '10px' }}>
-              <span className="sidebar-icon" aria-hidden="true" style={{ fontSize: '12px' }}>🟢</span>
-              {/* W14-2 — i18n: footer status label resolved via t(). */}
-              <span className="sidebar-label" style={{ fontSize: '10.5px' }}>{t('status.bot_active')}</span>
-            </div>
+        {/* W49-2 — Footer status section.
+            Four rows:
+              1. Bot status (green dot + "Bot Engine Active" label)
+              2. Backend connection status (green dot + "Backend: Connected")
+              3. Mode badge (PAPER / LIVE)
+              4. Current UTC time (live clock)
+
+            The text content is resolved through the i18n `t()` lookup so
+            both en + fr locales work without code changes. The clock is
+            formatted via `formatUTC` to stay locale-independent. When the
+            sidebar is collapsed, only the status dot remains (per the
+            `.sidebar.collapsed .sidebar-status-text { display: none }`
+            rule) so the rail stays scannable at 48px wide. */}
+        <div className="sidebar-status-section" role="status" aria-live="polite">
+          <div className="sidebar-status-row">
+            <span className="sidebar-status-dot" aria-hidden="true" />
+            <span className="sidebar-status-text">{t('status.bot_active')}</span>
+          </div>
+          <div className="sidebar-status-row">
+            <span className="sidebar-status-dot" aria-hidden="true" />
+            <span className="sidebar-status-text">
+              {t('status.connected')}
+            </span>
+          </div>
+          <div className="sidebar-status-row">
+            <span className="sidebar-mode-badge" aria-label={t('status.paper_mode')}>
+              {t('status.paper_mode').split(' ')[0]}
+            </span>
+            <span className="sidebar-status-text" style={{ fontSize: '9.5px', color: 'var(--text-dim)' }}>
+              {t('status.paper_mode')}
+            </span>
+          </div>
+          <div className="sidebar-status-row">
+            <span className="sidebar-time" aria-label="Current UTC time">
+              {formatUTC(now)}
+            </span>
+            <span className="sidebar-status-text" style={{ fontSize: '9.5px', color: 'var(--text-dim)' }}>
+              UTC
+            </span>
           </div>
         </div>
       </nav>

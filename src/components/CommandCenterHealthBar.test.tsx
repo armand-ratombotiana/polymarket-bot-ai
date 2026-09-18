@@ -1,15 +1,18 @@
-// components/CommandCenterHealthBar.test.tsx — W40-2 minimal render tests
-// for the W38-3 / W39-3 compact system health bar.
+// components/CommandCenterHealthBar.test.tsx — W40-2 / W49-3 minimal render
+// tests for the W38-3 / W39-3 / W49-3 compact system health bar.
 //
 // The bar is a presentational shell driven by `snapshot` + `status` +
 // `wsConnected` props — no fetch, but it does own a 5s re-render timer
 // for the "Xs ago" freshness pill. Tests cover:
 //   1. Renders without crashing.
 //   2. Renders the documented `data-testid` region.
-//   3. Renders all six health indicators (Backend / WebSocket / Data Fresh
-//      / Risk Level / Kill Switch / AI Status).
+//   3. Renders the W49-3 six health indicators (Backend / WebSocket /
+//      Data Fresh / Risk Level / Kill Switch + Updated timestamp).
 //   4. Backend indicator reflects the `status` prop (Online / Offline).
 //   5. Kill switch indicator pulses when the snapshot's kill switch is on.
+//   6. (W49-3 regression guard) AI Status label is NOT rendered on the
+//      bar — it migrated to Row 5 (System Status) to match the
+//      "exactly six indicators on Row 1" spec.
 import { describe, it, expect, vi } from 'vitest'
 import { render, screen } from '@testing-library/react'
 import CommandCenterHealthBar from './CommandCenterHealthBar'
@@ -78,7 +81,18 @@ describe('CommandCenterHealthBar', () => {
     expect(screen.getByText('Data Fresh')).toBeInTheDocument()
     expect(screen.getByText('Risk Level')).toBeInTheDocument()
     expect(screen.getByText('Kill Switch')).toBeInTheDocument()
-    expect(screen.getByText('AI Status')).toBeInTheDocument()
+    expect(screen.getByText('Updated')).toBeInTheDocument()
+  })
+
+  it('does NOT render the AI Status indicator (W49-3 — moved to Row 5)', () => {
+    render(
+      <CommandCenterHealthBar
+        snapshot={makeSnapshot()}
+        status="connected"
+        wsConnected
+      />,
+    )
+    expect(screen.queryByText('AI Status')).not.toBeInTheDocument()
   })
 
   it('reflects the backend connection status (Online when connected)', () => {

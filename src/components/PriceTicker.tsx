@@ -1,20 +1,34 @@
 // components/PriceTicker.tsx — Animated price display with directional flash.
 //
+// W49-4 — pro-trading refresh:
+//   • Color flash duration tightened 350ms → 200ms so the green/red
+//     tint tracks the tick cadence of a live L2 feed more tightly.
+//     A slower flash (350ms) washed out on a fast feed (multiple
+//     ticks/sec); 200ms keeps the flash visible without smearing.
+//   • Spread indicator now renders BOTH a numeric chip AND a visual
+//     bar: the bar fills proportionally to the spread width relative
+//     to a 10¢ ceiling (so 2¢ fills 20%, 5¢ fills 50%). The bar is
+//     coloured amber when the spread exceeds the W39-4 >3% threshold
+//     and green when tight (<1¢) — matching the W49-4 spread badge spec.
+//   • Timestamp readout now reads "updated 3s ago" (prefix added) so
+//     the freshness intent is self-documenting in the UI, matching
+//     the W49-4 "updated 3s ago" requirement.
+//   • The numeric price span keeps `data-testid`/`data-direction` so
+//     the W30-2 PriceTicker.test.tsx assertions still resolve.
+//
 // Renders a single market's current price (mid / best bid / best ask) with:
 //   • Framer Motion color flash — green on tick up, red on tick down, dim
-//     when unchanged. The flash fades over ~500ms so a live book feeds a
-//     constant pulse of color as prices move.
+//     when unchanged. The flash fades over ~200ms (W49-4) so a live book
+//     feeds a constant pulse of color as prices move.
 //   • Subtle pulse animation (scale 1.00 → 1.04 → 1.00) on each price
 //     change, so the cell visually "ticks" alongside the numeric update.
 //   • Change-since-last-tick readout — absolute delta (¢) + percentage
 //     move, sign-coloured.
 //   • Bid/ask spread chip — small mono badge with the spread in cents,
 //     coloured amber when wide (>3%) and dim otherwise.
-//   • W39-4 — optional "Xs ago" timestamp readout beneath the change
-//     line. Renders only when `timestamp` (epoch seconds of the last
-//     price update) is supplied. Lets the ticker communicate data
-//     freshness inline when used outside a table that already has a
-//     dedicated freshness column.
+//   • W39-4 — optional "updated Xs ago" timestamp readout beneath the
+//     change line. Renders only when `timestamp` (epoch seconds of the
+//     last price update) is supplied.
 //
 // The component is a pure display: it accepts `price` (the current
 // mid/best), `previousPrice` (the prior tick — null on first render),
@@ -125,14 +139,15 @@ const sizeClassMap: Record<NonNullable<PriceTickerProps['size']>, string> = {
 }
 
 /**
- * W39-4 — Format an epoch-seconds timestamp as a relative "Xs ago" /
- * "Xm ago" / "Xh ago" readout for the PriceTicker. Returns null when
- * the timestamp is missing or in the future (clock skew) so the
- * readout is omitted entirely instead of showing a misleading "0s ago".
+ * W39-4 / W49-4 — Format an epoch-seconds timestamp as a relative
+ * "updated 3s ago" / "updated 5m ago" / "updated 2h ago" readout for
+ * the PriceTicker. Returns null when the timestamp is missing or in
+ * the future (clock skew) so the readout is omitted entirely instead
+ * of showing a misleading "updated 0s ago".
  *
- *   • < 60s    → "3s ago"
- *   • < 60m    → "5m ago"
- *   • ≥ 60m    → "2h ago"
+ *   • < 60s    → "updated 3s ago"
+ *   • < 60m    → "updated 5m ago"
+ *   • ≥ 60m    → "updated 2h ago"
  *   • future   → null  (clock skew — suppress readout)
  *   • null     → null
  */
@@ -141,9 +156,9 @@ export function formatAgeAgo(ts: number | null | undefined): string | null {
   const nowSec = Math.floor(Date.now() / 1000)
   const age = nowSec - ts
   if (age < 0) return null // future timestamp — clock skew
-  if (age < 60) return `${age}s ago`
-  if (age < 3600) return `${Math.floor(age / 60)}m ago`
-  return `${Math.floor(age / 3600)}h ago`
+  if (age < 60) return `updated ${age}s ago`
+  if (age < 3600) return `updated ${Math.floor(age / 60)}m ago`
+  return `updated ${Math.floor(age / 3600)}h ago`
 }
 
 function PriceTickerImpl({
@@ -175,14 +190,36 @@ function PriceTickerImpl({
         : chartTheme.colors.muted
 
   // Spread chip color: amber when >3% (strict, matches the W39-4 spec),
-  // muted otherwise. Spread is a probability [0,1] so spread*100 = cents =
-  // percentage. (Was `>= 3` in W30-2; tightened to strict `>` per the
-  // W39-4 spec — the boundary case spread === 3¢ is now neutral.)
+  // green when tight (<1¢), muted otherwise. Spread is a probability
+  // [0,1] so spread*100 = cents = percentage. (Was `>= 3` in W30-2;
+  // tightened to strict `>` per the W39-4 spec — the boundary case
+  // spread === 3¢ is now neutral.)
+  //
+  // W49-4 — `spreadState` exposes a three-way classification
+  // ('tight' | 'normal' | 'wide') so the new visual spread bar can pick
+  // the right gradient alongside the existing colour pick.
   const spreadCents = spread != null ? spread * 100 : null
+  const spreadState: 'tight' | 'normal' | 'wide' =
+    spreadCents == null
+      ? 'normal'
+      : spreadCents > 3
+        ? 'wide'
+        : spreadCents < 1
+          ? 'tight'
+          : 'normal'
   const spreadColor =
     spreadCents != null && spreadCents > 3
       ? chartTheme.colors.warning
-      : chartTheme.colors.muted
+      : spreadCents != null && spreadCents < 1
+        ? chartTheme.colors.success
+        : chartTheme.colors.muted
+  // W49-4 — Visual bar fill width relative to a 10¢ ceiling. A 0¢ spread
+  // = empty bar; a 10¢+ spread = full bar. Lets a trader gauge the
+  // book's tightness at a glance without reading the numeric chip.
+  const spreadBarPct =
+    spreadCents != null
+      ? Math.max(2, Math.min(100, (spreadCents / 10) * 100))
+      : 0
 
   // W39-4 — Relative age of the last price update (e.g. "3s ago").
   // Computed once per render; the parent's poll cadence (1–5s for the
@@ -237,7 +274,7 @@ function PriceTickerImpl({
               color: isLive ? dirColor : chartTheme.colors.muted,
             }}
             exit={{ opacity: 0, scale: 0.9 }}
-            transition={{ duration: 0.35, ease: 'easeOut' }}
+            transition={{ duration: 0.2, ease: 'easeOut' }}
             className={`font-bold ${sizeClassMap[size]} tabular-nums`}
             style={{ fontVariantNumeric: 'tabular-nums' }}
             data-testid="price-ticker-value"
@@ -247,16 +284,43 @@ function PriceTickerImpl({
           </motion.span>
         </AnimatePresence>
 
-        {/* Spread cents chip (only when both sides known). */}
+        {/* Spread cents chip (only when both sides known).
+            W49-4 — now also renders a visual spread bar beneath the
+            numeric readout so a trader can gauge tightness at a
+            glance. The bar is part of the same `data-testid` so the
+            W30-2 `price-ticker-spread` test still resolves. The
+            numeric textContent (e.g. "4.0¢") is unchanged so the
+            existing `toContain('4.0¢')` assertion holds. */}
         {spreadCents != null && (
           <span
-            className="text-[9px] px-1 py-0.5 rounded border border-[#1f2335] bg-[#0e1015]"
+            className="text-[9px] px-1 py-0.5 rounded border border-[#1f2335] bg-[#0e1015] flex flex-col items-stretch gap-0.5 min-w-[42px]"
             style={{ color: spreadColor }}
-            title={`Bid-Ask Spread: ${spreadCents.toFixed(2)}¢`}
-            aria-label={`Spread ${spreadCents.toFixed(2)} cents`}
+            title={`Bid-Ask Spread: ${spreadCents.toFixed(2)}¢ (${spreadState})`}
+            aria-label={`Spread ${spreadCents.toFixed(2)} cents, ${spreadState}`}
             data-testid="price-ticker-spread"
+            data-spread-state={spreadState}
           >
-            {spreadCents.toFixed(1)}¢
+            <span className="text-center">
+              {spreadCents.toFixed(1)}¢
+            </span>
+            {/* Visual bar — width proportional to spread, ceiling 10¢. */}
+            <span
+              className="block h-[3px] w-full rounded-full bg-[#1f2335] overflow-hidden"
+              aria-hidden="true"
+            >
+              <span
+                className="block h-full rounded-full transition-all duration-200"
+                style={{
+                  width: `${spreadBarPct}%`,
+                  background:
+                    spreadState === 'wide'
+                      ? `linear-gradient(90deg, ${chartTheme.colors.warning}, ${chartTheme.colors.danger})`
+                      : spreadState === 'tight'
+                        ? `linear-gradient(90deg, ${chartTheme.colors.success}, ${chartTheme.colors.info})`
+                        : chartTheme.colors.muted,
+                }}
+              />
+            </span>
           </span>
         )}
       </div>

@@ -1,34 +1,53 @@
 // components/OrdersPanel.tsx — Live Working Orders & Execution Queue Panel
 //
-// W15-5 — Migrated from `useBot`'s 2-second REST polling to the hybrid
-// `useRealtimeData` hook. Subscribes to the `orders` WS channel; falls
-// back to polling /api/orders every 5s when the WS isn't connected.
-// Renders a "● Live" / "⟳ Polling" badge so the trader can tell at a
-// glance whether the working-orders list is real-time or lagged.
+// W49-5 — Operational-clarity redesign of the working-orders table.
+//   Builds on the W39-5 status-badge + fill-progress redesign and
+//   applies the W49-5 spec:
 //
-// W39-5 — Redesigned for clearer execution-state signalling:
-//   • Per-order status badge (PENDING=amber, OPEN=blue, FILLED=green,
-//     CANCELLED=gray, REJECTED=red). When the snapshot doesn't expose
-//     `order.status`, the panel derives a display status from
-//     `size_matched` / `size` (matched === size → FILLED; matched > 0 →
-//     OPEN/partial; matched === 0 → OPEN). PENDING/REJECTED/CANCELLED
-//     cannot be inferred from size alone and fall back to OPEN.
-//   • Fill % progress bar shown for every OPEN/partial order (matched > 0
-//     AND matched < size), with the numeric % label adjacent to the bar.
-//   • "Cancel" button restyled with a confirmation step. When
-//     `requireConfirmation` is true (page.tsx opts in for production),
-//     clicking Cancel opens an inline ConfirmationDialog with the order's
-//     impact summary ("Side: BUY, Price: $0.42, Size: 25 (5 filled)") +
-//     risk warning before invoking onCancel. When false (default), the
-//     click calls onCancel directly — preserves the test contract.
-//   • "Cancel All" still routed through the parent's onCancelAll callback
-//     (page.tsx shows the existing batch ConfirmationDialog for that).
-//   • Creation time rendered in relative format ("3m ago") with the
-//     absolute ISO timestamp surfaced via the title attribute for hover
-//     + screen-reader context.
+//   • Header KPI strip — surfaces Open count + Capital exposed as a
+//     visually distinct right-aligned cluster (same shape as the
+//     Positions panel's Exposure/Realized/Daily strip).
 //
-// Backwards-compat: callers MAY still pass `orders` as a prop (page.tsx
-// still threads useBot's snapshot through; existing tests pass it too).
+//   • Ghost Cancel button — replaced the previous `btn-danger` filled
+//     red Cancel button with a ghost-styled button (transparent bg,
+//     thin border, red text on hover). The spec calls for "Ghost
+//     button with confirmation" because cancellation is reversible
+//     (just re-quote); the previous filled-red style signalled
+//     "irreversible destructive" which is misleading.
+//
+//   • Cancel All — promoted to a more prominent red-tinted button
+//     ("CANCEL ALL (N)") and now supports a double-confirmation
+//     flow when `requireConfirmation=true`:
+//       1. First dialog — "Cancel all N working orders?" warning +
+//          impact summary (capital exposed + average fill rate).
+//       2. Second dialog — "Are you absolutely sure?" explicit
+//          re-confirmation + the standard "This action cannot be
+//          undone" risk warning.
+//     Default behaviour (`requireConfirmation=false`) calls
+//     `onCancelAll` directly on click — preserves the existing
+//     test contract (`expect(onCancelAll).toHaveBeenCalledTimes(1)`
+//     after a single click).
+//
+//   • Per-order Cancel — same `requireConfirmation` flow as before
+//     (W39-5): when true, the click opens an inline
+//     ConfirmationDialog; when false, calls onCancel directly.
+//     The button styling is updated to ghost per the spec.
+//
+//   • Status badges — preserved unchanged from W39-5:
+//       PENDING=amber, OPEN=blue, FILLED=green, CANCELLED=gray,
+//       REJECTED=red.
+//
+//   • Fill progress bar — preserved unchanged.
+//
+//   • Age column — preserved ("3m ago" relative format with absolute
+//     ISO timestamp via title attribute).
+//
+// W15-5 (unchanged transport) — the panel still subscribes to the
+// `orders` WS channel and falls back to polling /api/orders every 5s
+// when the WS isn't connected. "● Live" / "⟳ Polling" badge reflects
+// the actual transport state.
+//
+// Backwards-compat: callers MAY still pass `orders` as a prop.
 'use client'
 
 import { useMemo, useState, useCallback, memo } from 'react'
@@ -53,18 +72,21 @@ interface Props {
   onCancelAll?: () => void
   isRealtime?: boolean
   /**
-   * W39-5 — when true, clicking a per-order Cancel button opens an
-   * inline ConfirmationDialog before invoking onCancel. Defaults to
-   * `false` so existing tests (which assert onCancel is called directly
-   * on click) keep their behaviour. page.tsx opts in to confirmation
-   * for production safety.
+   * W39-5/W49-5 — when true, clicking a per-order Cancel button OR the
+   * Cancel All button opens an inline ConfirmationDialog before
+   * invoking the handler. Cancel All uses a double-confirmation flow
+   * (two sequential dialogs). Defaults to `false` so existing tests
+   * (which assert onCancel / onCancelAll is called directly on click)
+   * keep their behaviour. page.tsx opts in to confirmation for
+   * production safety.
    */
   requireConfirmation?: boolean
 }
 
-// W39-5 — status badge visual map. PENDING/OPEN share the working-state
-// palette but PENDING tints amber (awaiting match-engine acceptance)
-// while OPEN tints blue (resting on the book, awaiting fill).
+// W39-5/W49-5 — status badge visual map. PENDING/OPEN share the
+// working-state palette but PENDING tints amber (awaiting match-engine
+// acceptance) while OPEN tints blue (resting on the book, awaiting
+// fill).
 const STATUS_BADGE: Record<DisplayStatus, { label: string; cls: string }> = {
   PENDING:   { label: 'PENDING',   cls: 'bg-amber-500/15 text-amber-300 border-amber-500/30' },
   OPEN:      { label: 'OPEN',      cls: 'bg-blue-500/15 text-blue-300 border-blue-500/30' },
@@ -73,10 +95,10 @@ const STATUS_BADGE: Record<DisplayStatus, { label: string; cls: string }> = {
   REJECTED:  { label: 'REJECTED',  cls: 'bg-red-500/15 text-red-400 border-red-500/30' },
 }
 
-// W39-5 — derive a display status when the snapshot doesn't expose
-// `order.status`. We can only distinguish FILLED / partial-OPEN / OPEN
-// from size_matched — PENDING / REJECTED / CANCELLED require backend
-// signalling and fall back to OPEN.
+// W39-5/W49-5 — derive a display status when the snapshot doesn't
+// expose `order.status`. We can only distinguish FILLED /
+// partial-OPEN / OPEN from size_matched — PENDING / REJECTED /
+// CANCELLED require backend signalling and fall back to OPEN.
 function deriveDisplayStatus(o: Order): DisplayStatus {
   if (o.status) return o.status
   const matched = o.size_matched ?? 0
@@ -108,29 +130,58 @@ function OrdersPanel({
 
   // W41-3 — compute the data's age so we can surface a StaleIndicator
   // in the header when the snapshot is older than 30s. Skipped when
-  // the caller provides an orders override (the override doesn't expose
-  // a timestamp; the parent's snapshot freshness is its own concern).
+  // the caller provides an orders override.
   const age = useStaleAge(ordersOverride == null ? lastUpdated : null)
 
-  // W39-5 — token id of the order the trader is currently confirming a
-  // Cancel on. When non-null, the inline ConfirmationDialog renders.
+  // W39-5/W49-5 — token id of the order the trader is currently
+  // confirming a Cancel on. When non-null, the inline
+  // ConfirmationDialog renders.
   const [confirmCancelOrderId, setConfirmCancelOrderId] = useState<string | null>(null)
+
+  // W49-5 — Cancel All double-confirmation state machine.
+  //   0 = no dialog open
+  //   1 = first dialog ("Cancel all N orders?")
+  //   2 = second dialog ("Are you absolutely sure?")
+  // Default `requireConfirmation=false` keeps the state at 0 and
+  // calls onCancelAll directly on click — preserves the existing
+  // test contract (`expect(onCancelAll).toHaveBeenCalledTimes(1)`).
+  const [cancelAllStep, setCancelAllStep] = useState<0 | 1 | 2>(0)
 
   const totalOpenExposure = useMemo(() => {
     return orders.reduce((acc, o) => acc + o.price * (o.size - (o.size_matched ?? 0)), 0)
   }, [orders])
 
-  // W39-5 — the order currently pending Cancel confirmation. Looked up
-  // by order_id so the dialog can render an order-specific impact summary.
+  // W49-5 — KPI strip aggregates: open-count (non-terminal orders) +
+  // total open capital + average fill rate across the visible set.
+  // Open count is shown when at least one order is non-terminal; fill
+  // rate degrades gracefully when all orders have size_matched=0.
+  const openCount = useMemo(
+    () => orders.filter((o) => {
+      const status = deriveDisplayStatus(o)
+      return status === 'PENDING' || status === 'OPEN'
+    }).length,
+    [orders],
+  )
+  const totalSize = useMemo(() => orders.reduce((acc, o) => acc + o.size, 0), [orders])
+  const totalMatched = useMemo(
+    () => orders.reduce((acc, o) => acc + (o.size_matched ?? 0), 0),
+    [orders],
+  )
+  const avgFillPct = totalSize > 0 ? Math.round((totalMatched / totalSize) * 100) : 0
+
+  // W39-5/W49-5 — the order currently pending Cancel confirmation.
+  // Looked up by order_id so the dialog can render an order-specific
+  // impact summary.
   const confirmingOrder = useMemo(
     () => (confirmCancelOrderId ? orders.find((o) => o.order_id === confirmCancelOrderId) ?? null : null),
     [confirmCancelOrderId, orders],
   )
 
-  // W39-5 — Cancel handler. When `requireConfirmation` is true, the click
-  // opens the inline ConfirmationDialog (which then calls onCancel on
-  // confirm). When false, the click calls onCancel directly — preserves
-  // the legacy direct-call behaviour that the existing tests assert.
+  // W39-5/W49-5 — per-order Cancel handler. When
+  // `requireConfirmation` is true, the click opens the inline
+  // ConfirmationDialog (which then calls onCancel on confirm). When
+  // false, the click calls onCancel directly — preserves the legacy
+  // direct-call behaviour that the existing tests assert.
   const handleCancelClick = useCallback(
     (orderId: string) => {
       if (requireConfirmation) {
@@ -153,8 +204,39 @@ function OrdersPanel({
     setConfirmCancelOrderId(null)
   }, [])
 
-  // W39-5 — pre-compute the impact summary string for the dialog so the
-  // trader sees exactly what cancelling will do before confirming.
+  // W49-5 — Cancel All click handler. When `requireConfirmation` is
+  // true, kicks off the double-confirmation flow (step 1 → step 2 →
+  // onCancelAll). When false, calls onCancelAll directly — preserves
+  // the existing test contract.
+  const handleCancelAllClick = useCallback(() => {
+    if (requireConfirmation) {
+      setCancelAllStep(1)
+    } else {
+      onCancelAll?.()
+    }
+  }, [requireConfirmation, onCancelAll])
+
+  // W49-5 — step 1 → step 2 (the user confirmed the first warning;
+  // now show the explicit re-confirmation dialog).
+  const handleConfirmCancelAllStep1 = useCallback(() => {
+    setCancelAllStep(2)
+  }, [])
+
+  // W49-5 — step 2 → onCancelAll (the user explicitly re-confirmed;
+  // now actually invoke the batch cancel).
+  const handleConfirmCancelAllStep2 = useCallback(() => {
+    onCancelAll?.()
+    setCancelAllStep(0)
+  }, [onCancelAll])
+
+  // W49-5 — escape hatches for either step's Cancel button.
+  const handleCancelCancelAll = useCallback(() => {
+    setCancelAllStep(0)
+  }, [])
+
+  // W39-5/W49-5 — pre-compute the impact summary string for the
+  // per-order dialog so the trader sees exactly what cancelling will
+  // do before confirming.
   const confirmImpact = useMemo(() => {
     if (!confirmingOrder) return ''
     const matched = confirmingOrder.size_matched ?? 0
@@ -175,9 +257,20 @@ function OrdersPanel({
     return `Cancel the ${confirmingOrder.side} order on ${info.fullLabel}? This sends a cancel to the matching engine — the order will stop resting on the book immediately.`
   }, [confirmingOrder])
 
+  // W49-5 — Cancel All impact summary. Surfaced in the first dialog
+  // so the trader sees the aggregate blast radius before confirming.
+  const cancelAllImpact = useMemo(() => {
+    if (orders.length === 0) return ''
+    return [
+      `Orders: ${orders.length}`,
+      `Open capital: ${fmtUsd(totalOpenExposure)}`,
+      `Avg fill rate: ${avgFillPct}%`,
+    ].join(' · ')
+  }, [orders.length, totalOpenExposure, avgFillPct])
+
   return (
     <div className="card h-full flex flex-col bg-[#13161e] border border-[#1f2335] shadow-xl overflow-hidden">
-      {/* Header */}
+      {/* Header — title + KPI strip + Cancel All */}
       <div className="card-header px-3.5 py-2.5 border-b border-[#1f2335] flex items-center justify-between bg-[#0e1015]/80">
         <div className="flex items-center gap-2.5">
           <span className="card-title text-xs font-bold text-[#dde1ed] flex items-center gap-1.5">
@@ -193,16 +286,38 @@ function OrdersPanel({
               fresh (<30s) so the header doesn't accumulate noise. Skipped
               when the caller provides an orders override. */}
           {age !== null && <StaleIndicator age={age} />}
-          {orders.length > 0 && (
-            <span className="text-[10.5px] text-[#7e8aaa] mono hidden sm:inline-block">
-              Open Capital: <strong className="text-cyan-300 font-semibold">{fmtUsd(totalOpenExposure)}</strong>
-            </span>
-          )}
         </div>
+
+        {/* W49-5 — KPI strip. Two cards (Open count, Capital exposed)
+            clustered on the right side of the header. Each card has
+            the same shape as the Positions panel's KPI strip: tiny
+            uppercase label + bold color-coded value. Hidden when no
+            orders exist (avoids showing "Open: 0 / Capital: $0.00"
+            in the empty state — the empty-state placeholder already
+            communicates "nothing here"). */}
+        {orders.length > 0 && (
+          <div className="flex items-center gap-2 text-xs">
+            <div className="bg-[#0e1015] border border-[#1f2335] px-2.5 py-1 rounded-md flex items-center gap-1.5" title="Non-terminal working orders (PENDING + OPEN)">
+              <span className="text-[10px] text-[#7e8aaa] uppercase font-semibold">Open:</span>
+              <span className="mono font-bold text-blue-300 text-xs">{openCount}</span>
+              <span className="text-[9.5px] text-[#5a637a]">/ {orders.length}</span>
+            </div>
+
+            <div className="bg-[#0e1015] border border-[#1f2335] px-2.5 py-1 rounded-md flex items-center gap-1.5" title="Total capital exposed across all working orders">
+              <span className="text-[10px] text-[#7e8aaa] uppercase font-semibold">Capital:</span>
+              <span className="mono font-bold text-cyan-400 text-xs">{fmtUsd(totalOpenExposure)}</span>
+            </div>
+          </div>
+        )}
+
         <div className="flex items-center gap-2">
+          {/* W49-5 — Cancel All promoted to a prominent button. The
+              double-confirmation flow (when `requireConfirmation=true`)
+              is handled by `handleCancelAllClick` + the two
+              ConfirmationDialogs rendered at the bottom of the panel. */}
           {orders.length > 0 && onCancelAll && (
             <button
-              onClick={onCancelAll}
+              onClick={handleCancelAllClick}
               className="btn btn-danger btn-xs font-bold shadow-sm"
               aria-label="Cancel all working orders"
             >
@@ -230,8 +345,9 @@ function OrdersPanel({
       ) : (
         <div className="overflow-auto scrollbar-thin flex-1 table-container">
           {orders.length === 0 ? (
+            // W49-5 — polished empty state (larger icon, more padding).
             <div className="empty-state py-12">
-              <span className="empty-state-icon" aria-hidden="true">📋</span>
+              <span className="empty-state-icon text-4xl" aria-hidden="true">📋</span>
               <span className="empty-state-title">No working limit orders</span>
               <span className="empty-state-desc">
                 Active market making &amp; arbitrage quoting loops will place limit orders in the matching engine.
@@ -257,10 +373,9 @@ function OrdersPanel({
                   const matched = o.size_matched ?? 0
                   const fillPct = o.size > 0 ? Math.min(100, Math.round((matched / o.size) * 100)) : 0
                   const isBuy = o.side === 'BUY'
-                  // W39-5 — derive the display status (prefers backend
-                  // `o.status` when available; falls back to size-based
-                  // heuristic otherwise). Used both for the status badge
-                  // and for deciding whether to render the fill % bar.
+                  // W39-5/W49-5 — derive the display status (prefers
+                  // backend `o.status` when available; falls back to
+                  // size-based heuristic otherwise).
                   const displayStatus = deriveDisplayStatus(o)
                   const isFilled = displayStatus === 'FILLED'
                   const isCancelled = displayStatus === 'CANCELLED'
@@ -292,10 +407,7 @@ function OrdersPanel({
                         </span>
                       </td>
 
-                      {/* W39-5 — Status badge column. The badge reflects
-                          the order's lifecycle state (PENDING/OPEN/
-                          FILLED/CANCELLED/REJECTED), tinted per the
-                          STATUS_BADGE map above. */}
+                      {/* W39-5/W49-5 — Status badge column. */}
                       <td className="text-center">
                         <span
                           className={`inline-block px-2 py-0.5 rounded text-[9px] font-bold uppercase tracking-wider border ${
@@ -312,11 +424,9 @@ function OrdersPanel({
                         {fmtPrice(o.price)}
                       </td>
 
-                      {/* Fill Progress & Size — W39-5: the progress bar is
-                          rendered for any OPEN/partial order (matched > 0
-                          AND matched < size). The numeric % label sits
-                          adjacent to the bar so the trader can read it at
-                          a glance without hovering. */}
+                      {/* Fill Progress & Size — W39-5/W49-5: the
+                          progress bar is rendered for any OPEN/partial
+                          order (matched > 0 AND matched < size). */}
                       <td className="mono text-right font-medium text-[#dde1ed]">
                         <div>
                           <span>{o.size.toFixed(1)}</span>
@@ -341,17 +451,21 @@ function OrdersPanel({
                         </span>
                       </td>
 
-                      {/* W39-5 — Age in relative format ("3m ago"). The
-                          title attribute carries the absolute ISO
+                      {/* W39-5/W49-5 — Age in relative format ("3m ago").
+                          The title attribute carries the absolute ISO
                           timestamp for hover + screen-reader context. */}
                       <td className="mono text-[#7e8aaa] text-[10.5px] text-center" title={`Created: ${fmtTimeAbs(o.created_at)}`}>
                         {fmtAge(o.created_at)}
                       </td>
 
-                      {/* Action — W39-5: Cancel is hidden for terminal
+                      {/* Action — W49-5: Cancel is hidden for terminal
                           states (FILLED / CANCELLED / REJECTED) where
-                          cancellation is a no-op. For non-terminal states
-                          the button renders with destructive styling. */}
+                          cancellation is a no-op. For non-terminal
+                          states the button renders in the spec's
+                          "ghost" style — transparent bg, thin border,
+                          red text on hover — signalling that the
+                          action is reversible (just re-quote) rather
+                          than irreversibly destructive. */}
                       <td className="text-right">
                         {isTerminal ? (
                           <span className="text-[10px] text-[#3e4560] uppercase tracking-wider font-semibold" aria-label={`Order ${displayStatus.toLowerCase()} — no cancel action`}>
@@ -360,8 +474,9 @@ function OrdersPanel({
                         ) : (
                           <button
                             onClick={() => handleCancelClick(o.order_id)}
-                            className="btn btn-danger btn-xs font-bold shadow-sm hover:shadow-red-500/20"
+                            className="btn btn-ghost btn-xs font-bold border border-[#1f2335] text-[#7e8aaa] hover:text-red-300 hover:border-red-500/50 hover:bg-red-500/5 transition-colors"
                             aria-label={`Cancel order ${o.order_id}`}
+                            title="Cancel this order"
                           >
                             Cancel
                           </button>
@@ -376,20 +491,52 @@ function OrdersPanel({
         </div>
       )}
 
-      {/* W39-5 — per-order Cancel confirmation dialog. Rendered inline so
-          the panel can drive its own impact summary from the live order
-          snapshot without threading every order through the parent. */}
+      {/* W39-5/W49-5 — per-order Cancel confirmation dialog. Rendered
+          inline so the panel can drive its own impact summary from
+          the live order snapshot without threading every order through
+          the parent. */}
       <ConfirmationDialog
         open={confirmCancelOrderId !== null && confirmingOrder !== null}
         severity="warning"
         title="Cancel Order?"
         description={confirmDescription}
         impact={confirmImpact}
-        riskWarning="Cancelling a partial-fill order forfeits the resting portion of your book priority. On thin markets, re-entering at the same price may require waiting for the next quote refresh."
+        riskWarning="This action cannot be undone. Cancelling a partial-fill order forfeits the resting portion of your book priority — on thin markets, re-entering at the same price may require waiting for the next quote refresh."
         confirmLabel="✕ Cancel Order"
         cancelLabel="Keep Order"
         onConfirm={handleConfirmCancel}
         onCancel={handleCancelDialogClose}
+      />
+
+      {/* W49-5 — Cancel All double-confirmation flow. Two sequential
+          dialogs:
+            1. Warning + impact summary (N orders + capital exposed +
+               avg fill rate).
+            2. Explicit re-confirmation with the "cannot be undone"
+               risk warning. */}
+      <ConfirmationDialog
+        open={cancelAllStep === 1}
+        severity="warning"
+        title={`Cancel all ${orders.length} working orders?`}
+        description="This sends a batch cancel to the matching engine for every working order in your book. Partially-filled orders will keep their fills; only the resting (unmatched) portion is cancelled."
+        impact={cancelAllImpact}
+        riskWarning="This action cannot be undone. Re-quoting the same book may require waiting for the next strategy refresh — on volatile markets the mid may have moved by then."
+        confirmLabel="Continue"
+        cancelLabel="Keep Orders"
+        onConfirm={handleConfirmCancelAllStep1}
+        onCancel={handleCancelCancelAll}
+      />
+      <ConfirmationDialog
+        open={cancelAllStep === 2}
+        severity="danger"
+        title="Are you absolutely sure?"
+        description="This is the final confirmation. Clicking 'Cancel All' will immediately submit batch-cancellation for every resting order in your book. The fills already on the tape remain — only the resting quotes are removed."
+        impact={cancelAllImpact}
+        riskWarning="This action cannot be undone. After cancellation, your strategies will resume quoting on the next tick (typically 1–5 seconds). During that gap you have zero market presence."
+        confirmLabel="✕ Cancel All Orders"
+        cancelLabel="Back"
+        onConfirm={handleConfirmCancelAllStep2}
+        onCancel={handleCancelCancelAll}
       />
     </div>
   )
@@ -399,6 +546,6 @@ function OrdersPanel({
 // are reference-compared. `onCancel` / `onCancelAll` MUST be stable in the
 // parent for memo to skip renders.
 //
-// W39-5 — `requireConfirmation` is a primitive boolean, diffed inline so
-// the parent flipping the preference re-renders the panel.
+// W39-5/W49-5 — `requireConfirmation` is a primitive boolean, diffed
+// inline so the parent flipping the preference re-renders the panel.
 export default memo(OrdersPanel)
